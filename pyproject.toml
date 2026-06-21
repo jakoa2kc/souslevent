@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sillage"
+version = "0.0.1"
+description = "Leeward turbulence / rotor mapping for mountain paragliding (two-pass: WindNinja mass screening + momentum detail)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "TBD" }
+authors = [{ name = "Sillage developer" }]
+keywords = ["paragliding", "wind", "cfd", "windninja", "openfoam", "terrain", "mountain", "rotor"]
+
+dependencies = [
+  "numpy>=1.26",
+  "scipy>=1.11",
+  "rasterio>=1.3",   # DEM IO (GDAL-backed)
+  "pyproj>=3.6",     # reprojection to UTM north-up
+  "requests>=2.31",  # weather APIs (Open-Meteo / AROME)
+  "pyvista>=0.43",   # OpenFOAM case reading + 3D rendering (VTK-backed)
+  "matplotlib>=3.8", # first-pass 2D screening map
+  "click>=8.1",      # CLI for demo scripts
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+# Optional integrations, added as they land:
+# arome = []      # Meteo-France AROME client deps
+# era5  = ["cdsapi>=0.6"]  # reanalysis validation/hindcast
+
+[project.scripts]
+sillage-pass1 = "scripts.demo_pass1:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

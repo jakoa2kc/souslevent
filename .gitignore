@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# Env / secrets
+.env
+
+# Project caches & outputs
+cache/
+outputs/
+*.tif
+*.asc
+*.vtk
+*.vtu
+*.vtp
+# OpenFOAM temp cases
+**/processor*/
+**/postProcessing/
+log.*
+
+# Editor
+.vscode/
+.idea/
