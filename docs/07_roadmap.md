@@ -42,11 +42,14 @@ Pass 2; Docker stays a *scale* option for M4 batch only). Remaining polish: clea
 streamlines, terrain-vs-volume opacity. Next: M3 click-to-detail handoff.
 
 ## M3 — Wire the handoff (Pass 1 → Pass 2)
-- [ ] Read crest-height upstream wind from the Pass-1 field at a candidate.
-- [ ] Click a hotspot in `map2d` → build `(feature_bbox+buffer, hour, wind)` → queue a
-      momentum run → show the 3D scene.
-- [ ] Buffer heuristics (upstream fetch, downwind margin) tuned so eddies aren't truncated.
-**Definition of done:** click-to-detail works for one area across a few hours.
+- [~] Read crest-height upstream wind from the Pass-1 field at a candidate. *(Interim: the
+      handoff uses the controls' domain wind; upstream-crest sampling is the next refinement.)*
+- [x] Click a hotspot in `map2d` → crop+buffer → queue a momentum run (worker) → show the
+      3D scene. Implemented in the IHM (`on_map_click` → `SolveJob` → 3D tab). ✔
+- [~] Buffer heuristics. *(Interim: centered ±2.5 km window; asymmetric downwind margin so
+      big rotors aren't truncated is TODO.)*
+**Definition of done:** click-to-detail works for one area across a few hours. *(Single-wind
+click-to-detail works end to end; multi-hour + upstream wind are the remaining refinements.)*
 
 ## M4 — Robust hourly batch + spatial wind input
 - [ ] Full hourly loop over a flight window; caching of DEM + forecasts for reproducibility.
@@ -80,8 +83,9 @@ The "real software" surface. Built incrementally; adapt as results come in.
 - [x] Worker thread for long solves (WindNinja mass/momentum): progress + cancel
       (`app/jobs.py` SolveJob; streaming runner in `flow/windninja`). ✔ slice 2
 - [ ] Hourly time slider + AROME sub-zone Pass-1 (ADR-0007) wired into the 2D tab.
-- [ ] Click-on-map hotspot → crop+buffer → launch Pass-2 → show 3D (the M3 handoff).
+- [x] Click-on-map hotspot → crop+buffer → launch Pass-2 → show 3D (the M3 handoff). ✔ slice 3
 - [ ] Mesh quality/time knob (ADR-0008) in the Pass-2 controls.
+- [ ] Upstream-crest wind sampling from the Pass-1 field for the Pass-2 BC.
 **Definition of done:** browse screening by hour, click a hotspot, get the 3D rotor — one app.
 
 ## Later / research

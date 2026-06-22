@@ -217,6 +217,30 @@ to launch the momentum solve and show the 3D rotor.
 
 ---
 
+## Entry 9 — IHM slice 3: click-to-detail handoff (M3)  (2026-06-21)
+
+**What changed.** Left-clicking a hotspot on the Pass-1 map now launches a Pass-2 momentum
+solve there: `on_map_click` → `crop_dem` (±2.5 km window) → `run_momentum` via the slice-2
+`SolveJob` (progress + cancel) → load the OpenFOAM case into the embedded 3D viewport and
+switch to the Pass-2 tab. The picked spot is starred on the map. Guards: ignores pan/zoom
+clicks, requires a Pass-1 map first, one job at a time, and confirms before the multi-minute
+solve.
+
+**Why.** This is the core experience — triage in 2D, then resolve the actual rotor in 3D on
+demand — and the payoff of the worker-thread foundation.
+
+**Result.** Verified headless end-to-end (reduced mesh for speed): click coords → crop →
+momentum through the worker (33 progress samples → 99%) → located the
+`NINJAFOAM_ihm_crop_*` case and returned it with the wind. The embedded 3D render needs a
+real GL context (proven separately on the real case). Tests: 26 passed.
+
+**Interim choices / open questions.** Pass-2 wind currently = the controls' domain wind
+(upstream-crest sampling from the Pass-1 field is the next refinement); crop is a centered
+square (asymmetric downwind margin TODO); mesh fixed at 50k (ADR-0008 quality/time knob is
+the next IHM slice).
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

@@ -23,14 +23,19 @@ from matplotlib.backends.backend_qtagg import (
 from matplotlib.figure import Figure
 
 from ..config import load_config, resolve_cache_path
-from ..flow.windninja import locate_openfoam_case
+from ..flow.windninja import locate_openfoam_case, run_momentum
 from ..screening import indicator as ind
 from ..screening.pass1 import hourly_indicator
-from ..terrain.dem import load_dem
+from ..terrain.dem import crop_dem, load_dem, write_dem
 from ..viz import map2d, volume3d
 from .jobs import SolveJob
 
 DEFAULT_DEM = "cache/champsaur/ign/champsaur_rgealti_50m_prepared_utm.tif"
+
+# Pass-2 click-to-detail defaults (the ADR-0008 mesh quality/time knob comes next slice).
+PASS2_HALF_WIDTH_M = 2500.0  # ~5 km feature window around the clicked hotspot
+PASS2_MESH_COUNT = 50_000    # modest mesh for interactive click-to-detail
+PASS2_ITERATIONS = 200
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -107,8 +112,15 @@ class MainWindow(QtWidgets.QMainWindow):
         lay = QtWidgets.QVBoxLayout(w)
         self.fig = Figure(figsize=(6, 5))
         self.canvas = FigureCanvasQTAgg(self.fig)
-        lay.addWidget(NavigationToolbar2QT(self.canvas, w))
+        self.nav = NavigationToolbar2QT(self.canvas, w)
+        lay.addWidget(self.nav)
         lay.addWidget(self.canvas)
+        hint = QtWidgets.QLabel(
+            "Tip: left-click a hotspot on the map to launch a Pass-2 momentum solve there."
+        )
+        hint.setStyleSheet("color: #555;")
+        lay.addWidget(hint)
+        self.canvas.mpl_connect("button_press_event", self.on_map_click)
         return w
 
     def _build_pass2_tab(self) -> QtWidgets.QWidget:
@@ -245,6 +257,85 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self._finish_job("Run failed")
             QtWidgets.QMessageBox.critical(self, "WindNinja error", msg)
+
+    # --- M3 handoff: click a Pass-1 hotspot -> Pass-2 momentum -> 3D --------------
+    def on_map_click(self, event) -> None:
+        """Left-click on the 2D map launches a Pass-2 momentum solve at that feature."""
+        if event.inaxes is None or event.xdata is None or event.button != 1:
+            return
+        if getattr(self.nav, "mode", ""):  # pan/zoom tool active -> not a hotspot pick
+            return
+        if self._dem is None:
+            self.statusBar().showMessage("Compute a Pass-1 map first, then click a hotspot.")
+            return
+        if self._job is not None:
+            return
+
+        x, y = float(event.xdata), float(event.ydata)
+        resp = QtWidgets.QMessageBox.question(
+            self, "Launch Pass-2",
+            f"Run a momentum solve around ({x:.0f}, {y:.0f})?\n\n"
+            f"~{PASS2_HALF_WIDTH_M * 2 / 1000:.0f} km window, mesh {PASS2_MESH_COUNT}, "
+            f"wind {self.wind_spd.value():.0f} m/s from {self.wind_dir.value():.0f}°.\n"
+            "This can take a couple of minutes.",
+        )
+        if resp != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+
+        if self.fig.axes:  # mark the picked spot on the map
+            self.fig.axes[0].plot(
+                x, y, marker="*", markersize=15, color="cyan", markeredgecolor="k"
+            )
+            self.canvas.draw_idle()
+        self._launch_pass2_at(x, y)
+
+    def _launch_pass2_at(self, x: float, y: float) -> None:
+        cfg = self.cfg
+        dem = self._dem
+        wind_dir = self.wind_dir.value()
+        wind_spd = self.wind_spd.value()
+        cli = cfg.windninja_cli
+        half_m = PASS2_HALF_WIDTH_M
+        pass2_dir = cfg.cache_dir / "champsaur" / "pass2"
+
+        def fn(on_progress, cancel):  # worker thread — no Qt here
+            crop = crop_dem(dem, x, y, half_m)
+            crop_path = pass2_dir / f"ihm_crop_{x:.0f}_{y:.0f}_{2 * half_m:.0f}m.tif"
+            write_dem(crop, crop_path)
+            run = run_momentum(
+                cli=cli, dem_path=str(crop_path), working_dir=str(pass2_dir / "ihm_run"),
+                wind_speed_ms=wind_spd, wind_from_deg=wind_dir,
+                mesh_count=PASS2_MESH_COUNT, iterations=PASS2_ITERATIONS,
+                on_progress=on_progress, cancel=cancel,
+            )
+            if run.returncode not in (0, None):
+                raise RuntimeError(
+                    f"momentum failed rc={run.returncode}\n{run.stdout[-800:]}"
+                )
+            if run.openfoam_case_dir is None:
+                raise RuntimeError("momentum ran but no OpenFOAM case was located")
+            return str(run.openfoam_case_dir), wind_dir, (x, y)
+
+        self._cancelling = False
+        self._set_running(True, f"Pass-2 momentum at ({x:.0f}, {y:.0f})…")
+        job = SolveJob(fn, self)
+        job.progress.connect(self._on_job_progress)
+        job.finished.connect(self._on_pass2_finished)
+        job.failed.connect(self._on_job_failed)
+        self._job = job
+        job.start()
+
+    def _on_pass2_finished(self, result) -> None:
+        case_dir, wind_dir, xy = result
+        if not self._ensure_plotter():
+            self._finish_job("3D viewport unavailable")
+            return
+        mfd = volume3d.mean_flow_vector(wind_dir)
+        self.plotter.clear()
+        volume3d.populate_plotter(self.plotter, case_dir, mfd, show_turbulence=False)
+        self.plotter.reset_camera()
+        self.tabs.setCurrentWidget(self._p2_widget)
+        self._finish_job(f"Pass-2 rotor at ({xy[0]:.0f}, {xy[1]:.0f})")
 
     def on_load_pass2(self) -> None:
         case = self.case_edit.text().strip()
