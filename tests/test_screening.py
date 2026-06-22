@@ -13,9 +13,12 @@ pytest.importorskip("scipy")
 from rasterio.transform import from_origin  # noqa: E402
 from rasterio.crs import CRS  # noqa: E402
 
+import sys  # noqa: E402
+
 from sillage.terrain.dem import Dem  # noqa: E402
 from sillage.screening import indicator as ind  # noqa: E402
 from sillage.flow.windninja import run_mass, run_momentum, FLAG  # noqa: E402
+from sillage.flow import windninja as wn  # noqa: E402
 
 
 def _synthetic_ridge(n: int = 64, res_m: float = 30.0) -> Dem:
@@ -76,6 +79,43 @@ def test_run_momentum_dry_run_sets_momentum_and_turbulence():
     assert "--vegetation=grass" in cmd
     # momentum solver must use domain-average init (no weather-model/point init)
     assert "domainAverageInitialization" in cmd
+
+
+def test_parse_progress():
+    assert wn._parse_progress("Run 0: (solver) 36% complete...") == 36
+    assert wn._parse_progress("no percentage here") is None
+
+
+def test_run_streams_progress_and_captures_output(tmp_path):
+    code = (
+        "import sys\n"
+        "for p in (10, 50, 100):\n"
+        "    print(f'(solver) {p}% complete', flush=True)\n"
+        "print('Run number 0 done!', flush=True)\n"
+    )
+    seen: list[int] = []
+    rc, out, err = wn._run([sys.executable, "-c", code], tmp_path, dry_run=False,
+                           on_progress=lambda pct, msg: seen.append(pct))
+    assert rc == 0
+    assert seen == [10, 50, 100]
+    assert "Run number 0 done!" in out
+
+
+def test_run_cancel_terminates(tmp_path):
+    code = (
+        "import time\n"
+        "for i in range(100000):\n"
+        "    print(f'{i % 100}% complete', flush=True)\n"
+        "    time.sleep(0.02)\n"
+    )
+    state = {"n": 0}
+    rc, out, err = wn._run(
+        [sys.executable, "-c", code], tmp_path, dry_run=False,
+        on_progress=lambda pct, msg: state.__setitem__("n", state["n"] + 1),
+        cancel=lambda: state["n"] >= 1,
+    )
+    assert state["n"] >= 1
+    assert "[cancelled by user]" in err
 
 
 

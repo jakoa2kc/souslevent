@@ -58,28 +58,22 @@ def _seed_streamlines(mesh, mean_flow_dir: np.ndarray, n_points: int = 200):
         return None
 
 
-def build_scene(
+def populate_plotter(
+    plotter,
     case_dir: str,
     mean_flow_dir: np.ndarray,
     show_streamlines: bool = True,
     show_reversed_flow: bool = True,
     show_turbulence: bool = False,
     turbulence_threshold: float = 0.2,
-    off_screen: bool = False,
 ):
-    """Assemble a PyVista plotter for one Pass-2 feature. Returns the Plotter.
+    """Add the Pass-2 scene (terrain + volumes + streamlines) to an EXISTING plotter.
 
-    Parameters
-    ----------
-    case_dir : OpenFOAM case directory from a momentum run (flow/windninja.run_momentum).
-    mean_flow_dir : reference mean-flow unit vector (where the wind blows TO), used to
-        define "reversed" flow.
-    off_screen : build without a window (for save_png / headless environments).
+    Works with both a standalone ``pyvista.Plotter`` and an embedded
+    ``pyvistaqt.QtInteractor`` (the IHM, ADR-0009), so the scene-building logic lives in one
+    place. Returns the same plotter.
     """
-    import pyvista as pv
-
     mesh = ofr.read_case(case_dir)
-    plotter = pv.Plotter(off_screen=off_screen)
     labelled = False
 
     # Terrain surface: the STL ground NinjaFOAM derived from the DEM (lower boundary).
@@ -120,6 +114,29 @@ def build_scene(
         plotter.add_legend()
     plotter.view_isometric()
     return plotter
+
+
+def build_scene(
+    case_dir: str,
+    mean_flow_dir: np.ndarray,
+    show_streamlines: bool = True,
+    show_reversed_flow: bool = True,
+    show_turbulence: bool = False,
+    turbulence_threshold: float = 0.2,
+    off_screen: bool = False,
+):
+    """Assemble a standalone PyVista plotter for one Pass-2 feature. Returns the Plotter.
+
+    For the embedded IHM viewport, call ``populate_plotter`` on a QtInteractor instead.
+    """
+    import pyvista as pv
+
+    plotter = pv.Plotter(off_screen=off_screen)
+    return populate_plotter(
+        plotter, case_dir, mean_flow_dir,
+        show_streamlines=show_streamlines, show_reversed_flow=show_reversed_flow,
+        show_turbulence=show_turbulence, turbulence_threshold=turbulence_threshold,
+    )
 
 
 def save_png(

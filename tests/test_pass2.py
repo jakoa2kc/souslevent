@@ -104,3 +104,27 @@ def test_read_terrain_stl_absent_and_present(tmp_path):
     pv.Plane().save(str(tri / "ground.stl"))
     surf = read_terrain_stl(tmp_path)
     assert surf is not None and surf.n_points > 0
+
+
+def test_draw_indicator_on_axes():
+    import matplotlib.pyplot as plt
+    from sillage.viz.map2d import draw_indicator
+
+    dem = _synthetic_dem(n=40, res_m=50.0)
+    haz = np.random.default_rng(0).random(dem.shape)
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+    im = draw_indicator(ax, dem, haz)  # same rendering the IHM canvas uses
+    assert im is not None
+    plt.close(fig)
+
+
+def test_volume3d_public_api():
+    from sillage.viz import volume3d  # refactor keeps both entry points
+
+    assert hasattr(volume3d, "populate_plotter") and hasattr(volume3d, "build_scene")
+
+
+def test_gui_module_imports():
+    pytest.importorskip("PySide6")  # only when the gui extra is installed
+    from sillage.app.main_window import MainWindow  # noqa: F401

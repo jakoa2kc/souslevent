@@ -67,11 +67,15 @@ def hourly_indicator(
     vegetation: str = "grass",
     edge_buffer_m: float = 1500.0,
     force_run: bool = False,
+    on_progress=None,
+    cancel=None,
 ) -> tuple[np.ndarray, Path]:
     """Compute the masked Pass-1 hazard indicator for ONE hour's domain-average wind.
 
     Reuses an existing ``*_vel.asc`` in ``work_dir`` unless ``force_run`` is set; otherwise
-    runs the WindNinja mass solver. Returns (indicator_on_dem_grid, speed_grid_path).
+    runs the WindNinja mass solver. ``on_progress``/``cancel`` are forwarded to the solver
+    so the IHM worker thread can report progress and cancel (ADR-0009). Returns
+    (indicator_on_dem_grid, speed_grid_path).
     """
     work_dir = Path(work_dir)
     speed_path = find_speed_grid(work_dir)
@@ -84,6 +88,8 @@ def hourly_indicator(
             wind_from_deg=wind_from_deg,
             output_resolution_m=resolution_m,
             vegetation=vegetation,
+            on_progress=on_progress,
+            cancel=cancel,
         )
         if run.returncode not in (0, None):
             raise RuntimeError(

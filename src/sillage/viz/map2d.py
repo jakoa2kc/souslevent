@@ -30,6 +30,15 @@ class HotspotClick:
     bbox_m: tuple[float, float, float, float]  # buffered (left, bottom, right, top)
 
 
+def draw_indicator(ax, dem: Dem, indicator: np.ndarray):
+    """Draw hillshade + hazard overlay onto an EXISTING Axes; returns the overlay image.
+
+    Lets the embedded IHM canvas (ADR-0009) reuse the exact same rendering as the
+    standalone figures, so the 2D map looks identical in-app and in saved PNGs.
+    """
+    return _draw_base(ax, dem, np.asarray(indicator, dtype="float64"))
+
+
 def show_static(dem: Dem, indicator: np.ndarray, title: str = "Sillage — screening"):
     """Render a single-hour hazard map over the DEM hillshade. Returns the Figure.
 

@@ -171,6 +171,52 @@ full gridded `wxModel` init (M4/M5) supersedes ADR-0007.
 
 ---
 
+## Entry 7 — IHM kickoff: PySide6 desktop shell (slice 1)  (2026-06-21)
+
+**What changed.** Locked the UI framework (**ADR-0009**: PySide6 + pyvistaqt) and scaffolded
+the desktop app: `src/sillage/app/main_window.py` + `scripts/sillage_gui.py` (`sillage-gui`
+entry). First vertical slice: a controls panel + two tabs — **Pass-1 screening** (embedded
+matplotlib canvas) and **Pass-2 detail** (embedded pyvistaqt `QtInteractor`). Refactored
+`viz.volume3d` (`populate_plotter`) and `viz.map2d` (`draw_indicator`) so the app reuses the
+*exact* headless rendering rather than duplicating it.
+
+**Why.** Begin the "real software with IHM" phase; iterate on results (user's call).
+
+**Result.** Window builds headless (`QT_QPA_PLATFORM=offscreen`); "Compute Pass-1
+(geometry)" loads the real Champsaur DEM (775×824) and draws the hazard map in the embedded
+canvas. The **3D viewport needs a real GL context** (VTK fails to get a pixel format under
+offscreen), so it is created **lazily** on first Pass-2 use — verified on the workstation,
+not in headless CI. GUI deps isolated in the `[gui]` extra. Tests: 23 passed.
+
+**Open questions raised.** Worker-thread/job model for the long WindNinja/OpenFOAM solves
+(progress + cancel) — next increment. Then the click-on-map → launch Pass-2 handoff (M3),
+the hourly slider in-app, and the ADR-0008 mesh knob in the Pass-2 controls.
+
+---
+
+## Entry 8 — IHM slice 2: worker thread for solves (progress + cancel)  (2026-06-21)
+
+**What changed.** Long WindNinja solves now run **off the UI thread**. `flow.windninja._run`
+gained a streaming `Popen` path (parses `% complete`, cooperative **cancel** via subprocess
+terminate/kill); `run_mass`/`run_momentum`/`hourly_indicator` forward `on_progress`/`cancel`
+(default `None` → unchanged blocking path, so the verified momentum smoke is untouched). New
+`src/sillage/app/jobs.py` `SolveJob` (worker `QObject` moved to a `QThread`, signals
+`progress`/`finished`/`failed`). `MainWindow` gained a **Run WindNinja mass** button, a
+**progress bar**, and a **Cancel** button; the map renders on completion.
+
+**Why.** A multi-minute momentum solve (and even a mass run) must not freeze the IHM.
+
+**Result.** Verified headless: `SolveJob` delivers progress → finished, and cancel → failed
+with a "cancelled" message; a **real** WindNinja mass run driven through the worker reached
+100%, rendered the hazard map, and re-enabled the buttons. Tests: 26 passed (added
+`_parse_progress`, streamed-progress capture, and cancel-terminates).
+
+**Open questions raised.** Next IHM slices: hourly time slider + AROME sub-zones (ADR-0007)
+in the 2D tab; then the **click-on-map → Pass-2 handoff (M3)**, reusing the same `SolveJob`
+to launch the momentum solve and show the 3D rotor.
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

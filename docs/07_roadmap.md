@@ -72,6 +72,18 @@ valley-to-valley wind differentiation.
       medium, "refine to max" on doubt; bounded by a cost estimator.
 - [ ] Performance: concurrent hourly mass runs (CPU cores); GPU-accelerated rendering.
 
+## M7 — Desktop IHM (PySide6, ADR-0009)
+The "real software" surface. Built incrementally; adapt as results come in.
+- [x] App shell: controls + Pass-1 (2D matplotlib) / Pass-2 (3D pyvistaqt) tabs;
+      `sillage-gui` entry. Reuses headless rendering (`map2d.draw_indicator`,
+      `volume3d.populate_plotter`); 3D viewport created lazily (needs a GL context). ✔ slice 1
+- [x] Worker thread for long solves (WindNinja mass/momentum): progress + cancel
+      (`app/jobs.py` SolveJob; streaming runner in `flow/windninja`). ✔ slice 2
+- [ ] Hourly time slider + AROME sub-zone Pass-1 (ADR-0007) wired into the 2D tab.
+- [ ] Click-on-map hotspot → crop+buffer → launch Pass-2 → show 3D (the M3 handoff).
+- [ ] Mesh quality/time knob (ADR-0008) in the Pass-2 controls.
+**Definition of done:** browse screening by hour, click a hotspot, get the 3D rotor — one app.
+
 ## Later / research
 - Humidity & latent effects; lee-wave structure; validation/hindcast against known flying
   days via ERA5; possible mobile/web consultation surface (Cesium/deck.gl) on top of the

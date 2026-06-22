@@ -18,9 +18,19 @@ wrapper is testable without the binary installed.
 
 from __future__ import annotations
 
+import re
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# WindNinja prints phase progress like "Run 0: (solver) 36% complete...".
+_PROGRESS_RE = re.compile(r"(\d+)\s*%\s*complete", re.IGNORECASE)
+
+
+def _parse_progress(line: str) -> int | None:
+    m = _PROGRESS_RE.search(line)
+    return int(m.group(1)) if m else None
 
 
 # --- Centralized CLI flag names (verify against installed version) ---
@@ -49,11 +59,58 @@ class WindNinjaRun:
     openfoam_case_dir: Path | None = None  # set for momentum runs once located
 
 
-def _run(cmd: list[str], cwd: Path, dry_run: bool) -> tuple[int | None, str, str]:
+def _run(cmd, cwd, dry_run, on_progress=None, cancel=None):
+    """Execute a WindNinja command. Returns (returncode, stdout, stderr).
+
+    With no callbacks this is a plain blocking ``subprocess.run`` (unchanged behavior).
+    If ``on_progress`` or ``cancel`` is given, switch to a streaming ``Popen`` that parses
+    ``% complete`` lines for progress and terminates the subprocess when ``cancel()`` turns
+    True — this is what the IHM worker thread uses to stay responsive (ADR-0009).
+    """
     if dry_run:
         return None, "", ""
-    proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
-    return proc.returncode, proc.stdout, proc.stderr
+    if on_progress is None and cancel is None:
+        proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
+        return proc.returncode, proc.stdout, proc.stderr
+
+    popen = subprocess.Popen(
+        cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, bufsize=1,
+    )
+    err_chunks: list[str] = []
+
+    def _drain_err():
+        assert popen.stderr is not None
+        for line in popen.stderr:
+            err_chunks.append(line)
+
+    et = threading.Thread(target=_drain_err, daemon=True)
+    et.start()
+
+    out_chunks: list[str] = []
+    cancelled = False
+    assert popen.stdout is not None
+    for line in popen.stdout:
+        out_chunks.append(line)
+        if on_progress is not None:
+            pct = _parse_progress(line)
+            if pct is not None:
+                on_progress(pct, line.strip())
+        if cancel is not None and cancel():
+            cancelled = True
+            popen.terminate()
+            try:
+                popen.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                popen.kill()
+            break
+
+    rc = popen.wait()
+    et.join(timeout=2)
+    err = "".join(err_chunks)
+    if cancelled:
+        err = (err + "\n[cancelled by user]").strip()
+    return rc, "".join(out_chunks), err
 
 
 def run_mass(
@@ -68,6 +125,8 @@ def run_mass(
     vegetation: str = "grass",
     weather_model_init: dict | None = None,
     dry_run: bool = False,
+    on_progress=None,
+    cancel=None,
 ) -> WindNinjaRun:
     """Pass 1: conservation-of-mass solver.
 
@@ -119,7 +178,7 @@ def run_mass(
         f"--output_path={wd}",
     ]
 
-    rc, out, err = _run(cmd, wd, dry_run)
+    rc, out, err = _run(cmd, wd, dry_run, on_progress=on_progress, cancel=cancel)
     run = WindNinjaRun(command=cmd, working_dir=wd, returncode=rc, stdout=out, stderr=err)
     if not dry_run:
         run.output_paths = sorted(wd.glob("*.asc"))
@@ -139,6 +198,8 @@ def run_momentum(
     turbulence_output: bool = True,
     vegetation: str = "grass",
     dry_run: bool = False,
+    on_progress=None,
+    cancel=None,
 ) -> WindNinjaRun:
     """Pass 2: momentum solver (NinjaFOAM / OpenFOAM RANS).
 
@@ -178,7 +239,7 @@ def run_momentum(
         f"--output_path={wd}",
     ]
 
-    rc, out, err = _run(cmd, wd, dry_run)
+    rc, out, err = _run(cmd, wd, dry_run, on_progress=on_progress, cancel=cancel)
     run = WindNinjaRun(command=cmd, working_dir=wd, returncode=rc, stdout=out, stderr=err)
     if not dry_run:
         run.openfoam_case_dir = locate_openfoam_case(

@@ -202,6 +202,40 @@ the finest practical resolution when a zone is in doubt. Refinement targets
 
 ---
 
+## ADR-0009 — IHM is a PySide6 desktop app embedding matplotlib (2D) + pyvistaqt (3D)
+
+**Status:** accepted — **resolves the ADR-0006 "UI toolkit" open question**.
+
+**Context.** V0 backend is done (Pass-1 hourly screening + Pass-2 3D recirculation, both
+native on Windows). The "real software with GUI" phase needs a UI framework. The compute
+(WindNinja mass + OpenFOAM momentum) is **heavy and local**; the existing stack is
+**matplotlib** (2D map) + **PyVista/VTK** (3D). The core workflow is interactive: browse a
+time-sliderable 2D screening map → click a hotspot → launch a local momentum solve →
+inspect the resolved 3D rotor.
+
+**Decision.** Build a **native desktop app in PySide6** (Qt for Python), embedding:
+- the **2D screening map** via matplotlib's Qt canvas (`FigureCanvasQTAgg`),
+- the **3D detail scene** via **pyvistaqt**'s `QtInteractor` (interactive VTK viewport),
+in one window with a controls panel. Long solves run **off the UI thread** (QThread/worker;
+cost governed by the ADR-0008 mesh knob). Package under `src/sillage/app/`, launched by
+`scripts/sillage_gui.py` (and a `gui` optional-dependency extra).
+
+**Rationale.** First-class Qt embedding for *both* libraries we already use; handles heavy
+local compute and the click-to-detail loop natively; no server/browser indirection. A
+web/mobile **consultation** surface (deck.gl/Cesium) stays possible **later** as a layer on
+top of the Python core (roadmap *Later/research*), not now.
+
+**Consequences.**
+- New deps: **PySide6**, **pyvistaqt** (+ qtpy). Isolated in a `gui` extra so headless/CI
+  installs stay lean.
+- Need a **job/worker model** for non-blocking solves (progress + cancel).
+- 3D rendering needs an **OpenGL context** — fine on the workstation; headless CI can only
+  test the non-GL parts.
+- Keep Pass-1 (2D triage) and Pass-2 (3D detail) as **distinct panels** (ADR-0005) — do not
+  blend them into one view.
+
+---
+
 ## Open questions tracked as future ADRs
 
 - **Stability / diurnal winds on the momentum solver.** Available on the mass solver
@@ -213,5 +247,5 @@ the finest practical resolution when a zone is in doubt. Refinement targets
   Docker/Katana + `wgrib2`). Tied to the batch-engine question below.
 - **Batch engine choice for the hourly loop** — native `WindNinja_cli` subprocess vs the
   Docker/Katana packaging. Decide once Pass-1 volumes/time-ranges are real.
-- **2D map / UI toolkit** — matplotlib for the first map vs a richer Qt/web stack as the
-  app grows. (Note: the mesh quality/time knob itself is decided — ADR-0008.)
+- ~~**2D map / UI toolkit**~~ — **resolved by ADR-0009** (PySide6 desktop embedding
+  matplotlib + pyvistaqt). A web/mobile consultation surface stays a *later* layer.
