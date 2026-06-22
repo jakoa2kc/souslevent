@@ -16,21 +16,30 @@ Prove the whole screening chain on **one known relief**.
 - [ ] `flow/windninja.py`: `run_mass(...)` shelling out to `WindNinja_cli`, ASCII u,v out.
 - [ ] `screening/indicator.py`: combine geometry + velocity deficit + empirical rules →
       normalized hazard indicator + ranked candidates.
-- [ ] `viz/map2d.py`: 2D hazard map (single hour first, then the **time slider**).
-- [ ] `scripts/demo_pass1.py`: runs the above on the chosen relief.
+- [x] `viz/map2d.py`: 2D hazard map (single hour + **time slider** + animated GIF). ✔
+- [x] `scripts/demo_pass1.py`: runs the above; `scripts/champsaur_pass1_hourly.py` adds the
+      hourly loop on the Champsaur IGN DEM. ✔
 **Definition of done:** a 2D, time-sliderable hazard map over a real area, from a real
 DEM and real (or stubbed) hourly winds — *useful even with zero momentum runs*.
 
 ## M2 — Pass-2 single run + 3D view
 Prove the detailed branch on **one feature/hour**.
-- [ ] `flow/windninja.py`: `run_momentum(...)` (crop+buffer DEM, domain-average wind,
-      `momentum_flag`, `turbulence_output_flag`, `mesh_count`, iterations).
-- [ ] Capture/record the **OpenFOAM case directory** path for the run.
-- [ ] `flow/openfoam_reader.py`: read the case via PyVista → 3D field.
-- [ ] `viz/volume3d.py`: terrain + streamlines + **reversed-flow** and/or
-      **turbulence-intensity** volumes (windward green / leeward red-orange).
-- [ ] `scripts/demo_pass2_single.py`.
-**Definition of done:** a real 3D recirculation volume for a hand-picked arête + wind.
+- [x] `flow/windninja.py`: `run_momentum(...)` (crop+buffer DEM, domain-average wind,
+      `momentum_flag`, `turbulence_output_flag`, `mesh_count`, iterations). **Runs NATIVELY
+      on Windows** (WindNinja 3.12); needs `write_goog_output` with turbulence. ✔
+- [x] Capture/record the **OpenFOAM case directory** path for the run. `locate_openfoam_case`
+      finds the `NINJAFOAM_*` dir written next to the DEM. ✔
+- [x] `flow/openfoam_reader.py`: read the case via PyVista → 3D field. Verified on a real
+      case (65k cells; U/k/epsilon/nut; ~26% reversed-flow cells). ✔
+- [x] `viz/volume3d.py`: terrain (STL) + reversed-flow + turbulence-intensity volumes +
+      best-effort streamlines; interactive `show` and headless `save_png`. ✔
+- [x] `scripts/demo_pass2_single.py` end-to-end (+ `scripts/pass2_smoke_test.py` for the
+      solver smoke test). ✔
+**Definition of done:** a real 3D recirculation volume for a hand-picked arête + wind. **✔
+MET (2026-06-21)** — headless PNG of the Champsaur candidate shows the lee rotor volume.
+**De-risked:** solver + case-read + 3D render all work natively on Windows (no Docker for
+Pass 2; Docker stays a *scale* option for M4 batch only). Remaining polish: clearer
+streamlines, terrain-vs-volume opacity. Next: M3 click-to-detail handoff.
 
 ## M3 — Wire the handoff (Pass 1 → Pass 2)
 - [ ] Read crest-height upstream wind from the Pass-1 field at a candidate.

@@ -49,6 +49,9 @@ Names as they appear in the WindNinja CLI:
 - `write_vtk_output` — **caution:** for momentum runs this writes the **mass-solver
   mesh**, *not* the full OpenFOAM field. **Do not** use it for the 3D recirculation; read
   the OpenFOAM **case directory** instead (ADR-0004).
+- `output_speed_units` — force `mps`; WindNinja defaults to `mph`, which silently corrupts downstream m/s assumptions if left unset.
+- `vegetation` — required by WindNinja (`grass`, `brush`, `trees`); Sillage defaults to `grass` for first-pass mountain runs until land-cover data is introduced.
+- `mesh_resolution` / `mesh_choice` — required for mass runs; Sillage sets `mesh_resolution` from the requested Pass-1 output resolution.
 - ASCII output options: `ascii_out_uv` (write u,v components), `ascii_out_geog`
   (EPSG:4326 lat/lon grids), `ascii_out_resolution`. UV components are convenient for the
   screening velocity-deficit computation in Pass 1.
@@ -96,3 +99,5 @@ The **Katana** packaging runs WindNinja inside Docker bundled with **GDAL** and
 **wgrib2**, designed to run WindNinja over **large areas and long periods**, cropping and
 extracting forecast GRIB variables and organizing runs. A candidate for the Pass-1 hourly
 loop at scale; decision deferred (ADR-0006 open question).
+
+

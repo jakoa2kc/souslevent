@@ -65,6 +65,7 @@ def run_mass(
     wind_from_deg: float | None = None,
     input_height_m: float = 10.0,
     output_resolution_m: float = 50.0,
+    vegetation: str = "grass",
     weather_model_init: dict | None = None,
     dry_run: bool = False,
 ) -> WindNinjaRun:
@@ -80,7 +81,8 @@ def run_mass(
     when implementing the hourly loop (roadmap M4).
     """
     wd = Path(working_dir)
-    wd.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        wd.mkdir(parents=True, exist_ok=True)
 
     cmd = [cli, f"--elevation_file={dem_path}", f"--{FLAG['momentum']}=false"]
 
@@ -106,6 +108,10 @@ def run_mass(
     cmd += [
         "--output_wind_height=10.0",
         "--units_output_wind_height=m",
+        "--output_speed_units=mps",
+        f"--vegetation={vegetation}",
+        f"--mesh_resolution={output_resolution_m}",
+        "--units_mesh_resolution=m",
         f"--{FLAG['ascii_uv']}=true",
         f"--{FLAG['ascii_res']}={output_resolution_m}",
         "--units_ascii_out_resolution=m",
@@ -131,6 +137,7 @@ def run_momentum(
     mesh_count: int = 500_000,
     iterations: int = 300,
     turbulence_output: bool = True,
+    vegetation: str = "grass",
     dry_run: bool = False,
 ) -> WindNinjaRun:
     """Pass 2: momentum solver (NinjaFOAM / OpenFOAM RANS).
@@ -144,7 +151,8 @@ def run_momentum(
     3D -- for momentum runs that VTK is the mass mesh, not the foam field (ADR-0004).
     """
     wd = Path(working_dir)
-    wd.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        wd.mkdir(parents=True, exist_ok=True)
 
     cmd = [
         cli,
@@ -153,6 +161,10 @@ def run_momentum(
         f"--{FLAG['mesh_count']}={mesh_count}",
         f"--{FLAG['iterations']}={iterations}",
         f"--{FLAG['turbulence_out']}={'true' if turbulence_output else 'false'}",
+        # WindNinja 3.12 validates: turbulence_output_flag REQUIRES write_goog_output.
+        # We read the OpenFOAM case directly (ADR-0004), but the binary still demands an
+        # output format alongside turbulence, so enable the (small) Google Earth kmz.
+        *(["--write_goog_output=true"] if turbulence_output else []),
         "--initialization_method=domainAverageInitialization",
         f"--input_speed={wind_speed_ms}",
         "--input_speed_units=mps",
@@ -161,31 +173,61 @@ def run_momentum(
         "--units_input_wind_height=m",
         "--output_wind_height=10.0",
         "--units_output_wind_height=m",
+        "--output_speed_units=mps",
+        f"--vegetation={vegetation}",
         f"--output_path={wd}",
     ]
 
     rc, out, err = _run(cmd, wd, dry_run)
     run = WindNinjaRun(command=cmd, working_dir=wd, returncode=rc, stdout=out, stderr=err)
     if not dry_run:
-        run.openfoam_case_dir = locate_openfoam_case(wd, out)
+        run.openfoam_case_dir = locate_openfoam_case(
+            wd, out, extra_roots=[Path(dem_path).parent]
+        )
     return run
 
 
-def locate_openfoam_case(working_dir: Path, stdout: str = "") -> Path | None:
-    """Best-effort discovery of the temporary OpenFOAM case directory for a momentum run.
+def _is_openfoam_case(path: Path) -> bool:
+    return (path / "system").is_dir() and (path / "constant").is_dir()
 
-    NinjaFOAM creates a temp case (with constant/, system/, and time directories). The
-    exact location varies by build; strategy: scan the working dir tree for an OpenFOAM
-    signature, and/or parse the console output. Refine once tested on the target install
-    (docs/05_windninja_integration.md, roadmap M2/T8).
+
+def locate_openfoam_case(
+    working_dir: Path, stdout: str = "", extra_roots=None
+) -> Path | None:
+    """Best-effort discovery of the OpenFOAM case directory for a momentum run.
+
+    Verified against WindNinja 3.12 on Windows: NinjaFOAM writes the case as a
+    ``NINJAFOAM_<dem>_<pid>_<n>`` directory in the **DEM's parent directory** (NOT in the
+    run working dir, which only gets the kmz/sampled outputs). We therefore search both
+    the working dir and any ``extra_roots`` (pass the DEM's parent), preferring explicit
+    ``NINJAFOAM_*`` dirs, then any dir carrying constant/ + system/, newest first.
+    See docs/05_windninja_integration.md, roadmap M2/T8.
     """
-    candidates = []
-    for p in Path(working_dir).rglob("system"):
-        case = p.parent
-        if (case / "constant").is_dir():
+    roots = [Path(working_dir)]
+    if extra_roots:
+        roots += [Path(r) for r in extra_roots]
+
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+
+    def _add(case: Path):
+        case = case.resolve()
+        if case not in seen and _is_openfoam_case(case):
             candidates.append(case)
+            seen.add(case)
+
+    for root in roots:
+        if not root.exists():
+            continue
+        for d in sorted(root.glob("NINJAFOAM_*")):  # NinjaFOAM's own naming
+            if d.is_dir():
+                _add(d)
+        for p in root.rglob("system"):              # generic OpenFOAM signature
+            _add(p.parent)
+
     if candidates:
-        # most-recently modified case
         return max(candidates, key=lambda c: c.stat().st_mtime)
     # TODO: parse `stdout` for the temp dir path printed by WindNinja/OpenFOAM.
     return None
+
+

@@ -18,7 +18,7 @@ from pathlib import Path
 
 import click
 
-from sillage.config import load_config
+from sillage.config import load_config, resolve_output_path
 from sillage.terrain.dem import load_dem
 from sillage.screening import indicator as ind
 
@@ -95,8 +95,10 @@ def main(dem_path, wind_from_deg, wind_speed_ms, resolution_m, run_windninja,
                       title=f"Sillage Pass-1 — wind {wind_speed_ms:.0f} m/s "
                             f"from {wind_from_deg:.0f}°")
     if save_path:
-        fig.savefig(save_path, dpi=130, bbox_inches="tight")
-        click.echo(f"Saved map -> {save_path}")
+        out = resolve_output_path(save_path, cfg)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out, dpi=130, bbox_inches="tight")
+        click.echo(f"Saved map -> {out}")
     else:
         import matplotlib.pyplot as plt
         plt.show()
@@ -126,3 +128,5 @@ def _load_speed_grid(asc_paths, shape):
 
 if __name__ == "__main__":
     main()
+
+

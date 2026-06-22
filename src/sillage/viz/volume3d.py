@@ -1,22 +1,61 @@
 """Pass-2 visualization: 3D recirculation volumes from the OpenFOAM field.
 
-DETAIL view. Given the mesh read from the OpenFOAM case directory
-(flow/openfoam_reader.py), build a scene with: the terrain surface, streamlines of the
-flow, and threshold volumes marking danger -- the REVERSED-FLOW volume (along-mean-flow
-velocity component < 0) and/or the TURBULENCE-INTENSITY volume. Windward green, leeward
-red-orange by severity.
+DETAIL view. Given the OpenFOAM case from a momentum run (flow/openfoam_reader.py), build
+a scene with: the terrain surface, flow streamlines, and threshold volumes marking danger
+-- the REVERSED-FLOW volume (along-mean-flow velocity component < 0, i.e. the rotor) and
+the TURBULENCE-INTENSITY volume.
 
 GPU note: PyVista/VTK rendering is where the workstation GPU helps; the solve itself was
 CPU-bound (ADR-0006). Keep streamline seed counts and mesh size sane for interactivity.
 
-Status: contract + skeleton (roadmap M2/T10). Reads real fields; rendering wiring is TODO.
+Two entry points:
+  * build_scene(...) -> a configured pv.Plotter (interactive or off_screen).
+  * save_png(...)    -> render the scene headless to a PNG (no display needed).
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
 from ..flow import openfoam_reader as ofr
+
+REVERSED_COLOR = "orangered"
+TURB_COLOR = "red"
+SCENE_TEXT = "Pass 2 — resolved recirculation (steady RANS mean; lee accuracy is indicative)"
+
+
+def _seed_streamlines(mesh, mean_flow_dir: np.ndarray, n_points: int = 200):
+    """Best-effort streamlines seeded on an upstream disc. Returns PolyData or None.
+
+    Streamlines need point-associated vectors, so we interpolate cell U to points. Seeding
+    upstream (opposite the mean-flow direction) and integrating forward traces the flow as
+    it separates over the crest into the lee.
+    """
+    try:
+        pm = mesh.cell_data_to_point_data()
+        if "U" not in pm.point_data:
+            return None
+        pm.set_active_vectors("U")
+        b = pm.bounds  # xmin, xmax, ymin, ymax, zmin, zmax
+        cx, cy = (b[0] + b[1]) / 2.0, (b[2] + b[3]) / 2.0
+        span = max(b[1] - b[0], b[3] - b[2])
+        d = np.asarray(mean_flow_dir, dtype="float64")
+        d = d / (np.linalg.norm(d) + 1e-12)
+        seed = np.array([cx, cy, 0.0]) - d * span * 0.4
+        seed[2] = b[4] + (b[5] - b[4]) * 0.25  # lower quarter of the domain height
+        lines = pm.streamlines(
+            vectors="U",
+            source_center=tuple(seed),
+            source_radius=span * 0.3,
+            n_points=n_points,
+            integration_direction="forward",
+            max_time=span * 4.0,
+        )
+        return lines if lines.n_points else None
+    except Exception:
+        return None
 
 
 def build_scene(
@@ -26,37 +65,44 @@ def build_scene(
     show_reversed_flow: bool = True,
     show_turbulence: bool = False,
     turbulence_threshold: float = 0.2,
+    off_screen: bool = False,
 ):
     """Assemble a PyVista plotter for one Pass-2 feature. Returns the Plotter.
 
     Parameters
     ----------
     case_dir : OpenFOAM case directory from a momentum run (flow/windninja.run_momentum).
-    mean_flow_dir : reference mean-flow unit vector (e.g. from the Pass-1 upstream wind),
-        used to define "reversed" flow.
-    show_reversed_flow : threshold the volume where along-flow velocity < 0 (the rotor).
-    show_turbulence : threshold where turbulence intensity exceeds `turbulence_threshold`.
+    mean_flow_dir : reference mean-flow unit vector (where the wind blows TO), used to
+        define "reversed" flow.
+    off_screen : build without a window (for save_png / headless environments).
     """
     import pyvista as pv
 
     mesh = ofr.read_case(case_dir)
-    plotter = pv.Plotter()
+    plotter = pv.Plotter(off_screen=off_screen)
+    labelled = False
 
-    # Terrain surface: the lower boundary of the OpenFOAM domain (the STL-derived ground).
-    # TODO (T10): extract the ground patch from the case and add as an opaque surface.
+    # Terrain surface: the STL ground NinjaFOAM derived from the DEM (lower boundary).
+    terrain = ofr.read_terrain_stl(case_dir)
+    if terrain is not None and terrain.n_points:
+        terrain["elevation_m"] = terrain.points[:, 2]
+        plotter.add_mesh(terrain, scalars="elevation_m", cmap="gist_earth",
+                         show_scalar_bar=False, opacity=1.0)
 
     if show_streamlines:
-        # TODO (T10): seed a line/plane upstream and integrate streamlines; color by speed.
-        # streams = mesh.streamlines(...); plotter.add_mesh(streams, ...)
-        pass
+        lines = _seed_streamlines(mesh, mean_flow_dir)
+        if lines is not None:
+            plotter.add_mesh(lines.tube(radius=max(lines.length / 1500.0, 1.0)),
+                             color="white", opacity=0.6)
 
     if show_reversed_flow:
         along = ofr.along_flow_component(mesh, mean_flow_dir)
         mesh["along_flow"] = along
         reversed_vol = mesh.threshold(value=0.0, scalars="along_flow", invert=True)
         if reversed_vol.n_cells:
-            plotter.add_mesh(reversed_vol, color="orangered", opacity=0.5,
+            plotter.add_mesh(reversed_vol, color=REVERSED_COLOR, opacity=0.5,
                              label="reversed flow (rotor)")
+            labelled = True
 
     if show_turbulence:
         ti = ofr.turbulence_intensity(mesh)
@@ -64,17 +110,46 @@ def build_scene(
             mesh["turb_intensity"] = ti
             turb_vol = mesh.threshold(value=turbulence_threshold, scalars="turb_intensity")
             if turb_vol.n_cells:
-                plotter.add_mesh(turb_vol, color="red", opacity=0.4,
+                plotter.add_mesh(turb_vol, color=TURB_COLOR, opacity=0.4,
                                  label="high turbulence intensity")
+                labelled = True
 
-    plotter.add_text(
-        "Pass 2 — resolved recirculation (steady RANS mean; lee accuracy is indicative)",
-        font_size=10,
-    )
-    plotter.add_legend()
+    plotter.add_text(SCENE_TEXT, font_size=9)
+    plotter.show_axes()
+    if labelled:
+        plotter.add_legend()
+    plotter.view_isometric()
     return plotter
+
+
+def save_png(
+    case_dir: str,
+    mean_flow_dir: np.ndarray,
+    path: str | Path,
+    window_size: tuple[int, int] = (1280, 960),
+    **kwargs,
+) -> Path:
+    """Render the scene to a PNG headless (off_screen). Returns the path.
+
+    Lets Pass-2 produce a reproducible 3D snapshot without an interactive display
+    (CI / servers / quick review). Extra kwargs pass through to build_scene.
+    """
+    kwargs.setdefault("off_screen", True)
+    plotter = build_scene(case_dir, mean_flow_dir, **kwargs)
+    plotter.window_size = list(window_size)
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    plotter.screenshot(str(out))
+    plotter.close()
+    return out
 
 
 def show(case_dir: str, mean_flow_dir: np.ndarray, **kwargs) -> None:  # pragma: no cover
     """Convenience: build and display the scene interactively."""
     build_scene(case_dir, mean_flow_dir, **kwargs).show()
+
+
+def mean_flow_vector(wind_from_deg: float) -> np.ndarray:
+    """Horizontal unit vector pointing where the wind BLOWS TO (meteorological 'from')."""
+    blow_to = np.deg2rad((wind_from_deg + 180.0) % 360.0)
+    return np.array([np.sin(blow_to), np.cos(blow_to), 0.0])

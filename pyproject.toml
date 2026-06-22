@@ -21,6 +21,8 @@ dependencies = [
   "pyvista>=0.43",   # OpenFOAM case reading + 3D rendering (VTK-backed)
   "matplotlib>=3.8", # first-pass 2D screening map
   "click>=8.1",      # CLI for demo scripts
+  "python-dotenv>=1.0", # load project-root .env into config (paths, API keys)
+  "py7zr>=1.1",      # read/extract IGN RGE ALTI .7z archives
 ]
 
 [project.optional-dependencies]
@@ -41,3 +43,4 @@ target-version = "py311"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+

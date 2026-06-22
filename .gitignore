@@ -27,3 +27,4 @@ log.*
 # Editor
 .vscode/
 .idea/
+.claude/

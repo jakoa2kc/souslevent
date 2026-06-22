@@ -14,9 +14,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import click
-import numpy as np
 
-from sillage.config import load_config
+from sillage.config import load_config, resolve_output_path
 from sillage.flow.windninja import run_momentum
 from sillage.viz import volume3d
 
@@ -31,8 +30,13 @@ from sillage.viz import volume3d
 @click.option("--mesh-count", default=500_000, show_default=True)
 @click.option("--iterations", default=300, show_default=True,
               help="Lee/recirculation regions converge slowest; raise for lee accuracy.")
+@click.option("--turbulence", is_flag=True,
+              help="Also show the turbulence-intensity volume (busy; off by default).")
+@click.option("--save", "save_path", default="",
+              help="Render the 3D scene headless to this PNG (no interactive window).")
 @click.option("--no-show", is_flag=True, help="Run + read only; skip interactive 3D.")
-def main(dem_path, wind_from_deg, wind_speed_ms, mesh_count, iterations, no_show):
+def main(dem_path, wind_from_deg, wind_speed_ms, mesh_count, iterations, turbulence,
+         save_path, no_show):
     cfg = load_config()
     wd = cfg.cache_dir / "pass2_demo"
 
@@ -55,19 +59,24 @@ def main(dem_path, wind_from_deg, wind_speed_ms, mesh_count, iterations, no_show
             "Refine flow.windninja.locate_openfoam_case for your install (docs/05)."
         )
 
-    # mean-flow reference direction (where the wind blows TO), horizontal unit vector
-    blow_to = np.deg2rad((wind_from_deg + 180.0) % 360.0)
-    mean_flow_dir = np.array([np.sin(blow_to), np.cos(blow_to), 0.0])
+    mean_flow_dir = volume3d.mean_flow_vector(wind_from_deg)
 
     click.echo("[3/3] Reading field + building 3D recirculation scene ...")
-    if no_show:
+    if no_show and not save_path:
         from sillage.flow import openfoam_reader as ofr
         mesh = ofr.read_case(run.openfoam_case_dir)
         along = ofr.along_flow_component(mesh, mean_flow_dir)
-        click.echo(f"      cells={mesh.n_cells}, reversed-flow cells={(along < 0).sum()}")
-    else:
+        click.echo(f"      cells={mesh.n_cells}, reversed-flow cells={int((along < 0).sum())}")
+        return
+
+    if save_path:
+        out = resolve_output_path(save_path, cfg)
+        volume3d.save_png(str(run.openfoam_case_dir), mean_flow_dir, out,
+                          show_reversed_flow=True, show_turbulence=turbulence)
+        click.echo(f"      saved 3D snapshot -> {out}")
+    if not no_show:
         volume3d.show(str(run.openfoam_case_dir), mean_flow_dir,
-                      show_reversed_flow=True, show_turbulence=True)
+                      show_reversed_flow=True, show_turbulence=turbulence)
 
 
 if __name__ == "__main__":

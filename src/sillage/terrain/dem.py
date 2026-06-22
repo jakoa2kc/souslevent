@@ -14,6 +14,7 @@ This is the shared terrain source for BOTH passes; Pass 2 crops a window from it
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
@@ -136,6 +137,71 @@ def load_dem(
     return dem
 
 
+def crop_dem(
+    dem: Dem,
+    center_x: float,
+    center_y: float,
+    half_width_m: float,
+    half_height_m: float | None = None,
+) -> Dem:
+    """Crop a rectangular window centred on (center_x, center_y) in CRS meters.
+
+    Used by Pass 2 to extract a small feature window (already buffered upstream/downwind)
+    from the shared terrain (docs/05, roadmap M2). The window is clipped to the DEM
+    extent; the returned Dem keeps the parent CRS and resolution with a shifted transform.
+    """
+    import math
+
+    from rasterio.transform import rowcol
+    from rasterio import Affine
+
+    half_height_m = half_width_m if half_height_m is None else half_height_m
+    left, right = center_x - half_width_m, center_x + half_width_m
+    bottom, top = center_y - half_height_m, center_y + half_height_m
+
+    h, w = dem.elevation.shape
+    r0, c0 = rowcol(dem.transform, left, top, op=math.floor)      # top-left pixel
+    r1, c1 = rowcol(dem.transform, right, bottom, op=math.ceil)   # bottom-right pixel
+    r0, r1 = sorted((int(r0), int(r1)))
+    c0, c1 = sorted((int(c0), int(c1)))
+    r0, c0 = max(r0, 0), max(c0, 0)
+    r1, c1 = min(r1, h), min(c1, w)
+    if r1 - r0 < 2 or c1 - c0 < 2:
+        raise ValueError(
+            f"Crop window around ({center_x:.0f}, {center_y:.0f}) is empty or outside the "
+            f"DEM extent {dem.bounds}."
+        )
+
+    sub = np.ascontiguousarray(dem.elevation[r0:r1, c0:c1])
+    new_transform = dem.transform * Affine.translation(c0, r0)
+    return Dem(elevation=sub, transform=new_transform, crs=dem.crs,
+               resolution_m=dem.resolution_m)
+
+
+def write_dem(dem: Dem, path: str | Path) -> Path:
+    """Write a prepared DEM to GeoTIFF, preserving CRS and transform.
+
+    Useful after ``load_dem`` has reprojected a source DEM to UTM north-up meters: the
+    resulting file is the one to hand to WindNinja, rather than the original lon/lat or
+    vendor-format raster.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    profile = {
+        "driver": "GTiff",
+        "height": dem.elevation.shape[0],
+        "width": dem.elevation.shape[1],
+        "count": 1,
+        "dtype": "float32",
+        "crs": dem.crs,
+        "transform": dem.transform,
+        "nodata": np.nan,
+    }
+    with rasterio.open(path, "w", **profile) as dst:
+        dst.write(dem.elevation.astype("float32"), 1)
+    return path
+
+
 def _dataset_center_lonlat(src) -> tuple[float, float]:
     """Center of a rasterio dataset as WGS84 lon/lat."""
     from rasterio.warp import transform as warp_xy
@@ -163,3 +229,6 @@ def _validate(dem: Dem, max_domain_km: float) -> None:
         )
     if not np.isfinite(dem.elevation).any():
         raise ValueError("DEM is entirely no-data after load.")
+
+
+

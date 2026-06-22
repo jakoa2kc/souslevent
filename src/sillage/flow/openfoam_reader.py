@@ -55,6 +55,24 @@ def read_case(case_dir: str | Path, last_time_only: bool = True) -> "pv.DataSet"
     return mesh
 
 
+def read_terrain_stl(case_dir: str | Path) -> "pv.PolyData | None":
+    """Read the terrain surface STL that NinjaFOAM derives from the DEM.
+
+    NinjaFOAM writes the ground as ``constant/triSurface/<dem>.stl`` (plus a ``_out.stl``
+    domain box). We return the terrain patch (the non-``_out`` STL) as PolyData for the 3D
+    scene, or None if absent. Used by viz.volume3d to draw the opaque ground.
+    """
+    tri = Path(case_dir) / "constant" / "triSurface"
+    if not tri.is_dir():
+        return None
+    stls = sorted(p for p in tri.glob("*.stl") if not p.stem.endswith("_out"))
+    if not stls:
+        stls = sorted(tri.glob("*.stl"))
+    if not stls:
+        return None
+    return pv.read(str(stls[0]))
+
+
 def _first_present(mesh, names: tuple[str, ...]) -> str | None:
     for n in names:
         if n in mesh.array_names:

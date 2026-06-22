@@ -58,6 +58,9 @@ def test_run_mass_dry_run_builds_mass_command():
     assert f"--{FLAG['momentum']}=false" in cmd
     assert "domainAverageInitialization" in cmd
     assert f"--{FLAG['ascii_uv']}=true" in cmd
+    assert "--output_speed_units=mps" in cmd
+    assert "--vegetation=grass" in cmd
+    assert "--mesh_resolution=50.0" in cmd
     assert run.returncode is None  # not executed
 
 
@@ -68,6 +71,11 @@ def test_run_momentum_dry_run_sets_momentum_and_turbulence():
     cmd = " ".join(run.command)
     assert f"--{FLAG['momentum']}=true" in cmd
     assert f"--{FLAG['turbulence_out']}=true" in cmd
+    assert "--output_speed_units=mps" in cmd
     assert f"--{FLAG['mesh_count']}=250000" in cmd
+    assert "--vegetation=grass" in cmd
     # momentum solver must use domain-average init (no weather-model/point init)
     assert "domainAverageInitialization" in cmd
+
+
+
