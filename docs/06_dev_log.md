@@ -136,6 +136,41 @@ Pass-1→Pass-2 click handoff. See `07_roadmap.md`.
 
 ---
 
+## Entry 6 — V0 baseline + Pass-2 verified native on Windows  (2026-06-21)
+
+**What changed.** Brought the project from scaffold to a working **V0** (commit tagged
+`v0`). Installed WindNinja 3.12 natively on Windows and wired it via `.env`. Centralized
+all generated artefacts out-of-tree under `C:\A2K\SousLeVent` (config.py). Built the Pass-1
+**hourly loop** (mass per hour + time-slider map + GIF). Then de-risked Pass-2 with a smoke
+test on the Champsaur top candidate.
+
+**Why.** Pass-2 viability on Windows had been an open worry (OpenFOAM is Linux-native; we
+assumed Docker might be required).
+
+**Result / decision.** The **momentum solver runs natively on this Windows build** — no
+Docker needed for the solve. Findings: WindNinja 3.12 requires `write_goog_output` when
+`turbulence_output_flag=true`; NinjaFOAM writes the OpenFOAM case as `NINJAFOAM_*` next to
+the **DEM** (not in the run working dir) — fixed `locate_openfoam_case` accordingly. The
+full read path works (`openfoam_reader` → 65k cells, ~26% reversed-flow cells, TI≈0.17),
+and `volume3d` renders the rotor volume both interactively and headless (PNG). Docker is
+demoted to a **scale** option for the M4 batch only.
+
+**Two architecture decisions recorded (this entry's main output):**
+- **ADR-0007** — Pass-1 spatial wind via **AROME sampled per sub-zone** (interim). Chosen
+  over both the current single-domain-average and the full GRIB `wxModel` gridded init.
+  Captures valley-to-valley differences cheaply via Open-Meteo's AROME endpoint (no key).
+  Key clarification: **sub-zones are horizontal tiles**; altitude enters as the *per-zone
+  sampling height* of the AROME vertical profile, not as a separate partition axis.
+- **ADR-0008** — Pass-2 **mesh resolution is a UI quality/time knob** (default medium,
+  "refine to max" on doubt). The limiter is mesh cells × iterations (CPU-bound), not the
+  5 m DEM; uniform 5 m would be millions of cells.
+
+**Open questions raised.** Seam handling when stitching AROME sub-zone fields (overlap +
+blend). Cost estimator (cells → minutes) to bound the "refine" control. Eventual move to
+full gridded `wxModel` init (M4/M5) supersedes ADR-0007.
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

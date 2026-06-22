@@ -135,13 +135,83 @@ performance with cores; scale visual fidelity with the GPU.
 
 ---
 
+## ADR-0007 — Pass-1 spatial wind via AROME sampled per sub-zone (interim)
+
+**Status:** accepted — **interim**; a stepping stone toward the full weather-model gridded
+initialization of ADR-0003. To be superseded when GRIB/`wxModel` ingestion lands (M4/M5).
+
+**Context.** Pass 1 currently runs with a **single domain-average wind per hour**, so it
+cannot distinguish **valley-to-valley** wind differences. AROME (~1.3 km; AROME-HD
+~1.5 km) resolves those valley-scale gradients and is the right meteo input. But:
+1. WindNinja does **not** natively download AROME — its built-in NWP fetchers are US
+   models (GFS/NAM/HRRR/NDFD).
+2. Full **weather-model gridded init** (`wxModelInitialization` with an AROME GRIB) needs
+   real GRIB plumbing — Météo-France API (key) or the Docker/Katana + `wgrib2` path —
+   which is an M4/M5 effort, not a flag.
+
+**Decision.** As an interim, capture spatial wind variation by **partitioning the domain
+into sub-zones** and running the **mass solver per sub-zone**, each initialized with its
+**own representative domain-average wind** sampled from **AROME via Open-Meteo's AROME
+endpoint** (no key) at that sub-zone's **representative crest altitude**. Stitch the
+sub-zone surface-wind fields into one Pass-1 map with **overlap buffers + blending** at the
+seams.
+
+**On "sub-zones by altitude".** Sub-zones are fundamentally **horizontal tiles** (the
+WindNinja domain is a 2-D terrain patch; you do not run it on "only the high pixels").
+**Altitude is not a separate partition axis** — it enters as the **per-zone sampling
+height**: each tile draws its wind from the AROME *vertical profile* at its own
+representative (crest) altitude, so a high massif and a low valley get different winds
+*because of* their elevation. **Intra-zone** variation of wind with terrain height is
+already handled inside each run by the mass solver itself. So: spatial tiles, each
+parameterized by an altitude-appropriate wind — not altitude bands as independent domains.
+
+**Consequences.**
+- **Seams**: adjacent sub-zones have different uniform inputs → discontinuities at borders.
+  Mitigate with overlap + blending; residual seams are acceptable for a **screening**
+  product (this is still *candidates, not rotors* — ADR-0003).
+- Cost ≈ *N* sub-zone runs per hour (cacheable per zone/hour/wind).
+- Does **not** change the Pass-1 epistemic status: AROME makes candidates *better
+  informed*, it does not let the mass solver show rotors.
+- Partially resolves the open "AROME ingestion route" question: **Open-Meteo AROME per
+  sub-zone for now**; full gridded `wxModel` init remains the eventual target.
+
+---
+
+## ADR-0008 — Mesh resolution is a user-facing quality/time knob (Pass 2)
+
+**Status:** accepted
+
+**Context.** Pass-2 momentum cost ∝ **mesh cell count × iterations**, and the engine is
+**CPU-bound** (ADR-0006). The **DEM** (IGN 5 m) is *not* the bottleneck — the
+**computational mesh** is. A *uniform* 5 m mesh over a ~5 km window would be **millions** of
+cells → long runtime + heavy RAM. "Finest possible" must therefore be a deliberate,
+bounded choice, not the default.
+
+**Decision.** Expose mesh resolution in the IHM as a **quality preset / target near-surface
+resolution**, with a **displayed time + RAM estimate**. **Default = "medium"** (acceptable
+runtime, keeps click-to-detail interactive); provide a **"refine"** control to push toward
+the finest practical resolution when a zone is in doubt. Refinement targets
+**near-surface / near-feature** cells, not uniform domain refinement.
+
+**Consequences.**
+- Users trade time for **lee accuracy** explicitly (recirculation regions converge slowest;
+  more cells/iterations help most there — docs/05).
+- Need sensible **bounds + a cost estimator** (cells → ~minutes) so "refine to max" cannot
+  silently launch an hours-long solve.
+- "5 m" is an **effective near-surface resolution** set via `mesh_count`, not the DEM step.
+
+---
+
 ## Open questions tracked as future ADRs
 
 - **Stability / diurnal winds on the momentum solver.** Available on the mass solver
   (diurnal slope winds, non-neutral stability); availability on momentum is **to verify**.
   Will become an ADR once confirmed. Affects how much of the physics enrichment lands in
   Pass 1 vs Pass 2.
+- **Full weather-model gridded init (AROME `wxModel`)** — the eventual successor to
+  ADR-0007's sub-zone interim. Needs the GRIB route decided (Météo-France API vs
+  Docker/Katana + `wgrib2`). Tied to the batch-engine question below.
 - **Batch engine choice for the hourly loop** — native `WindNinja_cli` subprocess vs the
   Docker/Katana packaging. Decide once Pass-1 volumes/time-ranges are real.
 - **2D map / UI toolkit** — matplotlib for the first map vs a richer Qt/web stack as the
-  app grows.
+  app grows. (Note: the mesh quality/time knob itself is decided — ADR-0008.)

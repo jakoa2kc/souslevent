@@ -48,10 +48,15 @@ streamlines, terrain-vs-volume opacity. Next: M3 click-to-detail handoff.
 - [ ] Buffer heuristics (upstream fetch, downwind margin) tuned so eddies aren't truncated.
 **Definition of done:** click-to-detail works for one area across a few hours.
 
-## M4 — Robust hourly batch
+## M4 — Robust hourly batch + spatial wind input
 - [ ] Full hourly loop over a flight window; caching of DEM + forecasts for reproducibility.
-- [ ] Evaluate **Docker/Katana** batch vs native subprocess (ADR-0006 open question).
-**Definition of done:** a full-window screening run is one command and reproducible.
+- [ ] **Spatial wind input via AROME sub-zones (ADR-0007):** sample AROME (Open-Meteo
+      endpoint, no key) per sub-zone at its crest altitude; run the mass solver per tile;
+      stitch with overlap + blending. Stepping stone to full gridded `wxModel` init.
+- [ ] Evaluate **Docker/Katana** batch vs native subprocess (ADR-0006 open question);
+      tied to the eventual GRIB `wxModel` route.
+**Definition of done:** a full-window screening run is one command and reproducible, with
+valley-to-valley wind differentiation.
 
 ## M5 — Physics enrichment (Pass 1 first)
 - [ ] Diurnal slope winds + non-neutral **stability** in the mass solver (Pass 1).
@@ -62,6 +67,9 @@ streamlines, terrain-vs-volume opacity. Next: M3 click-to-detail handoff.
 ## M6 — UX hardening
 - [ ] Uncertainty communication in the UI (candidates ≠ rotors; RANS-mean caveats).
 - [ ] Save/load an analysis with full provenance (DEM, forecast run, params).
+- [ ] **Pass-2 mesh resolution as a quality/time knob (ADR-0008):** preset (coarse/medium/
+      fine) or target near-surface resolution, with a displayed time/RAM estimate; default
+      medium, "refine to max" on doubt; bounded by a cost estimator.
 - [ ] Performance: concurrent hourly mass runs (CPU cores); GPU-accelerated rendering.
 
 ## Later / research
