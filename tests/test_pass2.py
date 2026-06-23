@@ -130,6 +130,55 @@ def test_gui_module_imports():
     from sillage.app.main_window import MainWindow  # noqa: F401
 
 
+def test_sample_grid_and_upstream_wind(tmp_path):
+    import rasterio
+
+    from sillage.screening.pass1 import (
+        find_direction_grid,
+        sample_grid_at,
+        upstream_crest_wind,
+    )
+
+    transform = from_origin(600000.0, 4901000.0, 100.0, 100.0)  # 10x10 @ 100 m, north-up
+
+    def _write(name, value):
+        p = tmp_path / name
+        prof = dict(driver="GTiff", height=10, width=10, count=1, dtype="float32",
+                    crs=CRS.from_epsg(32631), transform=transform, nodata=-9999.0)
+        with rasterio.open(p, "w", **prof) as dst:
+            dst.write(np.full((10, 10), value, dtype="float32"), 1)
+        return p
+
+    vel = _write("run_vel.asc", 7.5)
+    ang = _write("run_ang.asc", 315.0)
+    cx, cy = 600500.0, 4900500.0
+    assert sample_grid_at(vel, cx, cy) == 7.5
+    assert sample_grid_at(vel, 0.0, 0.0) is None  # outside the grid
+    assert find_direction_grid(tmp_path) == ang
+
+    bc = upstream_crest_wind(vel, ang, cx, cy, from_deg=270.0, fetch_m=100.0)
+    assert bc is not None
+    spd, drc = bc
+    assert spd == 7.5 and abs(drc - 315.0) < 1e-6
+
+
+def test_pass2_wind_falls_back_to_controls():
+    pytest.importorskip("PySide6")
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    from sillage.app.main_window import MainWindow
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    w = MainWindow()
+    w.wind_dir.setValue(300.0)
+    w.wind_spd.setValue(9.0)
+    assert w._pass2_wind_at(270000.0, 4958000.0) == (9.0, 300.0, "controls")
+    w.deleteLater()
+
+
 def test_pass2_mesh_presets_and_estimate():
     pytest.importorskip("PySide6")
     from sillage.app.main_window import (

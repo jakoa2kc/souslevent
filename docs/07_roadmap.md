@@ -42,8 +42,9 @@ Pass 2; Docker stays a *scale* option for M4 batch only). Remaining polish: clea
 streamlines, terrain-vs-volume opacity. Next: M3 click-to-detail handoff.
 
 ## M3 — Wire the handoff (Pass 1 → Pass 2)
-- [~] Read crest-height upstream wind from the Pass-1 field at a candidate. *(Interim: the
-      handoff uses the controls' domain wind; upstream-crest sampling is the next refinement.)*
+- [x] Read upstream wind from the Pass-1 field at a candidate: the handoff samples the
+      `*_vel`/`*_ang` grids a short fetch upstream of the click for the Pass-2 BC, falling
+      back to the controls wind. ✔ *(True crest-height free-stream vs surface 10 m: later.)*
 - [x] Click a hotspot in `map2d` → crop+buffer → queue a momentum run (worker) → show the
       3D scene. Implemented in the IHM (`on_map_click` → `SolveJob` → 3D tab). ✔
 - [~] Buffer heuristics. *(Interim: centered ±2.5 km window; asymmetric downwind margin so
@@ -86,7 +87,7 @@ The "real software" surface. Built incrementally; adapt as results come in.
 - [x] Click-on-map hotspot → crop+buffer → launch Pass-2 → show 3D (the M3 handoff). ✔ slice 3
 - [x] Mesh quality/time knob (ADR-0008) in the Pass-2 controls: Coarse/Medium/Fine/Max
       presets + rough cell-count/minutes estimate; the handoff uses the selection. ✔ slice 4
-- [ ] Upstream-crest wind sampling from the Pass-1 field for the Pass-2 BC.
+- [x] Upstream wind sampling from the Pass-1 field for the Pass-2 BC. ✔ slice 5
 **Definition of done:** browse screening by hour, click a hotspot, get the 3D rotor — one app.
 
 ## Later / research

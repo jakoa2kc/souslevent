@@ -28,6 +28,56 @@ def find_speed_grid(work_dir: Path) -> Path | None:
     return matches[0] if matches else None
 
 
+def find_direction_grid(work_dir: Path) -> Path | None:
+    """Return the WindNinja wind-direction ASCII grid (``*_ang.asc``), if present."""
+    work_dir = Path(work_dir)
+    if not work_dir.exists():
+        return None
+    matches = sorted(work_dir.glob("*_ang.asc"))
+    return matches[0] if matches else None
+
+
+def sample_grid_at(path: Path, x: float, y: float) -> float | None:
+    """Sample a raster value at CRS coords (x, y). Returns the value, or None if the point
+    is outside the grid or hits nodata."""
+    import rasterio
+
+    with rasterio.open(path) as src:
+        b = src.bounds
+        if not (b.left <= x <= b.right and b.bottom <= y <= b.top):
+            return None
+        row, col = src.index(x, y)
+        arr = src.read(1)
+        if not (0 <= row < arr.shape[0] and 0 <= col < arr.shape[1]):
+            return None
+        val = float(arr[row, col])
+    if not np.isfinite(val):
+        return None
+    return val
+
+
+def upstream_crest_wind(
+    vel_path: Path, ang_path: Path, x: float, y: float, from_deg: float,
+    fetch_m: float = 1500.0,
+) -> tuple[float, float] | None:
+    """Sample the Pass-1 surface wind a short ``fetch_m`` UPSTREAM of (x, y).
+
+    Used to drive the Pass-2 momentum boundary condition from the local upstream flow
+    instead of a global domain wind (docs/05, ADR-0003). The upstream point lies toward the
+    wind's source bearing (``from_deg``). Returns (speed_ms, from_deg) or None if the sample
+    falls outside the field. WindNinja ``*_ang.asc`` is the meteorological from-direction,
+    consistent with the momentum solver's ``wind_from_deg`` input.
+    """
+    rad = np.deg2rad(from_deg)
+    ux = x + fetch_m * np.sin(rad)  # toward the source bearing = upwind
+    uy = y + fetch_m * np.cos(rad)
+    spd = sample_grid_at(vel_path, ux, uy)
+    ang = sample_grid_at(ang_path, ux, uy)
+    if spd is None or ang is None or spd <= 0:
+        return None
+    return float(spd), float(ang % 360.0)
+
+
 def load_speed_grid(path: Path) -> np.ndarray:
     """Load a WindNinja ``*_vel.asc`` raster as a float array with nodata as NaN."""
     import rasterio

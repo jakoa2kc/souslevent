@@ -260,6 +260,28 @@ of non-ASCII glyphs in UI strings to avoid console-encoding noise. Tests: 27 pas
 
 ---
 
+## Entry 11 — IHM slice 5: upstream wind for the Pass-2 BC (M3 refinement)  (2026-06-21)
+
+**What changed.** The click-to-detail handoff now derives the Pass-2 boundary wind from the
+**Pass-1 field** instead of the controls. New `screening.pass1` helpers:
+`find_direction_grid`, `sample_grid_at`, `upstream_crest_wind` (samples the `*_vel`/`*_ang`
+grids a short fetch upstream of the click, toward the wind's source bearing). The GUI stores
+the last mass run's vel/ang grids; `_pass2_wind_at` returns the upstream-sampled
+(speed, from_deg) when available, else the controls wind — the confirm dialog and status line
+show which source was used.
+
+**Why.** docs/05 / ADR-0003: Pass-2's single homogeneous wind should be the wind just
+**upstream** of the feature read from Pass-1, not a global domain wind.
+
+**Result.** Verified: helpers sample a synthetic field correctly; the GUI returns
+"Pass-1 upstream" when a mass field is present (and "controls" otherwise). Tests: 29 passed.
+
+**Limitations.** Samples the Pass-1 **surface (10 m)** wind, not a true crest-height
+free-stream; fetch is a fixed 1.5 km; the field reflects the *last* mass run (stale if the
+controls wind changed since). Asymmetric downwind crop margin is still TODO.
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

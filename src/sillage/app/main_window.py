@@ -25,7 +25,7 @@ from matplotlib.figure import Figure
 from ..config import load_config, resolve_cache_path
 from ..flow.windninja import locate_openfoam_case, run_momentum
 from ..screening import indicator as ind
-from ..screening.pass1 import hourly_indicator
+from ..screening.pass1 import find_direction_grid, hourly_indicator, upstream_crest_wind
 from ..terrain.dem import crop_dem, load_dem, write_dem
 from ..viz import map2d, volume3d
 from .jobs import SolveJob
@@ -57,6 +57,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("Sillage — leeward turbulence screening")
         self.cfg = load_config()
         self._dem = None
+        # Pass-1 wind field from the last mass run, for upstream-crest Pass-2 BC (M3).
+        self._pass1_vel_path = None
+        self._pass1_ang_path = None
 
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         split.addWidget(self._build_controls())
@@ -234,12 +237,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def fn(on_progress, cancel):  # runs on the worker thread — no Qt here
             dem = load_dem(dem_path, max_domain_km=max_km)
-            hazard, _ = hourly_indicator(
+            hazard, vel_path = hourly_indicator(
                 dem=dem, cli=cli, dem_path=dem_path, work_dir=work,
                 wind_speed_ms=wind_spd, wind_from_deg=wind_dir, resolution_m=resolution_m,
                 force_run=True, on_progress=on_progress, cancel=cancel,
             )
-            return dem, hazard, wind_dir
+            ang_path = find_direction_grid(work)
+            return dem, hazard, wind_dir, vel_path, ang_path
 
         self._cancelling = False
         self._set_running(True, "WindNinja mass running…")
@@ -277,8 +281,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(msg)
 
     def _on_mass_finished(self, result) -> None:
-        dem, hazard, wind_dir = result
+        dem, hazard, wind_dir, vel_path, ang_path = result
         self._dem = dem
+        self._pass1_vel_path = vel_path
+        self._pass1_ang_path = ang_path
         self.fig.clear()
         ax = self.fig.add_subplot(111)
         im = map2d.draw_indicator(ax, dem, hazard)
@@ -309,12 +315,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         x, y = float(event.xdata), float(event.ydata)
         mesh_count, _iters, mesh_name = self._selected_mesh()
+        bc_spd, bc_dir, wind_src = self._pass2_wind_at(x, y)
         resp = QtWidgets.QMessageBox.question(
             self, "Launch Pass-2",
             f"Run a momentum solve around ({x:.0f}, {y:.0f})?\n\n"
             f"~{PASS2_HALF_WIDTH_M * 2 / 1000:.0f} km window, mesh '{mesh_name}' "
-            f"({mesh_count:,} cells, ~{_estimate_minutes(mesh_count)} min), "
-            f"wind {self.wind_spd.value():.0f} m/s from {self.wind_dir.value():.0f}°.",
+            f"({mesh_count:,} cells, ~{_estimate_minutes(mesh_count)} min).\n"
+            f"Wind ({wind_src}): {bc_spd:.0f} m/s from {bc_dir:.0f} deg.",
         )
         if resp != QtWidgets.QMessageBox.StandardButton.Yes:
             return
@@ -324,13 +331,25 @@ class MainWindow(QtWidgets.QMainWindow):
                 x, y, marker="*", markersize=15, color="cyan", markeredgecolor="k"
             )
             self.canvas.draw_idle()
-        self._launch_pass2_at(x, y)
+        self._launch_pass2_at(x, y, bc_spd, bc_dir, wind_src)
 
-    def _launch_pass2_at(self, x: float, y: float) -> None:
+    def _pass2_wind_at(self, x: float, y: float) -> tuple[float, float, str]:
+        """Pass-2 BC wind: the Pass-1 field sampled just upstream of (x, y) if a mass run is
+        available, else the controls' domain wind (M3 refinement)."""
+        ctrl_dir = self.wind_dir.value()
+        ctrl_spd = self.wind_spd.value()
+        if self._pass1_vel_path and self._pass1_ang_path:
+            bc = upstream_crest_wind(
+                self._pass1_vel_path, self._pass1_ang_path, x, y, ctrl_dir
+            )
+            if bc is not None:
+                return bc[0], bc[1], "Pass-1 upstream"
+        return ctrl_spd, ctrl_dir, "controls"
+
+    def _launch_pass2_at(self, x: float, y: float, bc_spd: float, bc_dir: float,
+                         wind_src: str) -> None:
         cfg = self.cfg
         dem = self._dem
-        wind_dir = self.wind_dir.value()
-        wind_spd = self.wind_spd.value()
         cli = cfg.windninja_cli
         half_m = PASS2_HALF_WIDTH_M
         mesh_count, iterations, _name = self._selected_mesh()
@@ -342,7 +361,7 @@ class MainWindow(QtWidgets.QMainWindow):
             write_dem(crop, crop_path)
             run = run_momentum(
                 cli=cli, dem_path=str(crop_path), working_dir=str(pass2_dir / "ihm_run"),
-                wind_speed_ms=wind_spd, wind_from_deg=wind_dir,
+                wind_speed_ms=bc_spd, wind_from_deg=bc_dir,
                 mesh_count=mesh_count, iterations=iterations,
                 on_progress=on_progress, cancel=cancel,
             )
@@ -352,10 +371,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             if run.openfoam_case_dir is None:
                 raise RuntimeError("momentum ran but no OpenFOAM case was located")
-            return str(run.openfoam_case_dir), wind_dir, (x, y)
+            return str(run.openfoam_case_dir), bc_dir, (x, y)
 
         self._cancelling = False
-        self._set_running(True, f"Pass-2 momentum at ({x:.0f}, {y:.0f})…")
+        self._set_running(True, f"Pass-2 ({wind_src}) at ({x:.0f}, {y:.0f})…")
         job = SolveJob(fn, self)
         job.progress.connect(self._on_job_progress)
         job.finished.connect(self._on_pass2_finished)
