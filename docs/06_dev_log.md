@@ -391,6 +391,26 @@ area; today's pipeline is Champsaur-specific) so the rectangle actually drives P
 
 ---
 
+## Entry 17 — IHM reorg: workflow tabs, no left panel  (2026-06-21)
+
+**What changed.** Removed the left controls panel; every control now lives in the tab it
+belongs to, and the three tabs are renamed around the pilot's workflow:
+1. **"Sélection de la zone de vol"** — the Leaflet map + the MNT (DEM) field.
+2. **"Sélection du créneau de vol"** — Pass-1 controls (wind dir/speed, basemap,
+   Géométrie/WindNinja masse/Horaire/Sous-zones, hours), the 2D canvas, and the
+   hour ("Créneau") slider.
+3. **"Analyse locale des zones sous le vent"** — Pass-2 mesh/case controls + the 3D viewport.
+The job **progress bar + Cancel** moved to the **status bar** (a run can start from any tab).
+
+**Why.** Match the user's mental model (zone → créneau → analyse locale) and free up width
+for the map / canvas / 3D.
+
+**Result.** Verified headless: the 3 renamed tabs, central widget is the tab stack (no side
+panel), all controls live in their tabs, geometry compute still works, and the click→Pass-2
+handoff switches to the analysis tab. Tests: 34 passed (exit 0).
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

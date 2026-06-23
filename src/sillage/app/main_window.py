@@ -66,20 +66,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self._hourly: list[tuple] = []
         # Last rendered (dem, hazard, title) so toggling the basemap can redraw it.
         self._last_map = None
-        # AOI selected on the map tab (south, west, north, east) in lat/lon.
+        # AOI selected on the zone tab (south, west, north, east) in lat/lon.
         self.selected_bbox = None
+        self._job: SolveJob | None = None
+        self._cancelling = False
 
-        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        split.addWidget(self._build_controls())
+        # Global job progress + cancel live in the status bar (a run can start from any tab).
+        self.progress = QtWidgets.QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setMaximumWidth(220)
+        self.progress.setVisible(False)
+        self.btn_cancel = QtWidgets.QPushButton("Annuler")
+        self.btn_cancel.setVisible(False)
+        self.btn_cancel.clicked.connect(self.on_cancel)
+        self.statusBar().addPermanentWidget(self.progress)
+        self.statusBar().addPermanentWidget(self.btn_cancel)
+
         self.tabs = QtWidgets.QTabWidget()
-        self.map_tab = MapTab()
-        self.map_tab.aoiSelected.connect(self._on_aoi_selected)
-        self.tabs.addTab(self.map_tab, "Carte")
-        self.tabs.addTab(self._build_pass1_tab(), "Passe 1 — Criblage (2D)")
-        self.tabs.addTab(self._build_pass2_tab(), "Passe 2 — Détail (3D)")
-        split.addWidget(self.tabs)
-        split.setStretchFactor(1, 1)
-        self.setCentralWidget(split)
+        self.tabs.addTab(self._build_zone_tab(), "Sélection de la zone de vol")
+        self.tabs.addTab(self._build_creneau_tab(), "Sélection du créneau de vol")
+        self.tabs.addTab(self._build_analyse_tab(), "Analyse locale des zones sous le vent")
+        self.setCentralWidget(self.tabs)
+
+        self._run_buttons = [self.btn_geom, self.btn_mass, self.btn_hourly,
+                             self.btn_subzones, self.btn_load_p2]
         self.statusBar().showMessage("Prêt")
 
     def _on_aoi_selected(self, s: float, w: float, n: float, e: float) -> None:
@@ -89,88 +99,66 @@ class MainWindow(QtWidgets.QMainWindow):
             "Préparation du MNT depuis cette zone : à venir."
         )
 
-    # --- UI construction -------------------------------------------------------
-    def _build_controls(self) -> QtWidgets.QWidget:
+    # --- UI construction (controls live in their own tabs) ---------------------
+    def _build_zone_tab(self) -> QtWidgets.QWidget:
+        """Tab 1 — flight-zone selection: the interactive map + the terrain (MNT) input."""
         w = QtWidgets.QWidget()
-        form = QtWidgets.QFormLayout(w)
-
+        lay = QtWidgets.QVBoxLayout(w)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("MNT :"))
         self.dem_edit = QtWidgets.QLineEdit(str(resolve_cache_path(DEFAULT_DEM, self.cfg)))
+        row.addWidget(self.dem_edit)
+        lay.addLayout(row)
+        self.map_tab = MapTab()
+        self.map_tab.aoiSelected.connect(self._on_aoi_selected)
+        lay.addWidget(self.map_tab)
+        return w
+
+    def _build_creneau_tab(self) -> QtWidgets.QWidget:
+        """Tab 2 — flight-slot selection: Pass-1 screening, hourly loop + the time slider."""
+        w = QtWidgets.QWidget()
+        self._creneau_tab = w
+        lay = QtWidgets.QVBoxLayout(w)
+
+        inputs = QtWidgets.QHBoxLayout()
         self.wind_dir = QtWidgets.QDoubleSpinBox()
         self.wind_dir.setRange(0.0, 360.0)
         self.wind_dir.setValue(320.0)
         self.wind_spd = QtWidgets.QDoubleSpinBox()
         self.wind_spd.setRange(0.0, 60.0)
         self.wind_spd.setValue(8.0)
-
         self.basemap_combo = QtWidgets.QComboBox()
         self.basemap_combo.addItems([NO_BASEMAP, *map2d.BASEMAP_SOURCES.keys()])
         self.basemap_combo.setCurrentText("IGN plan")
         self.basemap_combo.currentTextChanged.connect(self._on_basemap_change)
-
-        self.btn_geom = QtWidgets.QPushButton("Calculer Pass-1 (géométrie)")
-        self.btn_geom.clicked.connect(self.on_compute_pass1)
-        self.btn_mass = QtWidgets.QPushButton("Lancer WindNinja masse (Pass-1)")
-        self.btn_mass.clicked.connect(self.on_run_mass)
         self.hours_spin = QtWidgets.QSpinBox()
         self.hours_spin.setRange(1, 24)
         self.hours_spin.setValue(6)
-        self.btn_hourly = QtWidgets.QPushButton("Lancer horaire (Pass-1, synthétique)")
+        inputs.addWidget(QtWidgets.QLabel("Vent DE (°) :"))
+        inputs.addWidget(self.wind_dir)
+        inputs.addWidget(QtWidgets.QLabel("Vitesse (m/s) :"))
+        inputs.addWidget(self.wind_spd)
+        inputs.addWidget(QtWidgets.QLabel("Fond :"))
+        inputs.addWidget(self.basemap_combo)
+        inputs.addWidget(QtWidgets.QLabel("Heures :"))
+        inputs.addWidget(self.hours_spin)
+        inputs.addStretch(1)
+        lay.addLayout(inputs)
+
+        btns = QtWidgets.QHBoxLayout()
+        self.btn_geom = QtWidgets.QPushButton("Géométrie")
+        self.btn_geom.clicked.connect(self.on_compute_pass1)
+        self.btn_mass = QtWidgets.QPushButton("WindNinja masse")
+        self.btn_mass.clicked.connect(self.on_run_mass)
+        self.btn_hourly = QtWidgets.QPushButton("Horaire (synthétique)")
         self.btn_hourly.clicked.connect(self.on_run_hourly)
-        self.btn_subzones = QtWidgets.QPushButton("Lancer sous-zones (Pass-1, spatial)")
+        self.btn_subzones = QtWidgets.QPushButton("Sous-zones (spatial)")
         self.btn_subzones.clicked.connect(self.on_run_subzones)
+        for b in (self.btn_geom, self.btn_mass, self.btn_hourly, self.btn_subzones):
+            btns.addWidget(b)
+        btns.addStretch(1)
+        lay.addLayout(btns)
 
-        self.case_edit = QtWidgets.QLineEdit("")
-        self.case_edit.setPlaceholderText("(détection auto d'un case NINJAFOAM_* en cache)")
-        self.btn_load_p2 = QtWidgets.QPushButton("Charger un case Pass-2 (3D)")
-        self.btn_load_p2.clicked.connect(self.on_load_pass2)
-
-        self.mesh_combo = QtWidgets.QComboBox()
-        self.mesh_combo.addItems(list(PASS2_MESH_PRESETS))
-        self.mesh_hint = QtWidgets.QLabel("")
-        self.mesh_hint.setStyleSheet("color: #555;")
-        self.mesh_combo.currentTextChanged.connect(self._update_mesh_hint)
-        self.mesh_combo.setCurrentText(PASS2_MESH_DEFAULT)
-
-        self.progress = QtWidgets.QProgressBar()
-        self.progress.setRange(0, 100)
-        self.progress.setVisible(False)
-        self.btn_cancel = QtWidgets.QPushButton("Annuler")
-        self.btn_cancel.setVisible(False)
-        self.btn_cancel.clicked.connect(self.on_cancel)
-
-        form.addRow("MNT :", self.dem_edit)
-        form.addRow("Vent DE (deg) :", self.wind_dir)
-        form.addRow("Vitesse vent (m/s) :", self.wind_spd)
-        form.addRow("Fond de carte :", self.basemap_combo)
-        form.addRow(self.btn_geom)
-        form.addRow(self.btn_mass)
-        form.addRow("Heures :", self.hours_spin)
-        form.addRow(self.btn_hourly)
-        form.addRow(self.btn_subzones)
-        form.addRow(QtWidgets.QLabel("———"))
-        form.addRow("Maillage Pass-2 :", self.mesh_combo)
-        form.addRow(self.mesh_hint)
-        form.addRow("Case Pass-2 :", self.case_edit)
-        form.addRow(self.btn_load_p2)
-        form.addRow(self.progress)
-        form.addRow(self.btn_cancel)
-        self._update_mesh_hint()
-
-        note = QtWidgets.QLabel(map2d.DISCLAIMER)
-        note.setWordWrap(True)
-        note.setStyleSheet("color: #a33; font-style: italic;")
-        form.addRow(note)
-
-        self._run_buttons = [self.btn_geom, self.btn_mass, self.btn_hourly,
-                             self.btn_subzones, self.btn_load_p2]
-        self._job: SolveJob | None = None
-        self._cancelling = False
-        w.setMaximumWidth(380)
-        return w
-
-    def _build_pass1_tab(self) -> QtWidgets.QWidget:
-        w = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout(w)
         self.fig = Figure(figsize=(6, 5))
         self.canvas = FigureCanvasQTAgg(self.fig)
         self.nav = NavigationToolbar2QT(self.canvas, w)
@@ -183,7 +171,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hour_slider.setMaximum(0)
         self.hour_slider.valueChanged.connect(self._on_slider_change)
         self.hour_label = QtWidgets.QLabel("")
-        slider_row.addWidget(QtWidgets.QLabel("Heure :"))
+        slider_row.addWidget(QtWidgets.QLabel("Créneau :"))
         slider_row.addWidget(self.hour_slider)
         slider_row.addWidget(self.hour_label)
         self.hour_widget = QtWidgets.QWidget()
@@ -192,28 +180,54 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(self.hour_widget)
 
         hint = QtWidgets.QLabel(
-            "Astuce : clic gauche sur un point chaud de la carte pour lancer un calcul "
-            "Pass-2 (momentum) à cet endroit."
+            "Astuce : clic gauche sur un point chaud → analyse Pass-2 à cet endroit.   "
+            + map2d.DISCLAIMER
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: #555;")
+        hint.setStyleSheet("color: #a33; font-style: italic;")
         lay.addWidget(hint)
         self.canvas.mpl_connect("button_press_event", self.on_map_click)
         return w
 
-    def _build_pass2_tab(self) -> QtWidgets.QWidget:
-        # The VTK/OpenGL viewport is created lazily (on first Pass-2 use) so the window
-        # starts cleanly even without a GL context (headless).
+    def _build_analyse_tab(self) -> QtWidgets.QWidget:
+        """Tab 3 — local lee-zone analysis: Pass-2 mesh/case controls + the 3D viewport."""
         w = QtWidgets.QWidget()
-        self._p2_widget = w
-        self._p2_layout = QtWidgets.QVBoxLayout(w)
+        self._analyse_tab = w
+        lay = QtWidgets.QVBoxLayout(w)
+
+        ctl = QtWidgets.QHBoxLayout()
+        self.mesh_combo = QtWidgets.QComboBox()
+        self.mesh_combo.addItems(list(PASS2_MESH_PRESETS))
+        self.mesh_hint = QtWidgets.QLabel("")
+        self.mesh_hint.setStyleSheet("color: #555;")
+        self.mesh_combo.currentTextChanged.connect(self._update_mesh_hint)
+        self.mesh_combo.setCurrentText(PASS2_MESH_DEFAULT)
+        self.case_edit = QtWidgets.QLineEdit("")
+        self.case_edit.setPlaceholderText("(détection auto d'un case NINJAFOAM_* en cache)")
+        self.btn_load_p2 = QtWidgets.QPushButton("Charger un case")
+        self.btn_load_p2.clicked.connect(self.on_load_pass2)
+        ctl.addWidget(QtWidgets.QLabel("Maillage :"))
+        ctl.addWidget(self.mesh_combo)
+        ctl.addWidget(self.mesh_hint)
+        ctl.addWidget(QtWidgets.QLabel("Case :"))
+        ctl.addWidget(self.case_edit)
+        ctl.addWidget(self.btn_load_p2)
+        ctl.addStretch(1)
+        lay.addLayout(ctl)
+        self._update_mesh_hint()
+
+        # The VTK/OpenGL viewport is created lazily (on first analysis) so the window starts
+        # cleanly even without a GL context (headless).
+        self._p2_widget = QtWidgets.QWidget()
+        self._p2_layout = QtWidgets.QVBoxLayout(self._p2_widget)
         self.plotter = None
         self._p2_placeholder = QtWidgets.QLabel(
-            "Le viewport 3D s'initialise à la première utilisation.\n"
-            "Clique « Charger un case Pass-2 (3D) » ou un point chaud sur la carte Pass-1."
+            "Le viewport 3D s'initialise à la première analyse.\n"
+            "Clique un point chaud sur la carte du créneau, ou « Charger un case »."
         )
         self._p2_placeholder.setAlignment(QtCore.Qt.AlignCenter)
         self._p2_layout.addWidget(self._p2_placeholder)
+        lay.addWidget(self._p2_widget)
         return w
 
     def _ensure_plotter(self) -> bool:
@@ -608,7 +622,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plotter.clear()
         volume3d.populate_plotter(self.plotter, case_dir, mfd, show_turbulence=False)
         self.plotter.reset_camera()
-        self.tabs.setCurrentWidget(self._p2_widget)
+        self.tabs.setCurrentWidget(self._analyse_tab)
         self._finish_job(f"Rotor Pass-2 en ({xy[0]:.0f}, {xy[1]:.0f})")
 
     def on_load_pass2(self) -> None:
@@ -635,7 +649,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.plotter.clear()
             volume3d.populate_plotter(self.plotter, case, mfd, show_turbulence=False)
             self.plotter.reset_camera()
-            self.tabs.setCurrentWidget(self._p2_widget)
+            self.tabs.setCurrentWidget(self._analyse_tab)
             self.statusBar().showMessage(f"Case Pass-2 chargé : {Path(case).name}")
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Erreur Pass-2", str(exc))
