@@ -516,6 +516,19 @@ wind). Dead single-shot handlers (`on_run_mass`, `on_run_subzones`) to prune.
 
 ---
 
+## Entry 22 — Cap the flight-window slider at the forecast horizon  (2026-06-21)
+
+**What changed.** The créneau range slider now caps at **now + `FORECAST_HORIZON_H` (48 h)**
+clock hours (was a fixed 72), so you can't pick a window beyond the (AROME-class) forecast
+horizon. A grey note shows the limit ("Prévision disponible jusqu'à ~ jeu. 25/06 23h (AROME
+~48 h)"). The constant is a placeholder for when the real Météo-France AROME GRIB is wired —
+then it reads the run's actual last valid hour.
+
+**Result.** Verified headless: at 23 h Paris the slider max = 71 (= 23 + 48) and the limit
+label is correct. Tests: 37 passed.
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

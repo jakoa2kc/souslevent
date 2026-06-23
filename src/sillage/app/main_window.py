@@ -31,6 +31,9 @@ from .map_tab import MapTab
 
 DEFAULT_DEM = "cache/champsaur/ign/champsaur_rgealti_50m_prepared_utm.tif"
 NO_BASEMAP = "Aucun"
+# AROME-class fine-forecast horizon (h) from now; caps the flight-window slider. When the
+# real Météo-France AROME GRIB is wired, replace with the actual run's last valid hour.
+FORECAST_HORIZON_H = 48
 
 PASS2_HALF_WIDTH_M = 2500.0  # ~5 km feature window around the clicked hotspot
 
@@ -187,13 +190,19 @@ class MainWindow(QtWidgets.QMainWindow):
         win = QtWidgets.QHBoxLayout()
         win.addWidget(QtWidgets.QLabel("Créneau de vol :"))
         self.window_slider = QRangeSlider(QtCore.Qt.Horizontal)
-        self.window_slider.setRange(0, 72)  # today .. day-after-tomorrow (AROME ~48 h)
-        self.window_slider.setValue((9, 15))
+        self.window_label = QtWidgets.QLabel("")
+        # Cap the slider at the forecast horizon (now + ~48 h). Configure before connecting
+        # so the initial setValue doesn't fire _on_window_change before the labels exist.
+        max_h = self._forecast_horizon_max()
+        self.window_slider.setRange(0, max_h)
+        self.window_slider.setValue((min(9, max_h - 1), min(15, max_h)))
         self.window_slider.valueChanged.connect(self._on_window_change)
         win.addWidget(self.window_slider, stretch=1)
-        self.window_label = QtWidgets.QLabel("")
         win.addWidget(self.window_label)
         lay.addLayout(win)
+        self.horizon_label = QtWidgets.QLabel("")
+        self.horizon_label.setStyleSheet("color: #777;")
+        lay.addWidget(self.horizon_label)
 
         self.btn_creneau = QtWidgets.QPushButton(
             "Valider le créneau horaire (lancer le criblage)")
@@ -301,6 +310,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.canvas.draw_idle()
 
     # --- flight window (drives the per-hour wind, replacing manual fields) ------
+    def _forecast_horizon_max(self) -> int:
+        """Slider max = current hour + the forecast horizon (clock hours from today 00:00)."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        return datetime.now(ZoneInfo("Europe/Paris")).hour + FORECAST_HORIZON_H
+
     def _window_hours(self) -> tuple[int, int]:
         lo, hi = self.window_slider.value()
         lo, hi = int(lo), int(hi)
@@ -337,6 +353,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return f"{_FR_DAYS[t.weekday()]} {t:%d/%m} {t:%Hh}"
 
         self.window_label.setText(f"{_fmt(start)} → {_fmt(end)}  ({hi - lo} h)")
+        limit = (start - timedelta(hours=lo)) + timedelta(hours=self._forecast_horizon_max())
+        self.horizon_label.setText(
+            f"Prévision disponible jusqu'à ~ {_fmt(limit)}  (AROME ~{FORECAST_HORIZON_H} h)")
 
     def _render_terrain(self, dem) -> None:
         """Show the MNT (hillshade over the basemap), no hazard overlay — default tab-2 view."""
