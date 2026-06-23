@@ -51,13 +51,7 @@ class MapTab(QtWidgets.QWidget):
         super().__init__(parent)
         self._bbox = None
         lay = QtWidgets.QVBoxLayout(self)
-
-        self.info = QtWidgets.QLabel(
-            "Navigue (glisser / molette), puis dessine un rectangle (outil ▭ en haut à "
-            "gauche) pour définir la zone de la Pass-1."
-        )
-        self.info.setWordWrap(True)
-        lay.addWidget(self.info)
+        lay.setContentsMargins(0, 0, 0, 0)  # let the map fill the whole tab
 
         if _is_headless():
             # QtWebEngine spawns a Chromium process that can't render (and crashes at exit)
@@ -89,10 +83,6 @@ class MapTab(QtWidgets.QWidget):
 
     def _on_rectangle(self, s: float, w: float, n: float, e: float) -> None:
         self._bbox = (s, w, n, e)
-        self.info.setText(
-            f"Zone Pass-1 sélectionnée : S {s:.4f}, O {w:.4f} → N {n:.4f}, E {e:.4f}  "
-            f"(~{_km_width(s, w, n, e):.0f} × {(n - s) * 111:.0f} km)"
-        )
         self.aoiSelected.emit(s, w, n, e)
 
 

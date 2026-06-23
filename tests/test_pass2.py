@@ -265,9 +265,9 @@ def test_pass2_wind_falls_back_to_controls():
 
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     w = MainWindow()
-    w.wind_dir.setValue(300.0)
-    w.wind_spd.setValue(9.0)
-    assert w._pass2_wind_at(270000.0, 4958000.0) == (9.0, 300.0, "contrôles")
+    # No manual wind fields: the Pass-2 fallback wind comes from the flight window's first
+    # hour (synthetic_series hour 0 = 6 m/s from 300°).
+    assert w._pass2_wind_at(270000.0, 4958000.0) == (6.0, 300.0, "créneau")
     w.deleteLater()
 
 

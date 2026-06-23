@@ -434,6 +434,33 @@ the coarse zone DEM. Optional IGN RGE ALTI path for high-fidelity French zones.
 
 ---
 
+## Entry 19 — IHM polish: maximized map, flight-window range slider, MNT view  (2026-06-21)
+
+**What changed.**
+- **Tab 1**: the Leaflet map is now maximized (info line removed from the MapTab); the AOI
+  info sits **bottom-left** next to a **prominent green "Valider"** button.
+- **Tab 2**: removed the manual **wind direction/speed** and **"Heures"** fields. Added a
+  **double-handle range slider** (superqt `QRangeSlider`) for the **flight window** — clock
+  hours of the day in Europe/Paris (label e.g. "mer. 09h → mer. 15h (6 h)"). On arrival
+  (after "Valider"), the tab shows the **bare MNT** (hillshade, no hazard overlay) via the
+  new `map2d.draw_hillshade`.
+- **Wind source**: with the manual fields gone, every Pass-1 action now derives its wind from
+  the selected window — `_window_series()` (synthetic per hour) and `_representative_wind()`
+  (the window's first hour) for the single-shot buttons; the Pass-2 fallback wind tag became
+  "créneau". (Wind stays synthetic until AROME is wired; only the *hours* are real.)
+
+**Why.** Match the workflow: pick the zone, pick the flight window, screen — no loose manual
+wind/hour fields. A pilot reads absolute clock hours, not "+N h".
+
+**Result.** Verified headless: tab 2 has the range slider (no wind/hours fields), the window
+label updates on drag, `_representative_wind()` = (6 m/s, 300°), and "Valider" → the MNT
+hillshade renders in tab 2 then waits for a run. New `superqt` dep. Tests: 36 passed.
+
+**Open questions.** Day picker (today vs tomorrow) for the window; real per-hour AROME wind
+so the window actually changes the wind (not just labels).
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

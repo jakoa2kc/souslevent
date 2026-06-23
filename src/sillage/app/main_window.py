@@ -16,6 +16,7 @@ from matplotlib.backends.backend_qtagg import (
     NavigationToolbar2QT,
 )
 from matplotlib.figure import Figure
+from superqt import QRangeSlider
 
 from ..config import load_config, resolve_cache_path
 from ..flow.windninja import locate_openfoam_case, run_momentum
@@ -95,11 +96,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Prêt")
 
     def _on_aoi_selected(self, s: float, w: float, n: float, e: float) -> None:
+        import math
+
         self.selected_bbox = (s, w, n, e)
-        self.statusBar().showMessage(
-            f"Zone sélectionnée : S {s:.4f}, O {w:.4f} → N {n:.4f}, E {e:.4f}. "
-            "Clique « Valider la zone » pour préparer le MNT."
-        )
+        wkm = (e - w) * 111.0 * math.cos(math.radians((s + n) / 2.0))
+        hkm = (n - s) * 111.0
+        txt = (f"Zone : S {s:.4f}, O {w:.4f} → N {n:.4f}, E {e:.4f}  "
+               f"(~{wkm:.0f} × {hkm:.0f} km). Clique « Valider »…")
+        self.zone_info.setText(txt)
+        self.statusBar().showMessage(txt)
 
     def on_validate_zone(self) -> None:
         """Prepare a coarse DEM for the drawn rectangle (worker thread), then go to tab 2."""
@@ -133,71 +138,86 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_dem_ready(self, dem_path: str) -> None:
         self._dem_path = dem_path
-        self._dem = None  # force a reload on the next Pass-1 action
-        self._finish_job("MNT prêt — passe à la sélection du créneau.")
+        self._set_single_map_mode(True)
+        self._pass1_vel_path = None
+        self._pass1_ang_path = None
+        try:
+            self._dem = load_dem(dem_path, max_domain_km=200.0)
+            self._render_terrain(self._dem)  # show the MNT, no hazard overlay yet
+        except Exception as exc:
+            self._dem = None
+            QtWidgets.QMessageBox.warning(self, "MNT", f"MNT préparé, affichage impossible : {exc}")
+        self._finish_job("MNT prêt — sélectionne le créneau de vol.")
         self.tabs.setCurrentWidget(self._creneau_tab)
 
     # --- UI construction (controls live in their own tabs) ---------------------
     def _build_zone_tab(self) -> QtWidgets.QWidget:
-        """Tab 1 — flight-zone selection: the interactive map + a "Valider" button that
-        prepares the DEM for the drawn rectangle, then moves to the créneau tab."""
+        """Tab 1 — flight-zone selection: a maximized interactive map, an info line bottom
+        left, and a prominent "Valider" button that prepares the DEM, then moves to tab 2."""
         w = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(w)
+        lay.setContentsMargins(4, 4, 4, 4)
         self.map_tab = MapTab()
         self.map_tab.aoiSelected.connect(self._on_aoi_selected)
-        lay.addWidget(self.map_tab)
-        row = QtWidgets.QHBoxLayout()
-        row.addStretch(1)
-        self.btn_validate = QtWidgets.QPushButton("Valider la zone (préparer le MNT)")
+        lay.addWidget(self.map_tab, stretch=1)  # the map takes all available space
+
+        bar = QtWidgets.QHBoxLayout()
+        self.zone_info = QtWidgets.QLabel(
+            "Navigue (glisser / molette), puis dessine un rectangle (outil ▭ en haut à "
+            "gauche de la carte) pour définir la zone de vol."
+        )
+        self.zone_info.setWordWrap(True)
+        bar.addWidget(self.zone_info, stretch=1)  # info bottom-left
+        self.btn_validate = QtWidgets.QPushButton("✓  Valider la zone et préparer le terrain")
+        self.btn_validate.setStyleSheet(
+            "font-weight: bold; padding: 10px 22px; background:#2d7d2d; color:white;"
+            " border-radius:5px;"
+        )
         self.btn_validate.clicked.connect(self.on_validate_zone)
-        row.addWidget(self.btn_validate)
-        lay.addLayout(row)
+        bar.addWidget(self.btn_validate)
+        lay.addLayout(bar)
         return w
 
     def _build_creneau_tab(self) -> QtWidgets.QWidget:
-        """Tab 2 — flight-slot selection: Pass-1 screening, hourly loop + the time slider."""
+        """Tab 2 — flight-slot selection: a flight-window range slider drives the Pass-1
+        screening (wind comes from the window, not manual fields); the result is scrubbed
+        with the hour slider below the map."""
         w = QtWidgets.QWidget()
         self._creneau_tab = w
         lay = QtWidgets.QVBoxLayout(w)
 
-        inputs = QtWidgets.QHBoxLayout()
-        self.wind_dir = QtWidgets.QDoubleSpinBox()
-        self.wind_dir.setRange(0.0, 360.0)
-        self.wind_dir.setValue(320.0)
-        self.wind_spd = QtWidgets.QDoubleSpinBox()
-        self.wind_spd.setRange(0.0, 60.0)
-        self.wind_spd.setValue(8.0)
+        # Flight window: a double-handle range slider over the next 24 h (Europe/Paris).
+        win = QtWidgets.QHBoxLayout()
+        win.addWidget(QtWidgets.QLabel("Créneau de vol :"))
+        self.window_slider = QRangeSlider(QtCore.Qt.Horizontal)
+        self.window_slider.setRange(0, 24)
+        self.window_slider.setValue((9, 15))
+        self.window_slider.valueChanged.connect(self._on_window_change)
+        win.addWidget(self.window_slider, stretch=1)
+        self.window_label = QtWidgets.QLabel("")
+        win.addWidget(self.window_label)
+        lay.addLayout(win)
+
+        # Options + screening actions (wind is taken from the selected window).
+        opt = QtWidgets.QHBoxLayout()
         self.basemap_combo = QtWidgets.QComboBox()
         self.basemap_combo.addItems([NO_BASEMAP, *map2d.BASEMAP_SOURCES.keys()])
         self.basemap_combo.setCurrentText("IGN plan")
         self.basemap_combo.currentTextChanged.connect(self._on_basemap_change)
-        self.hours_spin = QtWidgets.QSpinBox()
-        self.hours_spin.setRange(1, 24)
-        self.hours_spin.setValue(6)
-        inputs.addWidget(QtWidgets.QLabel("Vent DE (°) :"))
-        inputs.addWidget(self.wind_dir)
-        inputs.addWidget(QtWidgets.QLabel("Vitesse (m/s) :"))
-        inputs.addWidget(self.wind_spd)
-        inputs.addWidget(QtWidgets.QLabel("Fond :"))
-        inputs.addWidget(self.basemap_combo)
-        inputs.addWidget(QtWidgets.QLabel("Heures :"))
-        inputs.addWidget(self.hours_spin)
-        inputs.addStretch(1)
-        lay.addLayout(inputs)
-
-        btns = QtWidgets.QHBoxLayout()
-        self.btn_geom = QtWidgets.QPushButton("Géométrie")
+        opt.addWidget(QtWidgets.QLabel("Fond :"))
+        opt.addWidget(self.basemap_combo)
+        self.btn_geom = QtWidgets.QPushButton("Aperçu (géométrie)")
         self.btn_geom.clicked.connect(self.on_compute_pass1)
-        self.btn_mass = QtWidgets.QPushButton("WindNinja masse")
+        self.btn_mass = QtWidgets.QPushButton("Criblage WindNinja")
         self.btn_mass.clicked.connect(self.on_run_mass)
-        self.btn_hourly = QtWidgets.QPushButton("Horaire (synthétique)")
+        self.btn_hourly = QtWidgets.QPushButton("Criblage du créneau")
         self.btn_hourly.clicked.connect(self.on_run_hourly)
-        self.btn_subzones = QtWidgets.QPushButton("Sous-zones (spatial)")
+        self.btn_subzones = QtWidgets.QPushButton("Criblage spatial")
         self.btn_subzones.clicked.connect(self.on_run_subzones)
         for b in (self.btn_geom, self.btn_mass, self.btn_hourly, self.btn_subzones):
-            btns.addWidget(b)
-        btns.addStretch(1)
-        lay.addLayout(btns)
+            opt.addWidget(b)
+        opt.addStretch(1)
+        lay.addLayout(opt)
 
         self.fig = Figure(figsize=(6, 5))
         self.canvas = FigureCanvasQTAgg(self.fig)
@@ -211,7 +231,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hour_slider.setMaximum(0)
         self.hour_slider.valueChanged.connect(self._on_slider_change)
         self.hour_label = QtWidgets.QLabel("")
-        slider_row.addWidget(QtWidgets.QLabel("Créneau :"))
+        slider_row.addWidget(QtWidgets.QLabel("Heure affichée :"))
         slider_row.addWidget(self.hour_slider)
         slider_row.addWidget(self.hour_label)
         self.hour_widget = QtWidgets.QWidget()
@@ -227,7 +247,54 @@ class MainWindow(QtWidgets.QMainWindow):
         hint.setStyleSheet("color: #a33; font-style: italic;")
         lay.addWidget(hint)
         self.canvas.mpl_connect("button_press_event", self.on_map_click)
+        self._on_window_change()
         return w
+
+    # --- flight window (drives the per-hour wind, replacing manual fields) ------
+    def _window_hours(self) -> tuple[int, int]:
+        lo, hi = self.window_slider.value()
+        lo, hi = int(lo), int(hi)
+        return lo, max(hi, lo + 1)
+
+    def _window_start(self):
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+
+        # Slider = clock hours of the flight day (today, Europe/Paris): 0..24 -> 00h..24h.
+        midnight = datetime.now(ZoneInfo("Europe/Paris")).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        return midnight + timedelta(hours=self._window_hours()[0])
+
+    def _window_series(self):
+        lo, hi = self._window_hours()
+        return synthetic_series(hi - lo, start=self._window_start())
+
+    def _representative_wind(self) -> tuple[float, float]:
+        """(speed, from_deg) for single-shot Pass-1 actions: the window's first hour."""
+        _label, spd, drc = self._window_series()[0]
+        return spd, drc
+
+    def _on_window_change(self, *_args) -> None:
+        from datetime import timedelta
+
+        from ..screening.pass1 import _FR_DAYS
+
+        start = self._window_start()
+        lo, hi = self._window_hours()
+        end = start + timedelta(hours=hi - lo)
+        self.window_label.setText(
+            f"{_FR_DAYS[start.weekday()]} {start:%Hh} → {_FR_DAYS[end.weekday()]} {end:%Hh}"
+            f"  ({hi - lo} h)"
+        )
+
+    def _render_terrain(self, dem) -> None:
+        """Show the bare MNT (hillshade), no hazard overlay — the default view in tab 2."""
+        self._last_map = None
+        self.fig.clear()
+        ax = self.fig.add_subplot(111)
+        map2d.draw_hillshade(ax, dem)
+        ax.set_title("MNT — zone de vol  (choisis un créneau, puis lance un criblage)")
+        self.canvas.draw()
 
     def _build_analyse_tab(self) -> QtWidgets.QWidget:
         """Tab 3 — local lee-zone analysis: Pass-2 mesh/case controls + the 3D viewport."""
@@ -348,10 +415,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_single_map_mode(True)
             self._pass1_vel_path = None  # geometry-only has no Pass-1 wind field
             self._pass1_ang_path = None
-            hazard = ind.hazard_indicator(dem, self.wind_dir.value())
-            self._render_map(
-                dem, hazard, f"Pass-1 géométrie seule — vent de {self.wind_dir.value():.0f}°"
-            )
+            _spd, drc = self._representative_wind()
+            hazard = ind.hazard_indicator(dem, drc)
+            self._render_map(dem, hazard, f"Pass-1 géométrie — vent de {drc:.0f}°")
             self.statusBar().showMessage(
                 f"Pass-1 géométrie sur grille {dem.shape}, rés. {dem.resolution_m:.0f} m"
             )
@@ -366,8 +432,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         cfg = self.cfg
         dem_path = self._dem_path
-        wind_dir = self.wind_dir.value()
-        wind_spd = self.wind_spd.value()
+        wind_spd, wind_dir = self._representative_wind()
         resolution_m = 100.0
         cli = cfg.windninja_cli
         max_km = cfg.max_domain_km
@@ -442,7 +507,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         cfg = self.cfg
         dem_path = self._dem_path
-        hours = int(self.hours_spin.value())
+        series = self._window_series()  # absolute Paris hours of the selected window
         resolution_m = 100.0
         cli = cfg.windninja_cli
         max_km = cfg.max_domain_km
@@ -450,7 +515,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def fn(on_progress, cancel):  # worker thread — no Qt here
             dem = load_dem(dem_path, max_domain_km=max_km)
-            series = synthetic_series(hours)
             n = len(series)
             out = []
             for i, (label, spd, drc) in enumerate(series):
@@ -472,7 +536,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return dem, out
 
         self._cancelling = False
-        self._set_running(True, f"Pass-1 horaire ({hours} h)…")
+        self._set_running(True, f"Pass-1 créneau ({len(series)} h)…")
         job = SolveJob(fn, self)
         job.progress.connect(self._on_job_progress)
         job.finished.connect(self._on_hourly_finished)
@@ -522,8 +586,7 @@ class MainWindow(QtWidgets.QMainWindow):
         dem_path = self._dem_path
         cli = cfg.windninja_cli
         max_km = cfg.max_domain_km
-        rep_dir = self.wind_dir.value()
-        base_spd = self.wind_spd.value()
+        base_spd, rep_dir = self._representative_wind()
         work_root = cfg.cache_dir / "champsaur" / "ihm_subzones"
 
         def fn(on_progress, cancel):  # worker thread — no Qt here
@@ -606,16 +669,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _pass2_wind_at(self, x: float, y: float) -> tuple[float, float, str]:
         """Pass-2 BC wind: the Pass-1 field sampled just upstream of (x, y) if a mass run is
-        available, else the controls' domain wind (M3 refinement)."""
-        ctrl_dir = self.wind_dir.value()
-        ctrl_spd = self.wind_spd.value()
+        available, else the wind of the selected flight window (M3 refinement)."""
+        rep_spd, rep_dir = self._representative_wind()
         if self._pass1_vel_path and self._pass1_ang_path:
             bc = upstream_crest_wind(
-                self._pass1_vel_path, self._pass1_ang_path, x, y, ctrl_dir
+                self._pass1_vel_path, self._pass1_ang_path, x, y, rep_dir
             )
             if bc is not None:
                 return bc[0], bc[1], "Pass-1 amont"
-        return ctrl_spd, ctrl_dir, "contrôles"
+        return rep_spd, rep_dir, "créneau"
 
     def _launch_pass2_at(self, x: float, y: float, bc_spd: float, bc_dir: float,
                          wind_src: str) -> None:
@@ -685,7 +747,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
-            mfd = volume3d.mean_flow_vector(self.wind_dir.value())
+            mfd = volume3d.mean_flow_vector(self._representative_wind()[1])
             self.plotter.clear()
             volume3d.populate_plotter(self.plotter, case, mfd, show_turbulence=False)
             self.plotter.reset_camera()

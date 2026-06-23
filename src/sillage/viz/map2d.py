@@ -57,6 +57,16 @@ class HotspotClick:
     bbox_m: tuple[float, float, float, float]  # buffered (left, bottom, right, top)
 
 
+def draw_hillshade(ax, dem: Dem):
+    """Draw only the DEM hillshade (no hazard overlay) — the bare terrain view. Returns im."""
+    left, bottom, right, top = dem.bounds
+    im = ax.imshow(_hillshade(dem), cmap="gray", extent=(left, right, bottom, top),
+                   origin="upper")
+    ax.set_xlabel("Est (m)")
+    ax.set_ylabel("Nord (m)")
+    return im
+
+
 def draw_indicator(ax, dem: Dem, indicator: np.ndarray):
     """Draw hillshade + hazard overlay onto an EXISTING Axes; returns the overlay image.
 
