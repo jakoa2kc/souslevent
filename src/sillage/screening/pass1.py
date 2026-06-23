@@ -19,16 +19,30 @@ from ..terrain.dem import Dem
 from . import indicator as ind
 
 
-def synthetic_series(hours: int) -> list[tuple[str, float, float]]:
-    """Deterministic NW-sweep hourly wind series for offline plumbing/demo (NOT a forecast).
+_FR_DAYS = ("lun.", "mar.", "mer.", "jeu.", "ven.", "sam.", "dim.")
 
-    Returns (label, speed_ms, from_deg) per hour. Real hourly winds come from Open-Meteo /
-    AROME sub-zones (ADR-0007); this keeps the hourly UI usable without a network.
+
+def synthetic_series(
+    hours: int, start=None, tz: str = "Europe/Paris"
+) -> list[tuple[str, float, float]]:
+    """Deterministic NW-sweep hourly wind series, labelled with ABSOLUTE local clock hours.
+
+    The wind values are synthetic (NOT a forecast), but the labels are real wall-clock hours
+    in ``tz`` (default Europe/Paris) starting at ``start`` (default: the current hour), so the
+    slider reads "mar. 14h", "mar. 15h", ... Real winds come from Open-Meteo / AROME sub-zones
+    (ADR-0007). Returns (label, speed_ms, from_deg) per hour.
     """
-    return [
-        (f"synthetic +{i:02d}h", 6.0 + 1.0 * i, (300.0 + 10.0 * i) % 360.0)
-        for i in range(hours)
-    ]
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    zone = ZoneInfo(tz)
+    if start is None:
+        start = datetime.now(zone).replace(minute=0, second=0, microsecond=0)
+    out = []
+    for i in range(hours):
+        t = start + timedelta(hours=i)
+        out.append((f"{_FR_DAYS[t.weekday()]} {t:%Hh}", 6.0 + 1.0 * i, (300.0 + 10.0 * i) % 360.0))
+    return out
 
 
 def find_speed_grid(work_dir: Path) -> Path | None:

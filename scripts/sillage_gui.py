@@ -10,11 +10,17 @@ import sys
 
 
 def main() -> None:
-    from PySide6 import QtWidgets
+    from PySide6 import QtCore, QtWidgets
 
     from sillage.app.main_window import MainWindow
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    # French locale for Qt's built-in strings (dialog Yes/No, toolbar tooltips, etc.).
+    translator = QtCore.QTranslator()
+    tpath = QtCore.QLibraryInfo.path(QtCore.QLibraryInfo.LibraryPath.TranslationsPath)
+    if translator.load("qtbase_fr", tpath):
+        app.installTranslator(translator)
+        app._fr_translator = translator  # keep a reference so it isn't garbage-collected
     win = MainWindow()
     win.resize(1320, 840)
     win.show()

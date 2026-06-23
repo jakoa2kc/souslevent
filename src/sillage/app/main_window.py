@@ -1,14 +1,9 @@
 """Sillage main window (ADR-0009).
 
-First IHM vertical slice: a controls panel + two tabs — Pass-1 screening (2D, embedded
-matplotlib) and Pass-2 detail (3D, embedded pyvistaqt). It reuses the exact rendering of
-the headless code (viz.map2d.draw_indicator, viz.volume3d.populate_plotter), so the app and
-the saved artefacts look identical.
-
-This slice runs the FAST paths synchronously (geometry-only Pass-1; loading an existing
-Pass-2 case). The long WindNinja/OpenFOAM solves will move to a worker thread in the next
-increment (ADR-0008 mesh knob + progress/cancel). Pass-1 (triage) and Pass-2 (detail) are
-kept as distinct tabs on purpose (ADR-0005).
+Controls panel + two tabs — Pass-1 screening (2D, embedded matplotlib) and Pass-2 detail
+(3D, embedded pyvistaqt). It reuses the headless rendering (viz.map2d, viz.volume3d) and runs
+long WindNinja/OpenFOAM solves on a worker thread (jobs.SolveJob). Pass-1 (triage) and Pass-2
+(detail) are kept as distinct tabs on purpose (ADR-0005). User-facing strings are in French.
 """
 
 from __future__ import annotations
@@ -36,18 +31,19 @@ from ..viz import map2d, volume3d
 from .jobs import SolveJob
 
 DEFAULT_DEM = "cache/champsaur/ign/champsaur_rgealti_50m_prepared_utm.tif"
+NO_BASEMAP = "Aucun"
 
 PASS2_HALF_WIDTH_M = 2500.0  # ~5 km feature window around the clicked hotspot
 
 # ADR-0008: Pass-2 mesh resolution is a quality/time knob. Each preset = (mesh_count,
-# iterations). Default = Medium; "refine on doubt" by picking a finer preset.
+# iterations). Default = "Moyen"; "refine on doubt" by picking a finer preset.
 PASS2_MESH_PRESETS: dict[str, tuple[int, int]] = {
-    "Coarse — fastest": (20_000, 100),
-    "Medium — default": (50_000, 200),
-    "Fine — slow": (150_000, 300),
-    "Max — very slow": (400_000, 400),
+    "Grossier — rapide": (20_000, 100),
+    "Moyen — défaut": (50_000, 200),
+    "Fin — lent": (150_000, 300),
+    "Max — très lent": (400_000, 400),
 }
-PASS2_MESH_DEFAULT = "Medium — default"
+PASS2_MESH_DEFAULT = "Moyen — défaut"
 
 
 def _estimate_minutes(mesh_count: int) -> int:
@@ -59,7 +55,7 @@ def _estimate_minutes(mesh_count: int) -> int:
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Sillage — leeward turbulence screening")
+        self.setWindowTitle("Sillage — turbulences sous le vent")
         self.cfg = load_config()
         self._dem = None
         # Pass-1 wind field from the last mass run, for upstream-crest Pass-2 BC (M3).
@@ -73,12 +69,12 @@ class MainWindow(QtWidgets.QMainWindow):
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         split.addWidget(self._build_controls())
         self.tabs = QtWidgets.QTabWidget()
-        self.tabs.addTab(self._build_pass1_tab(), "Pass 1 — Screening (2D)")
-        self.tabs.addTab(self._build_pass2_tab(), "Pass 2 — Detail (3D)")
+        self.tabs.addTab(self._build_pass1_tab(), "Passe 1 — Criblage (2D)")
+        self.tabs.addTab(self._build_pass2_tab(), "Passe 2 — Détail (3D)")
         split.addWidget(self.tabs)
         split.setStretchFactor(1, 1)
         self.setCentralWidget(split)
-        self.statusBar().showMessage("Ready")
+        self.statusBar().showMessage("Prêt")
 
     # --- UI construction -------------------------------------------------------
     def _build_controls(self) -> QtWidgets.QWidget:
@@ -94,25 +90,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wind_spd.setValue(8.0)
 
         self.basemap_combo = QtWidgets.QComboBox()
-        self.basemap_combo.addItems(["None", *map2d.BASEMAP_SOURCES.keys()])
+        self.basemap_combo.addItems([NO_BASEMAP, *map2d.BASEMAP_SOURCES.keys()])
         self.basemap_combo.setCurrentText("IGN plan")
         self.basemap_combo.currentTextChanged.connect(self._on_basemap_change)
 
-        self.btn_geom = QtWidgets.QPushButton("Compute Pass-1 (geometry)")
+        self.btn_geom = QtWidgets.QPushButton("Calculer Pass-1 (géométrie)")
         self.btn_geom.clicked.connect(self.on_compute_pass1)
-        self.btn_mass = QtWidgets.QPushButton("Run WindNinja mass (Pass-1)")
+        self.btn_mass = QtWidgets.QPushButton("Lancer WindNinja masse (Pass-1)")
         self.btn_mass.clicked.connect(self.on_run_mass)
         self.hours_spin = QtWidgets.QSpinBox()
         self.hours_spin.setRange(1, 24)
         self.hours_spin.setValue(6)
-        self.btn_hourly = QtWidgets.QPushButton("Run hourly (Pass-1, synthetic)")
+        self.btn_hourly = QtWidgets.QPushButton("Lancer horaire (Pass-1, synthétique)")
         self.btn_hourly.clicked.connect(self.on_run_hourly)
-        self.btn_subzones = QtWidgets.QPushButton("Run sub-zones (Pass-1, spatial)")
+        self.btn_subzones = QtWidgets.QPushButton("Lancer sous-zones (Pass-1, spatial)")
         self.btn_subzones.clicked.connect(self.on_run_subzones)
 
         self.case_edit = QtWidgets.QLineEdit("")
-        self.case_edit.setPlaceholderText("(auto-detect cached NINJAFOAM_* case)")
-        self.btn_load_p2 = QtWidgets.QPushButton("Load Pass-2 case (3D)")
+        self.case_edit.setPlaceholderText("(détection auto d'un case NINJAFOAM_* en cache)")
+        self.btn_load_p2 = QtWidgets.QPushButton("Charger un case Pass-2 (3D)")
         self.btn_load_p2.clicked.connect(self.on_load_pass2)
 
         self.mesh_combo = QtWidgets.QComboBox()
@@ -125,23 +121,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setVisible(False)
-        self.btn_cancel = QtWidgets.QPushButton("Cancel")
+        self.btn_cancel = QtWidgets.QPushButton("Annuler")
         self.btn_cancel.setVisible(False)
         self.btn_cancel.clicked.connect(self.on_cancel)
 
-        form.addRow("DEM:", self.dem_edit)
-        form.addRow("Wind FROM (deg):", self.wind_dir)
-        form.addRow("Wind speed (m/s):", self.wind_spd)
-        form.addRow("Basemap:", self.basemap_combo)
+        form.addRow("MNT :", self.dem_edit)
+        form.addRow("Vent DE (deg) :", self.wind_dir)
+        form.addRow("Vitesse vent (m/s) :", self.wind_spd)
+        form.addRow("Fond de carte :", self.basemap_combo)
         form.addRow(self.btn_geom)
         form.addRow(self.btn_mass)
-        form.addRow("Hours:", self.hours_spin)
+        form.addRow("Heures :", self.hours_spin)
         form.addRow(self.btn_hourly)
         form.addRow(self.btn_subzones)
         form.addRow(QtWidgets.QLabel("———"))
-        form.addRow("Pass-2 mesh:", self.mesh_combo)
+        form.addRow("Maillage Pass-2 :", self.mesh_combo)
         form.addRow(self.mesh_hint)
-        form.addRow("Pass-2 case:", self.case_edit)
+        form.addRow("Case Pass-2 :", self.case_edit)
         form.addRow(self.btn_load_p2)
         form.addRow(self.progress)
         form.addRow(self.btn_cancel)
@@ -174,7 +170,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hour_slider.setMaximum(0)
         self.hour_slider.valueChanged.connect(self._on_slider_change)
         self.hour_label = QtWidgets.QLabel("")
-        slider_row.addWidget(QtWidgets.QLabel("Hour:"))
+        slider_row.addWidget(QtWidgets.QLabel("Heure :"))
         slider_row.addWidget(self.hour_slider)
         slider_row.addWidget(self.hour_label)
         self.hour_widget = QtWidgets.QWidget()
@@ -183,8 +179,10 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(self.hour_widget)
 
         hint = QtWidgets.QLabel(
-            "Tip: left-click a hotspot on the map to launch a Pass-2 momentum solve there."
+            "Astuce : clic gauche sur un point chaud de la carte pour lancer un calcul "
+            "Pass-2 (momentum) à cet endroit."
         )
+        hint.setWordWrap(True)
         hint.setStyleSheet("color: #555;")
         lay.addWidget(hint)
         self.canvas.mpl_connect("button_press_event", self.on_map_click)
@@ -192,14 +190,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_pass2_tab(self) -> QtWidgets.QWidget:
         # The VTK/OpenGL viewport is created lazily (on first Pass-2 use) so the window
-        # starts cleanly even without a GL context (headless), and we don't pay VTK init
-        # until the 3D view is actually needed.
+        # starts cleanly even without a GL context (headless).
         w = QtWidgets.QWidget()
         self._p2_widget = w
         self._p2_layout = QtWidgets.QVBoxLayout(w)
         self.plotter = None
         self._p2_placeholder = QtWidgets.QLabel(
-            "3D viewport initializes on first use.\nClick “Load Pass-2 case (3D)”."
+            "Le viewport 3D s'initialise à la première utilisation.\n"
+            "Clique « Charger un case Pass-2 (3D) » ou un point chaud sur la carte Pass-1."
         )
         self._p2_placeholder.setAlignment(QtCore.Qt.AlignCenter)
         self._p2_layout.addWidget(self._p2_placeholder)
@@ -222,8 +220,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         except Exception as exc:  # no GL context available
             QtWidgets.QMessageBox.critical(
-                self, "3D init failed",
-                f"Could not initialize the 3D viewport (OpenGL):\n{exc}",
+                self, "Échec init 3D",
+                f"Impossible d'initialiser le viewport 3D (OpenGL) :\n{exc}",
             )
             return False
 
@@ -236,8 +234,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _update_mesh_hint(self, *_args) -> None:
         mesh_count, iters, _name = self._selected_mesh()
         self.mesh_hint.setText(
-            f"~{mesh_count:,} cells, {iters} iters - "
-            f"~{_estimate_minutes(mesh_count)} min (rough)"
+            f"~{mesh_count:,} mailles, {iters} itér. - "
+            f"~{_estimate_minutes(mesh_count)} min (approx.)"
         )
 
     # --- map rendering (shared by all Pass-1 views) ----------------------------
@@ -249,7 +247,7 @@ class MainWindow(QtWidgets.QMainWindow):
         extent = (left, right, bottom, top)
         self.fig.clear()
         ax = self.fig.add_subplot(111)
-        if source != "None":
+        if source != NO_BASEMAP:
             from matplotlib import colors
 
             im = ax.imshow(hazard, cmap="inferno", extent=extent, origin="upper",
@@ -261,12 +259,12 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception as exc:  # offline / tiles unavailable -> hillshade fallback
                 ax.clear()
                 im = map2d.draw_indicator(ax, dem, hazard)
-                self.statusBar().showMessage(f"Basemap unavailable ({exc}); using hillshade")
-            ax.set_xlabel("Easting (m)")
-            ax.set_ylabel("Northing (m)")
+                self.statusBar().showMessage(f"Fond de carte indisponible ({exc}) ; ombrage")
+            ax.set_xlabel("Est (m)")
+            ax.set_ylabel("Nord (m)")
         else:
             im = map2d.draw_indicator(ax, dem, hazard)
-        self.fig.colorbar(im, ax=ax, label="leeward hazard indicator (0–1)")
+        self.fig.colorbar(im, ax=ax, label="indicateur de danger sous le vent (0–1)")
         ax.set_title(f"{title}\n{map2d.DISCLAIMER}")
         self.canvas.draw()
 
@@ -285,13 +283,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._pass1_ang_path = None
             hazard = ind.hazard_indicator(dem, self.wind_dir.value())
             self._render_map(
-                dem, hazard, f"Pass-1 geometry-only — wind from {self.wind_dir.value():.0f}°"
+                dem, hazard, f"Pass-1 géométrie seule — vent de {self.wind_dir.value():.0f}°"
             )
             self.statusBar().showMessage(
-                f"Pass-1 geometry on {dem.shape} grid, res {dem.resolution_m:.0f} m"
+                f"Pass-1 géométrie sur grille {dem.shape}, rés. {dem.resolution_m:.0f} m"
             )
         except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "Pass-1 error", str(exc))
+            QtWidgets.QMessageBox.critical(self, "Erreur Pass-1", str(exc))
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
 
@@ -321,7 +319,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return dem, hazard, wind_dir, vel_path, ang_path
 
         self._cancelling = False
-        self._set_running(True, "WindNinja mass running…")
+        self._set_running(True, "WindNinja masse en cours…")
         job = SolveJob(fn, self)
         job.progress.connect(self._on_job_progress)
         job.finished.connect(self._on_mass_finished)
@@ -332,7 +330,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_cancel(self) -> None:
         if self._job is not None:
             self._cancelling = True
-            self.statusBar().showMessage("Cancelling…")
+            self.statusBar().showMessage("Annulation…")
             self._job.cancel()
 
     def _set_running(self, running: bool, msg: str = "") -> None:
@@ -360,9 +358,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._dem = dem
         self._pass1_vel_path = vel_path
         self._pass1_ang_path = ang_path
-        self._render_map(dem, hazard, f"Pass-1 WindNinja mass — wind from {wind_dir:.0f}°")
+        self._render_map(dem, hazard, f"Pass-1 WindNinja masse — vent de {wind_dir:.0f}°")
         self._set_single_map_mode(True)
-        self._finish_job("Pass-1 mass done")
+        self._finish_job("Pass-1 masse terminé")
 
     # --- hourly Pass-1 + time slider -------------------------------------------
     def _set_single_map_mode(self, single: bool) -> None:
@@ -396,7 +394,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
 
                 def hp(pct, msg, i=i):  # map per-hour progress to overall 0..100
-                    on_progress(int((i + pct / 100.0) / n * 100), f"hour {i + 1}/{n}: {msg}")
+                    on_progress(int((i + pct / 100.0) / n * 100), f"heure {i + 1}/{n} : {msg}")
 
                 hazard, vel = hourly_indicator(
                     dem=dem, cli=cli, dem_path=dem_path, work_dir=work,
@@ -407,7 +405,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return dem, out
 
         self._cancelling = False
-        self._set_running(True, f"Pass-1 hourly ({hours} h)…")
+        self._set_running(True, f"Pass-1 horaire ({hours} h)…")
         job = SolveJob(fn, self)
         job.progress.connect(self._on_job_progress)
         job.finished.connect(self._on_hourly_finished)
@@ -425,7 +423,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hour_slider.setValue(0)
         self.hour_slider.blockSignals(False)
         self._show_hour(0)
-        self._finish_job(f"Pass-1 hourly: {len(stack)} hours")
+        self._finish_job(f"Pass-1 horaire : {len(stack)} heures")
 
     def _on_slider_change(self, val: int) -> None:
         if self._hourly:
@@ -437,7 +435,7 @@ class MainWindow(QtWidgets.QMainWindow):
         label, hazard, vel, ang = self._hourly[i]
         self._pass1_vel_path = vel
         self._pass1_ang_path = ang
-        self._render_map(self._dem, hazard, f"Pass-1 hourly — {label}")
+        self._render_map(self._dem, hazard, f"Pass-1 horaire — {label}")
         self.hour_label.setText(label)
 
     # --- sub-zone spatial Pass-1 (ADR-0007) ------------------------------------
@@ -445,8 +443,8 @@ class MainWindow(QtWidgets.QMainWindow):
         """Run a 2x2 sub-zone Pass-1 with a synthetic *spatial* wind on the worker.
 
         Demonstrates ADR-0007 offline: each tile gets its own wind (direction sweeps W->E),
-        the tiles are mosaicked into one spatially-varying screening map. Swap the synthetic
-        provider for wind.profile.crest_wind_provider(source="arome") for real AROME winds.
+        mosaicked into one spatially-varying screening map. Swap the synthetic provider for
+        wind.profile.crest_wind_provider(source="arome") for real AROME winds.
         """
         if self._job is not None:
             return
@@ -479,7 +477,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return dem, hazard, rep_dir
 
         self._cancelling = False
-        self._set_running(True, "Pass-1 sub-zones (spatial)…")
+        self._set_running(True, "Pass-1 sous-zones (spatial)…")
         job = SolveJob(fn, self)
         job.progress.connect(self._on_job_progress)
         job.finished.connect(self._on_subzones_finished)
@@ -495,16 +493,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pass1_vel_path = None
         self._pass1_ang_path = None
         self._render_map(
-            dem, hazard, f"Pass-1 sub-zones (spatial wind) — base from {rep_dir:.0f}°"
+            dem, hazard, f"Pass-1 sous-zones (vent spatial) — base de {rep_dir:.0f}°"
         )
-        self._finish_job("Pass-1 sub-zones done")
+        self._finish_job("Pass-1 sous-zones terminé")
 
     def _on_job_failed(self, msg: str) -> None:
         if self._cancelling:
-            self._finish_job("Run cancelled")
+            self._finish_job("Calcul annulé")
         else:
-            self._finish_job("Run failed")
-            QtWidgets.QMessageBox.critical(self, "WindNinja error", msg)
+            self._finish_job("Échec du calcul")
+            QtWidgets.QMessageBox.critical(self, "Erreur WindNinja", msg)
 
     # --- M3 handoff: click a Pass-1 hotspot -> Pass-2 momentum -> 3D --------------
     def on_map_click(self, event) -> None:
@@ -514,7 +512,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if getattr(self.nav, "mode", ""):  # pan/zoom tool active -> not a hotspot pick
             return
         if self._dem is None:
-            self.statusBar().showMessage("Compute a Pass-1 map first, then click a hotspot.")
+            self.statusBar().showMessage("Calcule d'abord une carte Pass-1, puis clique un point chaud.")
             return
         if self._job is not None:
             return
@@ -523,11 +521,11 @@ class MainWindow(QtWidgets.QMainWindow):
         mesh_count, _iters, mesh_name = self._selected_mesh()
         bc_spd, bc_dir, wind_src = self._pass2_wind_at(x, y)
         resp = QtWidgets.QMessageBox.question(
-            self, "Launch Pass-2",
-            f"Run a momentum solve around ({x:.0f}, {y:.0f})?\n\n"
-            f"~{PASS2_HALF_WIDTH_M * 2 / 1000:.0f} km window, mesh '{mesh_name}' "
-            f"({mesh_count:,} cells, ~{_estimate_minutes(mesh_count)} min).\n"
-            f"Wind ({wind_src}): {bc_spd:.0f} m/s from {bc_dir:.0f} deg.",
+            self, "Lancer Pass-2",
+            f"Lancer un calcul momentum autour de ({x:.0f}, {y:.0f}) ?\n\n"
+            f"Fenêtre ~{PASS2_HALF_WIDTH_M * 2 / 1000:.0f} km, maillage « {mesh_name} » "
+            f"({mesh_count:,} mailles, ~{_estimate_minutes(mesh_count)} min).\n"
+            f"Vent ({wind_src}) : {bc_spd:.0f} m/s de {bc_dir:.0f}°.",
         )
         if resp != QtWidgets.QMessageBox.StandardButton.Yes:
             return
@@ -549,8 +547,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._pass1_vel_path, self._pass1_ang_path, x, y, ctrl_dir
             )
             if bc is not None:
-                return bc[0], bc[1], "Pass-1 upstream"
-        return ctrl_spd, ctrl_dir, "controls"
+                return bc[0], bc[1], "Pass-1 amont"
+        return ctrl_spd, ctrl_dir, "contrôles"
 
     def _launch_pass2_at(self, x: float, y: float, bc_spd: float, bc_dir: float,
                          wind_src: str) -> None:
@@ -573,14 +571,14 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             if run.returncode not in (0, None):
                 raise RuntimeError(
-                    f"momentum failed rc={run.returncode}\n{run.stdout[-800:]}"
+                    f"échec momentum rc={run.returncode}\n{run.stdout[-800:]}"
                 )
             if run.openfoam_case_dir is None:
-                raise RuntimeError("momentum ran but no OpenFOAM case was located")
+                raise RuntimeError("momentum terminé mais aucun case OpenFOAM localisé")
             return str(run.openfoam_case_dir), bc_dir, (x, y)
 
         self._cancelling = False
-        self._set_running(True, f"Pass-2 ({wind_src}) at ({x:.0f}, {y:.0f})…")
+        self._set_running(True, f"Pass-2 ({wind_src}) en ({x:.0f}, {y:.0f})…")
         job = SolveJob(fn, self)
         job.progress.connect(self._on_job_progress)
         job.finished.connect(self._on_pass2_finished)
@@ -591,14 +589,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_pass2_finished(self, result) -> None:
         case_dir, wind_dir, xy = result
         if not self._ensure_plotter():
-            self._finish_job("3D viewport unavailable")
+            self._finish_job("Viewport 3D indisponible")
             return
         mfd = volume3d.mean_flow_vector(wind_dir)
         self.plotter.clear()
         volume3d.populate_plotter(self.plotter, case_dir, mfd, show_turbulence=False)
         self.plotter.reset_camera()
         self.tabs.setCurrentWidget(self._p2_widget)
-        self._finish_job(f"Pass-2 rotor at ({xy[0]:.0f}, {xy[1]:.0f})")
+        self._finish_job(f"Rotor Pass-2 en ({xy[0]:.0f}, {xy[1]:.0f})")
 
     def on_load_pass2(self) -> None:
         case = self.case_edit.text().strip()
@@ -610,9 +608,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.case_edit.setText(case)
         if not case:
             QtWidgets.QMessageBox.information(
-                self, "No Pass-2 case",
-                "No cached NINJAFOAM_* case found. Run a momentum solve first "
-                "(scripts/pass2_smoke_test.py or demo_pass2_single.py).",
+                self, "Aucun case Pass-2",
+                "Aucun case NINJAFOAM_* en cache. Lance d'abord un calcul momentum "
+                "(clic sur la carte, ou scripts/pass2_smoke_test.py).",
             )
             return
         if not self._ensure_plotter():
@@ -625,8 +623,8 @@ class MainWindow(QtWidgets.QMainWindow):
             volume3d.populate_plotter(self.plotter, case, mfd, show_turbulence=False)
             self.plotter.reset_camera()
             self.tabs.setCurrentWidget(self._p2_widget)
-            self.statusBar().showMessage(f"Loaded Pass-2 case {Path(case).name}")
+            self.statusBar().showMessage(f"Case Pass-2 chargé : {Path(case).name}")
         except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "Pass-2 error", str(exc))
+            QtWidgets.QMessageBox.critical(self, "Erreur Pass-2", str(exc))
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()

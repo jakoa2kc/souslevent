@@ -260,6 +260,29 @@ source (or "None" = the original hillshade). `contextily` lives in the `[gui]` e
 
 ---
 
+## ADR-0011 — French IHM and Europe/Paris clock times
+
+**Status:** accepted
+
+**Context.** The user is a French paraglider pilot. The app's interface should be in
+**French**, and the hourly screening times should read as **absolute local wall-clock hours**
+(Europe/Paris) to plan a flight window — not relative "+0h/+1h" offsets.
+
+**Decision.** All **user-facing IHM strings are French** (`app/main_window.py`, the shared
+`map2d.DISCLAIMER`, axis/colorbar labels); Qt's built-in strings (dialog Yes/No, toolbar
+tooltips) are localized by loading the `qtbase_fr` translator in the launcher. Hourly labels
+are **absolute Europe/Paris clock hours** (`zoneinfo` + a `tzdata` dependency, since Windows
+lacks the IANA db) — e.g. "mar. 18h". **Developer-facing** code, comments, docstrings, ADRs
+and dev log stay **English**.
+
+**Consequences.**
+- New dependency: `tzdata` (for `zoneinfo` on Windows).
+- Any new UI string must be added in French; mixing is a bug.
+- The synthetic hourly series now carries real local-time *labels* (the wind values stay
+  synthetic until AROME is wired). Dev scripts may remain partly English (not the product).
+
+---
+
 ## Open questions tracked as future ADRs
 
 - **Stability / diurnal winds on the momentum solver.** Available on the mass solver

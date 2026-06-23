@@ -237,7 +237,7 @@ def test_pass2_wind_falls_back_to_controls():
     w = MainWindow()
     w.wind_dir.setValue(300.0)
     w.wind_spd.setValue(9.0)
-    assert w._pass2_wind_at(270000.0, 4958000.0) == (9.0, 300.0, "controls")
+    assert w._pass2_wind_at(270000.0, 4958000.0) == (9.0, 300.0, "contrôles")
     w.deleteLater()
 
 

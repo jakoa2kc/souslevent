@@ -17,7 +17,7 @@ import numpy as np
 
 from ..terrain.dem import Dem
 
-DISCLAIMER = "Candidates (likelihood of disturbed lee air) — NOT rotor boundaries"
+DISCLAIMER = "Zones candidates (probabilité d'air perturbé sous le vent) — PAS des limites de rotor"
 
 # Web-tile basemaps for orientation under the Pass-1 map (contextily). (family, layer).
 # IGN uses the key-free Geoplateforme (data.geopf.fr); OSM/OpenTopoMap are open worldwide.
@@ -102,8 +102,8 @@ def _draw_base(ax, dem: Dem, first: np.ndarray):
         first, cmap="inferno", extent=extent, origin="upper", alpha=0.55,
         norm=colors.Normalize(0, 1),
     )
-    ax.set_xlabel("Easting (m)")
-    ax.set_ylabel("Northing (m)")
+    ax.set_xlabel("Est (m)")
+    ax.set_ylabel("Nord (m)")
     return im
 
 

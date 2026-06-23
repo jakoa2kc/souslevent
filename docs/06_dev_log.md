@@ -347,6 +347,26 @@ Tests: 34 passed.
 
 ---
 
+## Entry 15 — IHM: French interface + Europe/Paris hourly times (ADR-0011)  (2026-06-21)
+
+**What changed.** Translated the IHM to **French** (buttons, labels, tabs, dialogs, status,
+titles, the shared `map2d.DISCLAIMER`, axis/colorbar labels) and loaded the `qtbase_fr`
+translator in `scripts/sillage_gui.py` for Qt's built-in strings. The hourly slider now shows
+**absolute Europe/Paris clock hours**: `screening.pass1.synthetic_series` labels each hour via
+`zoneinfo` (e.g. "mar. 18h"), with a new `tzdata` dependency (Windows has no IANA db). Mesh
+presets and the Pass-2 wind-source tags ("Pass-1 amont" / "contrôles") are French too.
+
+**Why.** The user (French pilot) needs a French UI and real wall-clock flight-window hours.
+
+**Result.** Verified: window title/tabs/buttons in French; `synthetic_series(4)` →
+`['mar. 18h', 'mar. 19h', ...]`; a rendered geometry map is fully French (title, "Est/Nord
+(m)", colorbar, disclaimer). Updated the one test asserting the wind-source tag. Tests 34.
+
+**Open questions.** Developer-facing code/docs stay English (ADR-0011); dev scripts remain
+partly English. A start-hour/day picker for the window could replace "now" as the default.
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**
