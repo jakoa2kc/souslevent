@@ -57,6 +57,11 @@ class HotspotClick:
     bbox_m: tuple[float, float, float, float]  # buffered (left, bottom, right, top)
 
 
+def hillshade(dem: Dem) -> np.ndarray:
+    """Public hillshade array for the DEM (0..1), for overlaying on a basemap."""
+    return _hillshade(dem)
+
+
 def draw_hillshade(ax, dem: Dem):
     """Draw only the DEM hillshade (no hazard overlay) — the bare terrain view. Returns im."""
     left, bottom, right, top = dem.bounds

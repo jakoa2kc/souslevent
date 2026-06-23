@@ -461,6 +461,33 @@ so the window actually changes the wind (not just labels).
 
 ---
 
+## Entry 20 — Tab 2 ergonomics: multi-day window, drag/scroll map, MNT+basemap  (2026-06-21)
+
+**What changed.**
+- The flight-window range slider now spans **0–72 h** (today → day-after-tomorrow, ≈ the
+  AROME horizon) and its label shows the **date** ("mar. 23/06 09h → 15h").
+- A prominent **"Valider le créneau horaire"** button under the slider launches the per-hour
+  screening directly (`on_run_hourly`).
+- The result map is navigated by **drag (pan) + scroll (zoom)**, **double-click resets** the
+  view, and a **plain left-click analyses** a hotspot (Pass-2). The matplotlib nav toolbar is
+  removed — drag/scroll replaces the "manipulation" buttons; pan vs click is disambiguated by
+  a small movement threshold.
+- The default **MNT preview now shows the basemap** (IGN plan) with the hillshade overlaid
+  (`map2d.hillshade`).
+- Decluttered the action row to **Aperçu (géométrie)** + **Criblage spatial**; the single
+  "Criblage WindNinja" button was dropped and the créneau button replaces the old
+  "Criblage du créneau".
+
+**Why.** A pilot picks a flight window across days and explores the result like a map.
+
+**Result.** Verified headless: slider 0–72 with a dated label, the créneau button, the
+drag/scroll/double-click handlers, and the MNT+IGN preview renders. Tests: 36 passed.
+
+**Open questions.** Cap the window at the real AROME horizon once the forecast is wired; the
+basemap stays static while panning the matplotlib result (not a live slippy map).
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

@@ -11,10 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6 import QtCore, QtWidgets
-from matplotlib.backends.backend_qtagg import (
-    FigureCanvasQTAgg,
-    NavigationToolbar2QT,
-)
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from superqt import QRangeSlider
 
@@ -91,8 +88,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self._build_analyse_tab(), "Analyse locale des zones sous le vent")
         self.setCentralWidget(self.tabs)
 
-        self._run_buttons = [self.btn_validate, self.btn_geom, self.btn_mass,
-                             self.btn_hourly, self.btn_subzones, self.btn_load_p2]
+        self._run_buttons = [self.btn_validate, self.btn_geom, self.btn_creneau,
+                             self.btn_subzones, self.btn_load_p2]
         self.statusBar().showMessage("Prêt")
 
     def _on_aoi_selected(self, s: float, w: float, n: float, e: float) -> None:
@@ -179,18 +176,18 @@ class MainWindow(QtWidgets.QMainWindow):
         return w
 
     def _build_creneau_tab(self) -> QtWidgets.QWidget:
-        """Tab 2 — flight-slot selection: a flight-window range slider drives the Pass-1
-        screening (wind comes from the window, not manual fields); the result is scrubbed
-        with the hour slider below the map."""
+        """Tab 2 — flight-slot selection. A multi-day range slider sets the flight window
+        (clock hours, Europe/Paris); "Valider le créneau" runs the per-hour screening. The
+        result map is navigated by drag (pan) + scroll (zoom), double-click resets the view,
+        and a left-click analyses a hotspot (Pass-2). Wind comes from the window."""
         w = QtWidgets.QWidget()
         self._creneau_tab = w
         lay = QtWidgets.QVBoxLayout(w)
 
-        # Flight window: a double-handle range slider over the next 24 h (Europe/Paris).
         win = QtWidgets.QHBoxLayout()
         win.addWidget(QtWidgets.QLabel("Créneau de vol :"))
         self.window_slider = QRangeSlider(QtCore.Qt.Horizontal)
-        self.window_slider.setRange(0, 24)
+        self.window_slider.setRange(0, 72)  # today .. day-after-tomorrow (AROME ~48 h)
         self.window_slider.setValue((9, 15))
         self.window_slider.valueChanged.connect(self._on_window_change)
         win.addWidget(self.window_slider, stretch=1)
@@ -198,7 +195,14 @@ class MainWindow(QtWidgets.QMainWindow):
         win.addWidget(self.window_label)
         lay.addLayout(win)
 
-        # Options + screening actions (wind is taken from the selected window).
+        self.btn_creneau = QtWidgets.QPushButton(
+            "Valider le créneau horaire (lancer le criblage)")
+        self.btn_creneau.setStyleSheet(
+            "font-weight: bold; padding: 8px 18px; background:#2d7d2d; color:white;"
+            " border-radius:5px;")
+        self.btn_creneau.clicked.connect(self.on_run_hourly)
+        lay.addWidget(self.btn_creneau)
+
         opt = QtWidgets.QHBoxLayout()
         self.basemap_combo = QtWidgets.QComboBox()
         self.basemap_combo.addItems([NO_BASEMAP, *map2d.BASEMAP_SOURCES.keys()])
@@ -208,22 +212,23 @@ class MainWindow(QtWidgets.QMainWindow):
         opt.addWidget(self.basemap_combo)
         self.btn_geom = QtWidgets.QPushButton("Aperçu (géométrie)")
         self.btn_geom.clicked.connect(self.on_compute_pass1)
-        self.btn_mass = QtWidgets.QPushButton("Criblage WindNinja")
-        self.btn_mass.clicked.connect(self.on_run_mass)
-        self.btn_hourly = QtWidgets.QPushButton("Criblage du créneau")
-        self.btn_hourly.clicked.connect(self.on_run_hourly)
         self.btn_subzones = QtWidgets.QPushButton("Criblage spatial")
         self.btn_subzones.clicked.connect(self.on_run_subzones)
-        for b in (self.btn_geom, self.btn_mass, self.btn_hourly, self.btn_subzones):
-            opt.addWidget(b)
+        opt.addWidget(self.btn_geom)
+        opt.addWidget(self.btn_subzones)
         opt.addStretch(1)
         lay.addLayout(opt)
 
         self.fig = Figure(figsize=(6, 5))
         self.canvas = FigureCanvasQTAgg(self.fig)
-        self.nav = NavigationToolbar2QT(self.canvas, w)
-        lay.addWidget(self.nav)
         lay.addWidget(self.canvas)
+        self._pan = None
+        self._pan_moved = False
+        self._home_extent = None
+        self.canvas.mpl_connect("scroll_event", self._on_canvas_scroll)
+        self.canvas.mpl_connect("button_press_event", self._on_canvas_press)
+        self.canvas.mpl_connect("motion_notify_event", self._on_canvas_motion)
+        self.canvas.mpl_connect("button_release_event", self._on_canvas_release)
 
         slider_row = QtWidgets.QHBoxLayout()
         self.hour_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
@@ -240,15 +245,63 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(self.hour_widget)
 
         hint = QtWidgets.QLabel(
-            "Astuce : clic gauche sur un point chaud → analyse Pass-2 à cet endroit.   "
-            + map2d.DISCLAIMER
-        )
+            "Glisser = déplacer · molette = zoom · double-clic = vue complète · "
+            "clic = analyse Pass-2.   " + map2d.DISCLAIMER)
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #a33; font-style: italic;")
         lay.addWidget(hint)
-        self.canvas.mpl_connect("button_press_event", self.on_map_click)
         self._on_window_change()
         return w
+
+    # --- result-map navigation (drag pan + scroll zoom + click analysis) --------
+    def _on_canvas_scroll(self, event) -> None:
+        if event.inaxes is None or event.xdata is None:
+            return
+        ax = event.inaxes
+        factor = 1 / 1.2 if event.button == "up" else 1.2
+        x, y = event.xdata, event.ydata
+        x0, x1 = ax.get_xlim()
+        y0, y1 = ax.get_ylim()
+        ax.set_xlim(x - (x - x0) * factor, x + (x1 - x) * factor)
+        ax.set_ylim(y - (y - y0) * factor, y + (y1 - y) * factor)
+        self.canvas.draw_idle()
+
+    def _on_canvas_press(self, event) -> None:
+        if event.inaxes is None or event.button != 1:
+            return
+        if getattr(event, "dblclick", False):
+            self._reset_view()
+            return
+        self._pan = (event.x, event.y, event.inaxes.get_xlim(), event.inaxes.get_ylim())
+        self._pan_moved = False
+
+    def _on_canvas_motion(self, event) -> None:
+        if self._pan is None or event.inaxes is None or event.x is None:
+            return
+        x0, y0, xlim, ylim = self._pan
+        inv = event.inaxes.transData.inverted()
+        p0 = inv.transform((x0, y0))
+        p1 = inv.transform((event.x, event.y))
+        if abs(event.x - x0) + abs(event.y - y0) > 3:
+            self._pan_moved = True
+        dx, dy = p0[0] - p1[0], p0[1] - p1[1]
+        event.inaxes.set_xlim(xlim[0] + dx, xlim[1] + dx)
+        event.inaxes.set_ylim(ylim[0] + dy, ylim[1] + dy)
+        self.canvas.draw_idle()
+
+    def _on_canvas_release(self, event) -> None:
+        was_pan = self._pan is not None and self._pan_moved
+        self._pan = None
+        if event.button == 1 and not was_pan:
+            self._handle_hotspot(event)
+
+    def _reset_view(self) -> None:
+        if self._home_extent and self.fig.axes:
+            left, right, bottom, top = self._home_extent
+            ax = self.fig.axes[0]
+            ax.set_xlim(left, right)
+            ax.set_ylim(bottom, top)
+            self.canvas.draw_idle()
 
     # --- flight window (drives the per-hour wind, replacing manual fields) ------
     def _window_hours(self) -> tuple[int, int]:
@@ -282,18 +335,35 @@ class MainWindow(QtWidgets.QMainWindow):
         start = self._window_start()
         lo, hi = self._window_hours()
         end = start + timedelta(hours=hi - lo)
-        self.window_label.setText(
-            f"{_FR_DAYS[start.weekday()]} {start:%Hh} → {_FR_DAYS[end.weekday()]} {end:%Hh}"
-            f"  ({hi - lo} h)"
-        )
+
+        def _fmt(t):
+            return f"{_FR_DAYS[t.weekday()]} {t:%d/%m} {t:%Hh}"
+
+        self.window_label.setText(f"{_fmt(start)} → {_fmt(end)}  ({hi - lo} h)")
 
     def _render_terrain(self, dem) -> None:
-        """Show the bare MNT (hillshade), no hazard overlay — the default view in tab 2."""
+        """Show the MNT (hillshade over the basemap), no hazard overlay — default tab-2 view."""
         self._last_map = None
+        source = self.basemap_combo.currentText()
+        left, bottom, right, top = dem.bounds
+        extent = (left, right, bottom, top)
         self.fig.clear()
         ax = self.fig.add_subplot(111)
-        map2d.draw_hillshade(ax, dem)
-        ax.set_title("MNT — zone de vol  (choisis un créneau, puis lance un criblage)")
+        if source != NO_BASEMAP:
+            ax.imshow(map2d.hillshade(dem), cmap="gray", extent=extent, origin="upper",
+                      alpha=0.45, zorder=2)
+            ax.set_xlim(left, right)
+            ax.set_ylim(bottom, top)
+            try:
+                map2d.add_basemap(ax, dem.crs, source=source, attribution=False, zorder=0)
+            except Exception:
+                pass
+            ax.set_xlabel("Est (m)")
+            ax.set_ylabel("Nord (m)")
+        else:
+            map2d.draw_hillshade(ax, dem)
+        ax.set_title("MNT — zone de vol  (choisis un créneau, puis lance le criblage)")
+        self._home_extent = extent
         self.canvas.draw()
 
     def _build_analyse_tab(self) -> QtWidgets.QWidget:
@@ -400,6 +470,7 @@ class MainWindow(QtWidgets.QMainWindow):
             im = map2d.draw_indicator(ax, dem, hazard)
         self.fig.colorbar(im, ax=ax, label="indicateur de danger sous le vent (0–1)")
         ax.set_title(f"{title}\n{map2d.DISCLAIMER}")
+        self._home_extent = extent
         self.canvas.draw()
 
     def _on_basemap_change(self, *_args) -> None:
@@ -635,14 +706,13 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Erreur WindNinja", msg)
 
     # --- M3 handoff: click a Pass-1 hotspot -> Pass-2 momentum -> 3D --------------
-    def on_map_click(self, event) -> None:
-        """Left-click on the 2D map launches a Pass-2 momentum solve at that feature."""
-        if event.inaxes is None or event.xdata is None or event.button != 1:
-            return
-        if getattr(self.nav, "mode", ""):  # pan/zoom tool active -> not a hotspot pick
+    def _handle_hotspot(self, event) -> None:
+        """A (non-drag) left-click on the 2D map launches a Pass-2 solve at that feature."""
+        if event.inaxes is None or event.xdata is None:
             return
         if self._dem is None:
-            self.statusBar().showMessage("Calcule d'abord une carte Pass-1, puis clique un point chaud.")
+            self.statusBar().showMessage(
+                "Prépare une zone et lance un criblage, puis clique un point chaud.")
             return
         if self._job is not None:
             return
