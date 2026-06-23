@@ -81,6 +81,11 @@ valley-to-valley wind differentiation.
 
 ## M7 — Desktop IHM (PySide6, ADR-0009)
 The "real software" surface. Built incrementally; adapt as results come in.
+- [x] "Carte" tab: interactive Leaflet/QtWebEngine map (IGN / OSM / OpenTopoMap), centred on
+      Ancelle (~30 km), world-zoomable, with a rectangle tool that captures the Pass-1 AOI
+      (ADR-0012). ✔
+- [ ] Wire the selected AOI → DEM preparation (IGN RGE ALTI for an arbitrary bbox) to drive
+      Pass-1 (today's DEM pipeline is Champsaur-specific).
 - [x] App shell: controls + Pass-1 (2D matplotlib) / Pass-2 (3D pyvistaqt) tabs;
       `sillage-gui` entry. Reuses headless rendering (`map2d.draw_indicator`,
       `volume3d.populate_plotter`); 3D viewport created lazily (needs a GL context). ✔ slice 1

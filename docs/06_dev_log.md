@@ -367,6 +367,30 @@ partly English. A start-hour/day picker for the window could replace "now" as th
 
 ---
 
+## Entry 16 — IHM: interactive selection map (Leaflet/QtWebEngine, ADR-0012)  (2026-06-21)
+
+**What changed.** New **first tab "Carte"**: a Leaflet slippy-map in a `QWebEngineView`
+(`app/map_tab.py`). Pan (drag) + scroll-zoom, zoom-out world-wide, centred on **Ancelle
+(~30 km)**. Layers: **IGN plan/ortho** (key-free Géoplateforme WMTS), OSM, OpenTopoMap. A
+**Leaflet.draw rectangle** returns its lat/lon bounds to Python via a **QWebChannel**
+(`_MapBridge.on_rectangle` → `MapTab.aoiSelected`), stored as `MainWindow.selected_bbox`. The
+launcher sets `AA_ShareOpenGLContexts` (WebEngine + VTK coexistence). The web view is
+**skipped under the offscreen platform** (Chromium can't render and was crashing pytest at
+exit) — a placeholder is shown there.
+
+**Why.** Let the user navigate a real map and pick the Pass-1 AOI by rectangle.
+
+**Result.** Verified headless: window builds with tabs `['Carte','Passe 1…','Passe 2…']`, a
+simulated rectangle sets `selected_bbox`, suite exits cleanly (was code 5 from Chromium
+teardown before the headless guard). `_build_html` produces valid Leaflet HTML with the
+Ancelle fitBounds (~±0.27°/±0.38°) and the IGN layer. Tests: 34 passed (exit 0).
+
+**Open questions.** Wire the AOI → DEM preparation for an arbitrary bbox (IGN RGE ALTI for any
+area; today's pipeline is Champsaur-specific) so the rectangle actually drives Pass-1. A
+"Préparer la Pass-1 sur cette zone" button will trigger it.
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

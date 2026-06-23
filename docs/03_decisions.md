@@ -283,6 +283,35 @@ and dev log stay **English**.
 
 ---
 
+## ADR-0012 — Interactive selection map via QtWebEngine + Leaflet
+
+**Status:** accepted
+
+**Context.** The app needs a **first tab** with a real interactive **slippy map** (IGN tiles,
+smooth drag/scroll pan-zoom, zoom-out to the whole world) centred on Ancelle (~30 km), on
+which the user draws a **rectangle** that defines the Pass-1 area of interest (AOI).
+matplotlib + contextily is **static** (one fetch per extent, no smooth pan/zoom) and cannot
+deliver this.
+
+**Decision.** Embed a **Leaflet** map in a **QWebEngineView** (Qt WebEngine, shipped in
+PySide6-Addons). Layers: **IGN plan / ortho** (key-free Géoplateforme WMTS), **OSM**,
+**OpenTopoMap**. A **Leaflet.draw** rectangle tool returns the rectangle's lat/lon bounds to
+Python over a **QWebChannel** → a Qt signal (`MapTab.aoiSelected`) → stored as
+`MainWindow.selected_bbox`. The web view is **skipped under the headless `offscreen`
+platform** (Chromium can't render there and crashes at exit). `AA_ShareOpenGLContexts` is set
+in the launcher so WebEngine (map) and VTK (3D viewport) OpenGL coexist.
+
+**Consequences.**
+- Uses **QtWebEngine** (already in the `gui` extra's PySide6) + Leaflet from a CDN → needs
+  **network** (as do the tiles); headless/CI shows a placeholder.
+- The AOI bbox is **captured** now; **wiring it to actually prepare a DEM** for an arbitrary
+  area (IGN RGE ALTI download for any bbox — today's pipeline is Champsaur-specific) is the
+  next step.
+- A second map stack (Leaflet) lives alongside the Pass-1 matplotlib basemap (ADR-0010); the
+  former is for *navigation/selection*, the latter for *rendering the hazard field*.
+
+---
+
 ## Open questions tracked as future ADRs
 
 - **Stability / diurnal winds on the momentum solver.** Available on the mass solver

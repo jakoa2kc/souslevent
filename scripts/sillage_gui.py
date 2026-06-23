@@ -12,9 +12,14 @@ import sys
 def main() -> None:
     from PySide6 import QtCore, QtWidgets
 
+    # WebEngine (map tab) and VTK (3D viewport) both use OpenGL — share contexts. Must be set
+    # before the QApplication is created.
+    QtCore.QCoreApplication.setAttribute(QtCore.Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
+
     from sillage.app.main_window import MainWindow
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    app.setApplicationName("Sillage")
     # French locale for Qt's built-in strings (dialog Yes/No, toolbar tooltips, etc.).
     translator = QtCore.QTranslator()
     tpath = QtCore.QLibraryInfo.path(QtCore.QLibraryInfo.LibraryPath.TranslationsPath)

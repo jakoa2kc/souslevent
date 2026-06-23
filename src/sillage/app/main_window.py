@@ -29,6 +29,7 @@ from ..screening.pass1 import (
 from ..terrain.dem import crop_dem, load_dem, write_dem
 from ..viz import map2d, volume3d
 from .jobs import SolveJob
+from .map_tab import MapTab
 
 DEFAULT_DEM = "cache/champsaur/ign/champsaur_rgealti_50m_prepared_utm.tif"
 NO_BASEMAP = "Aucun"
@@ -65,16 +66,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self._hourly: list[tuple] = []
         # Last rendered (dem, hazard, title) so toggling the basemap can redraw it.
         self._last_map = None
+        # AOI selected on the map tab (south, west, north, east) in lat/lon.
+        self.selected_bbox = None
 
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         split.addWidget(self._build_controls())
         self.tabs = QtWidgets.QTabWidget()
+        self.map_tab = MapTab()
+        self.map_tab.aoiSelected.connect(self._on_aoi_selected)
+        self.tabs.addTab(self.map_tab, "Carte")
         self.tabs.addTab(self._build_pass1_tab(), "Passe 1 — Criblage (2D)")
         self.tabs.addTab(self._build_pass2_tab(), "Passe 2 — Détail (3D)")
         split.addWidget(self.tabs)
         split.setStretchFactor(1, 1)
         self.setCentralWidget(split)
         self.statusBar().showMessage("Prêt")
+
+    def _on_aoi_selected(self, s: float, w: float, n: float, e: float) -> None:
+        self.selected_bbox = (s, w, n, e)
+        self.statusBar().showMessage(
+            f"Zone Pass-1 : S {s:.4f}, O {w:.4f} → N {n:.4f}, E {e:.4f} (lat,lon). "
+            "Préparation du MNT depuis cette zone : à venir."
+        )
 
     # --- UI construction -------------------------------------------------------
     def _build_controls(self) -> QtWidgets.QWidget:
