@@ -488,6 +488,34 @@ basemap stays static while panning the matplotlib result (not a live slippy map)
 
 ---
 
+## Entry 21 — Real forecast wind (Open-Meteo) + spatial-per-hour criblage  (2026-06-21)
+
+**What changed.** "Valider le créneau horaire" now runs a **spatial (sub-zone) Pass-1 per
+hour** driven by the **real forecast**: `wind.profile.window_forecast_provider` samples
+Open-Meteo **crest-height** wind per tile centre (memoized per point) for each hour of the
+flight window. It **falls back to synthetic** if there's no network/crest data. Removed the
+separate "Criblage spatial" button — spatial is now the default. Crest altitude = DEM 80th
+percentile; per-hour labels carry the date.
+
+**AROME note.** AROME via Open-Meteo (`arome_france_hd`) does **not** expose crest-height
+pressure levels (empty crest series), so the working real source is the **Open-Meteo global
+blend**; true AROME crest data needs the **Météo-France GRIB API** (key) — future.
+`fetch_arome` / `source="arome"` are kept for that.
+
+**Duration (the user's question).** Measured **~30–40 s per hour** for the 2×2 spatial
+sub-zone on a ~30 km AOI — actually a touch faster than a single full-domain run (~40 s),
+since the tiles are small coarse crops. So **~3–4 min for a 6 h window**, ~12 min for 24 h;
+**instant afterwards** (cached per day+hour).
+
+**Result.** Verified end to end (network): a 2 h window → ~80 s → 2 hourly spatial maps from
+"prévision" with dated labels. Tests: 37 passed (added `window_forecast_provider`).
+
+**Open questions.** Cap the window at the real forecast horizon; a per-hour upstream wind for
+the Pass-2 BC (the mosaic has no single vel/ang grid, so a click currently uses the window
+wind). Dead single-shot handlers (`on_run_mass`, `on_run_subzones`) to prune.
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

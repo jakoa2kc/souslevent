@@ -192,6 +192,24 @@ def test_prepare_dem_for_bbox_decodes_and_reprojects(tmp_path, monkeypatch):
     assert 950 < float(np.nanmean(dem.elevation)) < 1050  # ~1000 m preserved
 
 
+def test_window_forecast_provider(monkeypatch):
+    from sillage.wind import forecast, profile
+    from sillage.wind.forecast import HourlyProfile, WindSample
+
+    def fake(lat, lon, hours=24, **kw):
+        return [
+            HourlyProfile(time_iso=f"t{i}", samples=[
+                WindSample(f"t{i}", 700.0, 2500.0, 5.0 + i, (300 + i) % 360)])
+            for i in range(hours)
+        ]
+
+    monkeypatch.setattr(forecast, "fetch_open_meteo", fake)
+    dem = _synthetic_dem(40, res_m=50.0)
+    make = profile.window_forecast_provider(dem, 2500.0, n_hours=6, source="open_meteo")
+    spd, drc = make(2)(600500.0, 4900000.0)  # hour 2 -> 5+2 m/s, (300+2)°
+    assert abs(spd - 7.0) < 1e-6 and abs(drc - 302.0) < 1e-6
+
+
 def test_subzone_bboxes_tiling():
     from sillage.screening.subzones import subzone_bboxes
 

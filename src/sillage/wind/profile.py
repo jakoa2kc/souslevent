@@ -62,6 +62,47 @@ def crest_height_series(
     return out
 
 
+def window_forecast_provider(dem, crest_alt_m: float, n_hours: int, source: str = "open_meteo"):
+    """Real forecast wind for a flight window, for the spatial+hourly Pass-1 (ADR-0007).
+
+    Returns a factory ``make(absolute_hour) -> wind_at_center(x, y) -> (speed_ms, from_deg)``
+    that samples the forecast at each point's lon/lat, reduced to ``crest_alt_m``, for that
+    absolute clock hour. The full per-point series is fetched once and memoized (rounded
+    lon/lat), so a per-hour sub-zone loop costs only a few network calls total.
+
+    ``source`` is "open_meteo" (global blend with crest-height pressure levels) or "arome"
+    (Météo-France via Open-Meteo — note it lacks crest-height pressure levels, so it yields
+    no crest wind; kept for when the Météo-France GRIB API is wired).
+    """
+    from rasterio.crs import CRS
+    from rasterio.warp import transform as warp_xy
+
+    from .forecast import fetch_arome, fetch_open_meteo
+
+    fetch = fetch_arome if source == "arome" else fetch_open_meteo
+    cache: dict = {}
+
+    def series_at(x: float, y: float):
+        lon, lat = warp_xy(dem.crs, CRS.from_epsg(4326), [x], [y])
+        lon, lat = float(lon[0]), float(lat[0])
+        key = (round(lat, 2), round(lon, 2))
+        if key not in cache:
+            cache[key] = crest_height_series(fetch(lat, lon, hours=n_hours), crest_alt_m)
+        return cache[key]
+
+    def make(absolute_hour: int):
+        def wind_at_center(x: float, y: float) -> tuple[float, float]:
+            s = series_at(x, y)
+            if not s:
+                raise RuntimeError("prévision de crête indisponible à ce point")
+            _t, spd, drc = s[min(absolute_hour, len(s) - 1)]
+            return spd, drc
+
+        return wind_at_center
+
+    return make
+
+
 def crest_wind_provider(dem, crest_alt_m: float, hour_index: int = 0,
                         source: str = "open_meteo", cache: dict | None = None):
     """Build ``wind_at_center(x, y) -> (speed_ms, from_deg)`` for sub-zone Pass-1 (ADR-0007).

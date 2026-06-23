@@ -89,7 +89,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(self.tabs)
 
         self._run_buttons = [self.btn_validate, self.btn_geom, self.btn_creneau,
-                             self.btn_subzones, self.btn_load_p2]
+                             self.btn_load_p2]
         self.statusBar().showMessage("Prêt")
 
     def _on_aoi_selected(self, s: float, w: float, n: float, e: float) -> None:
@@ -212,10 +212,7 @@ class MainWindow(QtWidgets.QMainWindow):
         opt.addWidget(self.basemap_combo)
         self.btn_geom = QtWidgets.QPushButton("Aperçu (géométrie)")
         self.btn_geom.clicked.connect(self.on_compute_pass1)
-        self.btn_subzones = QtWidgets.QPushButton("Criblage spatial")
-        self.btn_subzones.clicked.connect(self.on_run_subzones)
         opt.addWidget(self.btn_geom)
-        opt.addWidget(self.btn_subzones)
         opt.addStretch(1)
         lay.addLayout(opt)
 
@@ -573,41 +570,81 @@ class MainWindow(QtWidgets.QMainWindow):
             self._hourly = []
 
     def on_run_hourly(self) -> None:
-        """Run a synthetic hourly Pass-1 loop on the worker; populate the time slider."""
+        """Validate the flight window: a SPATIAL (sub-zone) Pass-1 per hour, driven by the
+        real forecast (Open-Meteo crest wind) with a synthetic fallback if there's no
+        network. Populates the result hour slider."""
         if self._job is not None:
             return
+        from datetime import timedelta
+
+        from ..screening.pass1 import _FR_DAYS
+
         cfg = self.cfg
         dem_path = self._dem_path
-        series = self._window_series()  # absolute Paris hours of the selected window
-        resolution_m = 100.0
         cli = cfg.windninja_cli
         max_km = cfg.max_domain_km
         cache_dir = cfg.cache_dir
+        lo, hi = self._window_hours()
+        count = hi - lo
+        window_start = self._window_start()  # Qt-free below this point
+        syn = synthetic_series(count, start=window_start)  # fallback winds
+
+        def _lab(t):
+            return f"{_FR_DAYS[t.weekday()]} {t:%d/%m} {t:%Hh}"
+
+        labels = [_lab(window_start + timedelta(hours=i)) for i in range(count)]
+        day_tag = window_start.strftime("%Y%m%d")
 
         def fn(on_progress, cancel):  # worker thread — no Qt here
+            import numpy as np
+
+            from ..screening import indicator as ind2
+            from ..screening.pass1 import mask_edge_buffer
+            from ..screening.subzones import subzone_speed_field
+            from ..wind.profile import window_forecast_provider
+
             dem = load_dem(dem_path, max_domain_km=max_km)
-            n = len(series)
+            left, bottom, right, top = dem.bounds
+            cx, cy = (left + right) / 2.0, (bottom + top) / 2.0
+            crest = float(np.nanpercentile(dem.elevation, 80))
+
+            make = window_forecast_provider(dem, crest, n_hours=hi, source="open_meteo")
+            try:
+                make(lo)(cx, cy)  # probe: real crest forecast available?
+                src = "prévision"
+            except Exception:
+                make = None
+                src = "synthétique"
+
             out = []
-            for i, (label, spd, drc) in enumerate(series):
+            for i in range(count):
                 if cancel():
                     raise RuntimeError("cancelled")
-                work = cache_dir / "champsaur" / "ihm_hourly" / (
-                    f"h{i:02d}_{drc:.0f}_{spd:.0f}_{resolution_m:.0f}m"
-                )
+                h = lo + i
+                if make is not None:
+                    provider = make(h)
+                    geo_dir = provider(cx, cy)[1]
+                else:
+                    _l, s_spd, s_drc = syn[i]
+                    provider = lambda x, y, s=s_spd, d=s_drc: (s, d)
+                    geo_dir = s_drc
 
-                def hp(pct, msg, i=i):  # map per-hour progress to overall 0..100
-                    on_progress(int((i + pct / 100.0) / n * 100), f"heure {i + 1}/{n} : {msg}")
+                def hp(pct, msg, i=i):
+                    on_progress(int((i + pct / 100.0) / count * 100),
+                                f"{src} {i + 1}/{count} : {msg}")
 
-                hazard, vel = hourly_indicator(
-                    dem=dem, cli=cli, dem_path=dem_path, work_dir=work,
-                    wind_speed_ms=spd, wind_from_deg=drc, resolution_m=resolution_m,
-                    force_run=False, on_progress=hp, cancel=cancel,
+                field = subzone_speed_field(
+                    dem=dem, cli=cli, wind_at_center=provider, nx=2, ny=2,
+                    work_root=cache_dir / "aoi" / "creneau" / f"{day_tag}_h{h:02d}",
+                    resolution_m=150.0, on_progress=hp, cancel=cancel,
                 )
-                out.append((label, hazard, vel, find_direction_grid(work)))
-            return dem, out
+                hazard = ind2.hazard_indicator(dem, geo_dir, speed_grid=field)
+                hazard = mask_edge_buffer(hazard, dem.resolution_m, 1500.0)
+                out.append((labels[i], hazard, None, None))  # mosaic -> no single vel/ang
+            return dem, src, out
 
         self._cancelling = False
-        self._set_running(True, f"Pass-1 créneau ({len(series)} h)…")
+        self._set_running(True, f"Criblage du créneau ({count} h)…")
         job = SolveJob(fn, self)
         job.progress.connect(self._on_job_progress)
         job.finished.connect(self._on_hourly_finished)
@@ -616,7 +653,7 @@ class MainWindow(QtWidgets.QMainWindow):
         job.start()
 
     def _on_hourly_finished(self, result) -> None:
-        dem, stack = result
+        dem, src, stack = result
         self._dem = dem
         self._hourly = stack
         self.hour_widget.setVisible(True)
@@ -625,7 +662,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hour_slider.setValue(0)
         self.hour_slider.blockSignals(False)
         self._show_hour(0)
-        self._finish_job(f"Pass-1 horaire : {len(stack)} heures")
+        self._finish_job(f"Criblage du créneau ({src}) : {len(stack)} heures")
 
     def _on_slider_change(self, val: int) -> None:
         if self._hourly:
