@@ -100,6 +100,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hours_spin.setValue(6)
         self.btn_hourly = QtWidgets.QPushButton("Run hourly (Pass-1, synthetic)")
         self.btn_hourly.clicked.connect(self.on_run_hourly)
+        self.btn_subzones = QtWidgets.QPushButton("Run sub-zones (Pass-1, spatial)")
+        self.btn_subzones.clicked.connect(self.on_run_subzones)
 
         self.case_edit = QtWidgets.QLineEdit("")
         self.case_edit.setPlaceholderText("(auto-detect cached NINJAFOAM_* case)")
@@ -127,6 +129,7 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow(self.btn_mass)
         form.addRow("Hours:", self.hours_spin)
         form.addRow(self.btn_hourly)
+        form.addRow(self.btn_subzones)
         form.addRow(QtWidgets.QLabel("———"))
         form.addRow("Pass-2 mesh:", self.mesh_combo)
         form.addRow(self.mesh_hint)
@@ -141,7 +144,8 @@ class MainWindow(QtWidgets.QMainWindow):
         note.setStyleSheet("color: #a33; font-style: italic;")
         form.addRow(note)
 
-        self._run_buttons = [self.btn_geom, self.btn_mass, self.btn_hourly, self.btn_load_p2]
+        self._run_buttons = [self.btn_geom, self.btn_mass, self.btn_hourly,
+                             self.btn_subzones, self.btn_load_p2]
         self._job: SolveJob | None = None
         self._cancelling = False
         w.setMaximumWidth(380)
@@ -406,6 +410,68 @@ class MainWindow(QtWidgets.QMainWindow):
         ax.set_title(f"Pass-1 hourly — {label}")
         self.canvas.draw()
         self.hour_label.setText(label)
+
+    # --- sub-zone spatial Pass-1 (ADR-0007) ------------------------------------
+    def on_run_subzones(self) -> None:
+        """Run a 2x2 sub-zone Pass-1 with a synthetic *spatial* wind on the worker.
+
+        Demonstrates ADR-0007 offline: each tile gets its own wind (direction sweeps W->E),
+        the tiles are mosaicked into one spatially-varying screening map. Swap the synthetic
+        provider for wind.profile.crest_wind_provider(source="arome") for real AROME winds.
+        """
+        if self._job is not None:
+            return
+        from ..screening.pass1 import mask_edge_buffer
+        from ..screening.subzones import subzone_speed_field
+
+        cfg = self.cfg
+        dem_path = self.dem_edit.text()
+        cli = cfg.windninja_cli
+        max_km = cfg.max_domain_km
+        rep_dir = self.wind_dir.value()
+        base_spd = self.wind_spd.value()
+        work_root = cfg.cache_dir / "champsaur" / "ihm_subzones"
+
+        def fn(on_progress, cancel):  # worker thread — no Qt here
+            dem = load_dem(dem_path, max_domain_km=max_km)
+            left, _b, right, _t = dem.bounds
+
+            def provider(x, y):  # synthetic spatial wind: direction sweeps W->E
+                frac = (x - left) / (right - left)
+                return base_spd, (rep_dir - 20.0 + 40.0 * frac) % 360.0
+
+            field = subzone_speed_field(
+                dem=dem, cli=cli, wind_at_center=provider, nx=2, ny=2,
+                work_root=work_root, resolution_m=150.0,
+                on_progress=on_progress, cancel=cancel,
+            )
+            hazard = ind.hazard_indicator(dem, rep_dir, speed_grid=field)
+            hazard = mask_edge_buffer(hazard, dem.resolution_m, 1500.0)
+            return dem, hazard, rep_dir
+
+        self._cancelling = False
+        self._set_running(True, "Pass-1 sub-zones (spatial)…")
+        job = SolveJob(fn, self)
+        job.progress.connect(self._on_job_progress)
+        job.finished.connect(self._on_subzones_finished)
+        job.failed.connect(self._on_job_failed)
+        self._job = job
+        job.start()
+
+    def _on_subzones_finished(self, result) -> None:
+        dem, hazard, rep_dir = result
+        self._dem = dem
+        self._set_single_map_mode(True)
+        # The mosaic has no single vel/ang grid, so the click handoff falls back to controls.
+        self._pass1_vel_path = None
+        self._pass1_ang_path = None
+        self.fig.clear()
+        ax = self.fig.add_subplot(111)
+        im = map2d.draw_indicator(ax, dem, hazard)
+        self.fig.colorbar(im, ax=ax, label="leeward hazard indicator (0–1)")
+        ax.set_title(f"Pass-1 sub-zones (spatial wind) — base from {rep_dir:.0f}°")
+        self.canvas.draw()
+        self._finish_job("Pass-1 sub-zones done")
 
     def _on_job_failed(self, msg: str) -> None:
         if self._cancelling:

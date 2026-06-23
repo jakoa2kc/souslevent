@@ -54,9 +54,10 @@ click-to-detail works end to end; multi-hour + upstream wind are the remaining r
 
 ## M4 — Robust hourly batch + spatial wind input
 - [ ] Full hourly loop over a flight window; caching of DEM + forecasts for reproducibility.
-- [ ] **Spatial wind input via AROME sub-zones (ADR-0007):** sample AROME (Open-Meteo
-      endpoint, no key) per sub-zone at its crest altitude; run the mass solver per tile;
-      stitch with overlap + blending. Stepping stone to full gridded `wxModel` init.
+- [~] **Spatial wind via AROME sub-zones (ADR-0007):** mechanism done — `screening.subzones`
+      tiles the domain, runs the mass solver per tile, mosaics with feathered blending;
+      `wind.forecast.fetch_arome` + `wind.profile.crest_wind_provider` supply per-tile winds.
+      *Remaining: verify AROME endpoint live; default the GUI/loop to AROME (vs synthetic).*
 - [ ] Evaluate **Docker/Katana** batch vs native subprocess (ADR-0006 open question);
       tied to the eventual GRIB `wxModel` route.
 **Definition of done:** a full-window screening run is one command and reproducible, with
@@ -85,7 +86,8 @@ The "real software" surface. Built incrementally; adapt as results come in.
       (`app/jobs.py` SolveJob; streaming runner in `flow/windninja`). ✔ slice 2
 - [x] Hourly time slider in the 2D tab (synthetic hourly winds; worker-driven loop;
       scrubbing swaps the per-hour wind field used by the handoff). ✔ slice 6
-- [ ] AROME sub-zone Pass-1 (ADR-0007) feeding the hourly slider with real spatial winds.
+- [~] AROME sub-zone Pass-1 (ADR-0007) in the 2D tab. Mechanism + "Run sub-zones (spatial)"
+      button done (synthetic provider); *remaining: AROME-fed + per-hour sub-zone stack.* ✔ slice 7
 - [x] Click-on-map hotspot → crop+buffer → launch Pass-2 → show 3D (the M3 handoff). ✔ slice 3
 - [x] Mesh quality/time knob (ADR-0008) in the Pass-2 controls: Coarse/Medium/Fine/Max
       presets + rough cell-count/minutes estimate; the handoff uses the selection. ✔ slice 4

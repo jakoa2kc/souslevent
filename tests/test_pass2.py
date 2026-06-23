@@ -162,6 +162,47 @@ def test_sample_grid_and_upstream_wind(tmp_path):
     assert spd == 7.5 and abs(drc - 315.0) < 1e-6
 
 
+def test_subzone_bboxes_tiling():
+    from sillage.screening.subzones import subzone_bboxes
+
+    dem = _synthetic_dem(n=100, res_m=50.0)  # 5 km square
+    left, bottom, right, top = dem.bounds
+    tiles = subzone_bboxes(dem, nx=2, ny=2, overlap_frac=0.2)
+    assert len(tiles) == 4
+    for (lft, bot, rgt, topp), (cx, cy) in tiles:
+        assert left - 1 <= lft and rgt <= right + 1  # clamped to domain
+        assert bottom - 1 <= bot and topp <= top + 1
+        assert lft < cx < rgt and bot < cy < topp  # centre inside its bbox
+
+
+def test_assemble_mosaic_full_coverage_and_blend():
+    from sillage.screening.subzones import assemble_mosaic, subzone_bboxes
+
+    dem = _synthetic_dem(n=100, res_m=50.0)
+    tiles = subzone_bboxes(dem, 2, 2, overlap_frac=0.2)
+    contribs = [(bbox, np.full((20, 20), float(i))) for i, (bbox, _c) in enumerate(tiles)]
+    mosaic = assemble_mosaic(dem, contribs)
+    assert mosaic.shape == dem.shape
+    assert np.isfinite(mosaic).all()  # 2x2 tiles cover the whole domain
+    assert -0.01 <= mosaic.min() and mosaic.max() <= 3.01  # bounded by tile values
+
+
+def test_crest_wind_provider(monkeypatch):
+    from sillage.wind import forecast, profile
+    from sillage.wind.forecast import HourlyProfile, WindSample
+
+    def fake_fetch(lat, lon, hours=24, **kw):
+        s = WindSample(time_iso="t0", pressure_hpa=700.0, altitude_m=2500.0,
+                       speed_ms=10.0, from_deg=315.0)
+        return [HourlyProfile(time_iso="t0", samples=[s])]
+
+    monkeypatch.setattr(forecast, "fetch_open_meteo", fake_fetch)
+    dem = _synthetic_dem(n=40, res_m=50.0)  # EPSG:32631, valid UTM
+    provider = profile.crest_wind_provider(dem, crest_alt_m=2500.0, hour_index=0)
+    spd, drc = provider(600500.0, 4900000.0)
+    assert spd == 10.0 and abs(drc - 315.0) < 1e-6
+
+
 def test_synthetic_series():
     from sillage.screening.pass1 import synthetic_series
 

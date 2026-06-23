@@ -303,6 +303,33 @@ sub-zones (ADR-0007, the next slice). A save/export (GIF) button could reuse
 
 ---
 
+## Entry 13 — IHM slice 7: Pass-1 spatial wind via sub-zones (ADR-0007)  (2026-06-21)
+
+**What changed.** Realized ADR-0007's interim. New `screening/subzones.py`: `subzone_bboxes`
+tiles the domain (with overlap), `subzone_speed_field` runs the **mass solver per tile** with
+that tile's own wind, and `assemble_mosaic` stitches the per-tile speed fields onto the full
+DEM grid with **feathered blending** in the overlaps. The per-tile wind is a pluggable
+provider. Added the AROME client `wind.forecast.fetch_arome` (Open-Meteo Meteo-France
+endpoint, sharing the pressure-level core with `fetch_open_meteo`) and
+`wind.profile.crest_wind_provider(source=...)` that samples the forecast at each tile centre's
+crest altitude (memoized per lon/lat). New IHM button **"Run sub-zones (Pass-1, spatial)"**
+runs a 2x2 sub-zone Pass-1 with a synthetic spatial wind on the worker and shows the
+mosaicked map.
+
+**Why.** Capture valley-to-valley wind differences without full gridded `wxModel` init.
+
+**Result.** Verified: tiling + mosaic unit-tested; a real 2x2 sub-zone run on Champsaur
+(4 mass runs, 150 m) mosaics to **full coverage** (775x824); the GUI button renders the
+spatial map; `crest_wind_provider` tested with a mocked fetch. Tests: 33 passed.
+
+**Limitations.** The GUI uses a *synthetic* spatial provider (AROME endpoint/variables to be
+verified against a live response — no network here); the indicator's geometry term still uses
+one representative direction; the sub-zone mosaic has no single vel/ang grid, so the
+click-to-Pass-2 handoff after a sub-zone run falls back to the controls wind. Seams are
+feathered, acceptable for a *screening* product. Eventual target = full gridded `wxModel`.
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

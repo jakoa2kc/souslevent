@@ -60,3 +60,35 @@ def crest_height_series(
             continue
         out.append((p.time_iso, spd, drc))
     return out
+
+
+def crest_wind_provider(dem, crest_alt_m: float, hour_index: int = 0,
+                        source: str = "open_meteo", cache: dict | None = None):
+    """Build ``wind_at_center(x, y) -> (speed_ms, from_deg)`` for sub-zone Pass-1 (ADR-0007).
+
+    Samples the forecast at each point's lon/lat, reduced to ``crest_alt_m``, for the given
+    ``hour_index``. ``source`` is "open_meteo" or "arome". Network per distinct point;
+    results are memoized in ``cache`` (a dict) keyed by rounded lon/lat to avoid refetching
+    nearby tile centres.
+    """
+    from rasterio.crs import CRS
+    from rasterio.warp import transform as warp_xy
+
+    from .forecast import fetch_arome, fetch_open_meteo
+
+    fetch = fetch_arome if source == "arome" else fetch_open_meteo
+    store = {} if cache is None else cache
+
+    def wind_at_center(x: float, y: float) -> tuple[float, float]:
+        lon, lat = warp_xy(dem.crs, CRS.from_epsg(4326), [x], [y])
+        lon, lat = float(lon[0]), float(lat[0])
+        key = (round(lat, 3), round(lon, 3))
+        if key not in store:
+            store[key] = crest_height_series(fetch(lat, lon, hours=hour_index + 1), crest_alt_m)
+        series = store[key]
+        if not series or hour_index >= len(series):
+            raise RuntimeError(f"no forecast crest wind at ({lat:.3f}, {lon:.3f})")
+        _t, spd, drc = series[hour_index]
+        return spd, drc
+
+    return wind_at_center

@@ -35,19 +35,15 @@ class HourlyProfile:
     samples: list[WindSample]
 
 
-def fetch_open_meteo(
-    lat: float,
-    lon: float,
-    pressure_levels_hpa: tuple[int, ...] = (1000, 925, 850, 700, 600, 500),
-    hours: int = 24,
-    timeout_s: float = 30.0,
-) -> list[HourlyProfile]:
-    """Fetch hourly wind by pressure level from Open-Meteo for a point.
+# Open-Meteo's Meteo-France endpoint serves AROME (no key needed for typical use).
+AROME_URL = "https://api.open-meteo.com/v1/meteofrance"
 
-    Returns one HourlyProfile per hour. Cache the raw response upstream for reproducible,
-    offline-replayable debugging (docs/04 caching). This builds the variable list for
-    wind speed/direction at each requested pressure level.
-    """
+
+def _fetch_pressure_levels(
+    url: str, lat: float, lon: float, pressure_levels_hpa: tuple[int, ...],
+    hours: int, timeout_s: float, extra_params: dict | None = None,
+) -> list[HourlyProfile]:
+    """Shared core: fetch hourly wind by pressure level from an Open-Meteo-style endpoint."""
     speed_vars = [f"windspeed_{p}hPa" for p in pressure_levels_hpa]
     dir_vars = [f"winddirection_{p}hPa" for p in pressure_levels_hpa]
     height_vars = [f"geopotential_height_{p}hPa" for p in pressure_levels_hpa]
@@ -58,7 +54,9 @@ def fetch_open_meteo(
         "windspeed_unit": "ms",
         "forecast_days": max(1, (hours + 23) // 24),
     }
-    resp = requests.get(OPEN_METEO_URL, params=params, timeout=timeout_s)
+    if extra_params:
+        params.update(extra_params)
+    resp = requests.get(url, params=params, timeout=timeout_s)
     resp.raise_for_status()
     data = resp.json()["hourly"]
 
@@ -82,9 +80,39 @@ def fetch_open_meteo(
     return profiles
 
 
-# AROME high-resolution client: add when wiring finer local forecasts (docs/04, roadmap).
-def fetch_arome(*args, **kwargs):  # pragma: no cover - stub
-    raise NotImplementedError(
-        "AROME (Meteo-France) client not implemented yet. Needs METEOFRANCE_API_KEY. "
-        "See docs/04_data_sources.md and roadmap M5."
+def fetch_open_meteo(
+    lat: float,
+    lon: float,
+    pressure_levels_hpa: tuple[int, ...] = (1000, 925, 850, 700, 600, 500),
+    hours: int = 24,
+    timeout_s: float = 30.0,
+) -> list[HourlyProfile]:
+    """Fetch hourly wind by pressure level from Open-Meteo (global blend) for a point.
+
+    Returns one HourlyProfile per hour. Cache the raw response upstream for reproducible,
+    offline-replayable debugging (docs/04 caching).
+    """
+    return _fetch_pressure_levels(
+        OPEN_METEO_URL, lat, lon, pressure_levels_hpa, hours, timeout_s,
+    )
+
+
+def fetch_arome(
+    lat: float,
+    lon: float,
+    pressure_levels_hpa: tuple[int, ...] = (1000, 925, 850, 700, 600, 500),
+    hours: int = 24,
+    timeout_s: float = 30.0,
+    model: str = "arome_france_hd",
+) -> list[HourlyProfile]:
+    """Fetch hourly wind by pressure level from AROME via Open-Meteo's Meteo-France endpoint.
+
+    Same shape as ``fetch_open_meteo`` so it is a drop-in finer-resolution source for the
+    Pass-1 sub-zone sampling (ADR-0007). NOTE: AROME's exact pressure-level availability via
+    Open-Meteo should be confirmed against a live response; missing levels are skipped
+    gracefully (as in the shared core). No API key needed for typical use.
+    """
+    return _fetch_pressure_levels(
+        AROME_URL, lat, lon, pressure_levels_hpa, hours, timeout_s,
+        extra_params={"models": model},
     )
