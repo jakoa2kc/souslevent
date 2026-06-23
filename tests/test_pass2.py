@@ -128,3 +128,18 @@ def test_volume3d_public_api():
 def test_gui_module_imports():
     pytest.importorskip("PySide6")  # only when the gui extra is installed
     from sillage.app.main_window import MainWindow  # noqa: F401
+
+
+def test_pass2_mesh_presets_and_estimate():
+    pytest.importorskip("PySide6")
+    from sillage.app.main_window import (
+        PASS2_MESH_DEFAULT,
+        PASS2_MESH_PRESETS,
+        _estimate_minutes,
+    )
+
+    assert PASS2_MESH_DEFAULT in PASS2_MESH_PRESETS
+    for mesh_count, iters in PASS2_MESH_PRESETS.values():
+        assert mesh_count > 0 and iters > 0
+    assert _estimate_minutes(20_000) >= 1
+    assert _estimate_minutes(400_000) > _estimate_minutes(20_000)

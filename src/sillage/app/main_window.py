@@ -32,10 +32,23 @@ from .jobs import SolveJob
 
 DEFAULT_DEM = "cache/champsaur/ign/champsaur_rgealti_50m_prepared_utm.tif"
 
-# Pass-2 click-to-detail defaults (the ADR-0008 mesh quality/time knob comes next slice).
 PASS2_HALF_WIDTH_M = 2500.0  # ~5 km feature window around the clicked hotspot
-PASS2_MESH_COUNT = 50_000    # modest mesh for interactive click-to-detail
-PASS2_ITERATIONS = 200
+
+# ADR-0008: Pass-2 mesh resolution is a quality/time knob. Each preset = (mesh_count,
+# iterations). Default = Medium; "refine on doubt" by picking a finer preset.
+PASS2_MESH_PRESETS: dict[str, tuple[int, int]] = {
+    "Coarse — fastest": (20_000, 100),
+    "Medium — default": (50_000, 200),
+    "Fine — slow": (150_000, 300),
+    "Max — very slow": (400_000, 400),
+}
+PASS2_MESH_DEFAULT = "Medium — default"
+
+
+def _estimate_minutes(mesh_count: int) -> int:
+    """Rough runtime proxy (CPU-bound), calibrated on the Champsaur smoke run
+    (~25k cells -> ~2 min). Indicative only — bounds the 'refine' choice (ADR-0008)."""
+    return max(1, round(mesh_count / 12_000))
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -78,6 +91,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_load_p2 = QtWidgets.QPushButton("Load Pass-2 case (3D)")
         self.btn_load_p2.clicked.connect(self.on_load_pass2)
 
+        self.mesh_combo = QtWidgets.QComboBox()
+        self.mesh_combo.addItems(list(PASS2_MESH_PRESETS))
+        self.mesh_hint = QtWidgets.QLabel("")
+        self.mesh_hint.setStyleSheet("color: #555;")
+        self.mesh_combo.currentTextChanged.connect(self._update_mesh_hint)
+        self.mesh_combo.setCurrentText(PASS2_MESH_DEFAULT)
+
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setVisible(False)
@@ -91,10 +111,13 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow(self.btn_geom)
         form.addRow(self.btn_mass)
         form.addRow(QtWidgets.QLabel("———"))
+        form.addRow("Pass-2 mesh:", self.mesh_combo)
+        form.addRow(self.mesh_hint)
         form.addRow("Pass-2 case:", self.case_edit)
         form.addRow(self.btn_load_p2)
         form.addRow(self.progress)
         form.addRow(self.btn_cancel)
+        self._update_mesh_hint()
 
         note = QtWidgets.QLabel(map2d.DISCLAIMER)
         note.setWordWrap(True)
@@ -159,6 +182,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"Could not initialize the 3D viewport (OpenGL):\n{exc}",
             )
             return False
+
+    # --- Pass-2 mesh quality/time knob (ADR-0008) --------------------------------
+    def _selected_mesh(self) -> tuple[int, int, str]:
+        name = self.mesh_combo.currentText()
+        mesh_count, iterations = PASS2_MESH_PRESETS[name]
+        return mesh_count, iterations, name
+
+    def _update_mesh_hint(self, *_args) -> None:
+        mesh_count, iters, _name = self._selected_mesh()
+        self.mesh_hint.setText(
+            f"~{mesh_count:,} cells, {iters} iters - "
+            f"~{_estimate_minutes(mesh_count)} min (rough)"
+        )
 
     # --- actions ---------------------------------------------------------------
     def on_compute_pass1(self) -> None:
@@ -272,12 +308,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         x, y = float(event.xdata), float(event.ydata)
+        mesh_count, _iters, mesh_name = self._selected_mesh()
         resp = QtWidgets.QMessageBox.question(
             self, "Launch Pass-2",
             f"Run a momentum solve around ({x:.0f}, {y:.0f})?\n\n"
-            f"~{PASS2_HALF_WIDTH_M * 2 / 1000:.0f} km window, mesh {PASS2_MESH_COUNT}, "
-            f"wind {self.wind_spd.value():.0f} m/s from {self.wind_dir.value():.0f}°.\n"
-            "This can take a couple of minutes.",
+            f"~{PASS2_HALF_WIDTH_M * 2 / 1000:.0f} km window, mesh '{mesh_name}' "
+            f"({mesh_count:,} cells, ~{_estimate_minutes(mesh_count)} min), "
+            f"wind {self.wind_spd.value():.0f} m/s from {self.wind_dir.value():.0f}°.",
         )
         if resp != QtWidgets.QMessageBox.StandardButton.Yes:
             return
@@ -296,6 +333,7 @@ class MainWindow(QtWidgets.QMainWindow):
         wind_spd = self.wind_spd.value()
         cli = cfg.windninja_cli
         half_m = PASS2_HALF_WIDTH_M
+        mesh_count, iterations, _name = self._selected_mesh()
         pass2_dir = cfg.cache_dir / "champsaur" / "pass2"
 
         def fn(on_progress, cancel):  # worker thread — no Qt here
@@ -305,7 +343,7 @@ class MainWindow(QtWidgets.QMainWindow):
             run = run_momentum(
                 cli=cli, dem_path=str(crop_path), working_dir=str(pass2_dir / "ihm_run"),
                 wind_speed_ms=wind_spd, wind_from_deg=wind_dir,
-                mesh_count=PASS2_MESH_COUNT, iterations=PASS2_ITERATIONS,
+                mesh_count=mesh_count, iterations=iterations,
                 on_progress=on_progress, cancel=cancel,
             )
             if run.returncode not in (0, None):

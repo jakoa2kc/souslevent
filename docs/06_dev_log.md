@@ -241,6 +241,25 @@ the next IHM slice).
 
 ---
 
+## Entry 10 — IHM slice 4: Pass-2 mesh quality/time knob (ADR-0008)  (2026-06-21)
+
+**What changed.** Added a mesh preset combo to the Pass-2 controls
+(Coarse/Medium/Fine/Max → `(mesh_count, iterations)`) with a rough "~N cells, ~M min"
+estimate label. The click-to-detail handoff now uses the selected preset instead of a fixed
+50k. Default = Medium.
+
+**Why.** ADR-0008: make the time-vs-lee-accuracy trade explicit; "refine on doubt" by
+picking a finer preset; the rough estimate bounds the choice.
+
+**Result.** Verified headless: default Medium (50k/200); switching to Fine → 150k/300 with
+the hint updating; the confirm dialog quotes the chosen preset + estimate. Replaced a couple
+of non-ASCII glyphs in UI strings to avoid console-encoding noise. Tests: 27 passed.
+
+**Open questions.** The estimate is a crude linear proxy (could calibrate per-machine); a
+"target near-surface resolution" input could replace presets later.
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

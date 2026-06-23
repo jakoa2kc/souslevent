@@ -84,7 +84,8 @@ The "real software" surface. Built incrementally; adapt as results come in.
       (`app/jobs.py` SolveJob; streaming runner in `flow/windninja`). ✔ slice 2
 - [ ] Hourly time slider + AROME sub-zone Pass-1 (ADR-0007) wired into the 2D tab.
 - [x] Click-on-map hotspot → crop+buffer → launch Pass-2 → show 3D (the M3 handoff). ✔ slice 3
-- [ ] Mesh quality/time knob (ADR-0008) in the Pass-2 controls.
+- [x] Mesh quality/time knob (ADR-0008) in the Pass-2 controls: Coarse/Medium/Fine/Max
+      presets + rough cell-count/minutes estimate; the handoff uses the selection. ✔ slice 4
 - [ ] Upstream-crest wind sampling from the Pass-1 field for the Pass-2 BC.
 **Definition of done:** browse screening by hour, click a hotspot, get the 3D rotor — one app.
 
