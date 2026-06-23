@@ -25,7 +25,12 @@ from matplotlib.figure import Figure
 from ..config import load_config, resolve_cache_path
 from ..flow.windninja import locate_openfoam_case, run_momentum
 from ..screening import indicator as ind
-from ..screening.pass1 import find_direction_grid, hourly_indicator, upstream_crest_wind
+from ..screening.pass1 import (
+    find_direction_grid,
+    hourly_indicator,
+    synthetic_series,
+    upstream_crest_wind,
+)
 from ..terrain.dem import crop_dem, load_dem, write_dem
 from ..viz import map2d, volume3d
 from .jobs import SolveJob
@@ -60,6 +65,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # Pass-1 wind field from the last mass run, for upstream-crest Pass-2 BC (M3).
         self._pass1_vel_path = None
         self._pass1_ang_path = None
+        # Hourly stack: list of (label, hazard, vel_path, ang_path) for the time slider.
+        self._hourly: list[tuple] = []
 
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         split.addWidget(self._build_controls())
@@ -88,6 +95,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_geom.clicked.connect(self.on_compute_pass1)
         self.btn_mass = QtWidgets.QPushButton("Run WindNinja mass (Pass-1)")
         self.btn_mass.clicked.connect(self.on_run_mass)
+        self.hours_spin = QtWidgets.QSpinBox()
+        self.hours_spin.setRange(1, 24)
+        self.hours_spin.setValue(6)
+        self.btn_hourly = QtWidgets.QPushButton("Run hourly (Pass-1, synthetic)")
+        self.btn_hourly.clicked.connect(self.on_run_hourly)
 
         self.case_edit = QtWidgets.QLineEdit("")
         self.case_edit.setPlaceholderText("(auto-detect cached NINJAFOAM_* case)")
@@ -113,6 +125,8 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow("Wind speed (m/s):", self.wind_spd)
         form.addRow(self.btn_geom)
         form.addRow(self.btn_mass)
+        form.addRow("Hours:", self.hours_spin)
+        form.addRow(self.btn_hourly)
         form.addRow(QtWidgets.QLabel("———"))
         form.addRow("Pass-2 mesh:", self.mesh_combo)
         form.addRow(self.mesh_hint)
@@ -127,7 +141,7 @@ class MainWindow(QtWidgets.QMainWindow):
         note.setStyleSheet("color: #a33; font-style: italic;")
         form.addRow(note)
 
-        self._run_buttons = [self.btn_geom, self.btn_mass, self.btn_load_p2]
+        self._run_buttons = [self.btn_geom, self.btn_mass, self.btn_hourly, self.btn_load_p2]
         self._job: SolveJob | None = None
         self._cancelling = False
         w.setMaximumWidth(380)
@@ -141,6 +155,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.nav = NavigationToolbar2QT(self.canvas, w)
         lay.addWidget(self.nav)
         lay.addWidget(self.canvas)
+
+        slider_row = QtWidgets.QHBoxLayout()
+        self.hour_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.hour_slider.setMinimum(0)
+        self.hour_slider.setMaximum(0)
+        self.hour_slider.valueChanged.connect(self._on_slider_change)
+        self.hour_label = QtWidgets.QLabel("")
+        slider_row.addWidget(QtWidgets.QLabel("Hour:"))
+        slider_row.addWidget(self.hour_slider)
+        slider_row.addWidget(self.hour_label)
+        self.hour_widget = QtWidgets.QWidget()
+        self.hour_widget.setLayout(slider_row)
+        self.hour_widget.setVisible(False)
+        lay.addWidget(self.hour_widget)
+
         hint = QtWidgets.QLabel(
             "Tip: left-click a hotspot on the map to launch a Pass-2 momentum solve there."
         )
@@ -205,6 +234,9 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             dem = load_dem(self.dem_edit.text(), max_domain_km=self.cfg.max_domain_km)
             self._dem = dem
+            self._set_single_map_mode(True)
+            self._pass1_vel_path = None  # geometry-only has no Pass-1 wind field
+            self._pass1_ang_path = None
             hazard = ind.hazard_indicator(dem, self.wind_dir.value())
             self.fig.clear()
             ax = self.fig.add_subplot(111)
@@ -291,7 +323,89 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fig.colorbar(im, ax=ax, label="leeward hazard indicator (0–1)")
         ax.set_title(f"Pass-1 WindNinja mass — wind from {wind_dir:.0f}°")
         self.canvas.draw()
+        self._set_single_map_mode(True)
         self._finish_job("Pass-1 mass done")
+
+    # --- hourly Pass-1 + time slider -------------------------------------------
+    def _set_single_map_mode(self, single: bool) -> None:
+        """Single-map mode hides the hour slider; hourly mode shows it."""
+        self.hour_widget.setVisible(not single)
+        if single:
+            self._hourly = []
+
+    def on_run_hourly(self) -> None:
+        """Run a synthetic hourly Pass-1 loop on the worker; populate the time slider."""
+        if self._job is not None:
+            return
+        cfg = self.cfg
+        dem_path = self.dem_edit.text()
+        hours = int(self.hours_spin.value())
+        resolution_m = 100.0
+        cli = cfg.windninja_cli
+        max_km = cfg.max_domain_km
+        cache_dir = cfg.cache_dir
+
+        def fn(on_progress, cancel):  # worker thread — no Qt here
+            dem = load_dem(dem_path, max_domain_km=max_km)
+            series = synthetic_series(hours)
+            n = len(series)
+            out = []
+            for i, (label, spd, drc) in enumerate(series):
+                if cancel():
+                    raise RuntimeError("cancelled")
+                work = cache_dir / "champsaur" / "ihm_hourly" / (
+                    f"h{i:02d}_{drc:.0f}_{spd:.0f}_{resolution_m:.0f}m"
+                )
+
+                def hp(pct, msg, i=i):  # map per-hour progress to overall 0..100
+                    on_progress(int((i + pct / 100.0) / n * 100), f"hour {i + 1}/{n}: {msg}")
+
+                hazard, vel = hourly_indicator(
+                    dem=dem, cli=cli, dem_path=dem_path, work_dir=work,
+                    wind_speed_ms=spd, wind_from_deg=drc, resolution_m=resolution_m,
+                    force_run=False, on_progress=hp, cancel=cancel,
+                )
+                out.append((label, hazard, vel, find_direction_grid(work)))
+            return dem, out
+
+        self._cancelling = False
+        self._set_running(True, f"Pass-1 hourly ({hours} h)…")
+        job = SolveJob(fn, self)
+        job.progress.connect(self._on_job_progress)
+        job.finished.connect(self._on_hourly_finished)
+        job.failed.connect(self._on_job_failed)
+        self._job = job
+        job.start()
+
+    def _on_hourly_finished(self, result) -> None:
+        dem, stack = result
+        self._dem = dem
+        self._hourly = stack
+        self.hour_widget.setVisible(True)
+        self.hour_slider.blockSignals(True)
+        self.hour_slider.setMaximum(max(0, len(stack) - 1))
+        self.hour_slider.setValue(0)
+        self.hour_slider.blockSignals(False)
+        self._show_hour(0)
+        self._finish_job(f"Pass-1 hourly: {len(stack)} hours")
+
+    def _on_slider_change(self, val: int) -> None:
+        if self._hourly:
+            self._show_hour(int(val))
+
+    def _show_hour(self, i: int) -> None:
+        if not (0 <= i < len(self._hourly)):
+            return
+        label, hazard, vel, ang = self._hourly[i]
+        self._pass1_vel_path = vel
+        self._pass1_ang_path = ang
+        self.fig.clear()
+        ax = self.fig.add_subplot(111)
+        im = map2d.draw_indicator(ax, self._dem, hazard)
+        self.fig.colorbar(im, ax=ax, label="leeward hazard indicator (0–1)")
+        ax.set_title(f"Pass-1 hourly — {label}")
+        self.canvas.draw()
+        self.hour_label.setText(label)
 
     def _on_job_failed(self, msg: str) -> None:
         if self._cancelling:

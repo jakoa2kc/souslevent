@@ -83,7 +83,9 @@ The "real software" surface. Built incrementally; adapt as results come in.
       `volume3d.populate_plotter`); 3D viewport created lazily (needs a GL context). ✔ slice 1
 - [x] Worker thread for long solves (WindNinja mass/momentum): progress + cancel
       (`app/jobs.py` SolveJob; streaming runner in `flow/windninja`). ✔ slice 2
-- [ ] Hourly time slider + AROME sub-zone Pass-1 (ADR-0007) wired into the 2D tab.
+- [x] Hourly time slider in the 2D tab (synthetic hourly winds; worker-driven loop;
+      scrubbing swaps the per-hour wind field used by the handoff). ✔ slice 6
+- [ ] AROME sub-zone Pass-1 (ADR-0007) feeding the hourly slider with real spatial winds.
 - [x] Click-on-map hotspot → crop+buffer → launch Pass-2 → show 3D (the M3 handoff). ✔ slice 3
 - [x] Mesh quality/time knob (ADR-0008) in the Pass-2 controls: Coarse/Medium/Fine/Max
       presets + rough cell-count/minutes estimate; the handoff uses the selection. ✔ slice 4

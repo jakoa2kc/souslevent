@@ -162,6 +162,15 @@ def test_sample_grid_and_upstream_wind(tmp_path):
     assert spd == 7.5 and abs(drc - 315.0) < 1e-6
 
 
+def test_synthetic_series():
+    from sillage.screening.pass1 import synthetic_series
+
+    s = synthetic_series(4)
+    assert len(s) == 4
+    assert len({label for label, _s, _d in s}) == 4  # distinct hour labels
+    assert [spd for _l, spd, _d in s] == sorted(spd for _l, spd, _d in s)  # speed ramps
+
+
 def test_pass2_wind_falls_back_to_controls():
     pytest.importorskip("PySide6")
     import os

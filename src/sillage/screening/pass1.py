@@ -19,6 +19,18 @@ from ..terrain.dem import Dem
 from . import indicator as ind
 
 
+def synthetic_series(hours: int) -> list[tuple[str, float, float]]:
+    """Deterministic NW-sweep hourly wind series for offline plumbing/demo (NOT a forecast).
+
+    Returns (label, speed_ms, from_deg) per hour. Real hourly winds come from Open-Meteo /
+    AROME sub-zones (ADR-0007); this keeps the hourly UI usable without a network.
+    """
+    return [
+        (f"synthetic +{i:02d}h", 6.0 + 1.0 * i, (300.0 + 10.0 * i) % 360.0)
+        for i in range(hours)
+    ]
+
+
 def find_speed_grid(work_dir: Path) -> Path | None:
     """Return the WindNinja speed-magnitude ASCII grid (``*_vel.asc``), if present."""
     work_dir = Path(work_dir)

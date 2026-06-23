@@ -102,11 +102,8 @@ def main(dem_path, source, hours, crest_alt_m, resolution_m, vegetation, edge_bu
 def _wind_series(dem, source, hours, crest_alt_m):
     """Return a list of (label, speed_ms, from_deg), one per hour."""
     if source == "synthetic":
-        # Deterministic NW sweep for offline plumbing/demo. NOT a real forecast.
-        return [
-            (f"synthetic +{i:02d}h", 6.0 + 1.0 * i, (300.0 + 10.0 * i) % 360.0)
-            for i in range(hours)
-        ]
+        from sillage.screening.pass1 import synthetic_series
+        return synthetic_series(hours)
     from sillage.wind.forecast import fetch_open_meteo
     from sillage.wind.profile import crest_height_series
     lon, lat = _center_lonlat(dem)

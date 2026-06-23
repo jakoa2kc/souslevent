@@ -282,6 +282,27 @@ controls wind changed since). Asymmetric downwind crop margin is still TODO.
 
 ---
 
+## Entry 12 — IHM slice 6: hourly Pass-1 time slider  (2026-06-21)
+
+**What changed.** A "Run hourly (Pass-1)" button runs a synthetic N-hour mass loop on the
+worker (per-hour progress aggregated to an overall 0–100%), populating a **time slider** in
+the 2D tab. Scrubbing redraws the map for that hour and swaps the Pass-1 wind field used by
+the click-to-Pass-2 handoff, so each hour's click uses that hour's upstream wind. Single-map
+actions (geometry / single mass) hide the slider. Factored `synthetic_series` into
+`screening.pass1` (shared with `champsaur_pass1_hourly.py`).
+
+**Why.** The M1 product — triage by hour — now lives inside the app.
+
+**Result.** Verified headless: a 2-hour run via the worker reached 100%, slider max=1, scrub
+0→1 redraws and swaps the wind field; the embedded canvas shows the per-hour map. Tests:
+30 passed.
+
+**Open questions.** Hours are synthetic for now; real spatial winds come from AROME
+sub-zones (ADR-0007, the next slice). A save/export (GIF) button could reuse
+`viz.map2d.save_timeline_gif`.
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**
