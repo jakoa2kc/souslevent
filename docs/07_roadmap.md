@@ -84,8 +84,10 @@ The "real software" surface. Built incrementally; adapt as results come in.
 - [x] "Carte" tab: interactive Leaflet/QtWebEngine map (IGN / OSM / OpenTopoMap), centred on
       Ancelle (~30 km), world-zoomable, with a rectangle tool that captures the Pass-1 AOI
       (ADR-0012). ✔
-- [ ] Wire the selected AOI → DEM preparation (IGN RGE ALTI for an arbitrary bbox) to drive
-      Pass-1 (today's DEM pipeline is Champsaur-specific).
+- [x] Wire the selected AOI → DEM preparation: "Valider la zone" prepares a coarse (~90 m)
+      worldwide DEM from terrarium tiles (`terrain/acquire.py`) on the worker, then moves to
+      the créneau tab; the prepared DEM drives Pass-1 (ADR-0013). ✔
+- [ ] Per-feature **fine** DEM for Pass-2 (high-zoom crop) instead of reusing the coarse one.
 - [x] App shell: controls + Pass-1 (2D matplotlib) / Pass-2 (3D pyvistaqt) tabs;
       `sillage-gui` entry. Reuses headless rendering (`map2d.draw_indicator`,
       `volume3d.populate_plotter`); 3D viewport created lazily (needs a GL context). ✔ slice 1

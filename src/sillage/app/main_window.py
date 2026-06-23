@@ -59,6 +59,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("Sillage — turbulences sous le vent")
         self.cfg = load_config()
         self._dem = None
+        # Active prepared DEM path (default Champsaur; replaced when a zone is validated).
+        self._dem_path = str(resolve_cache_path(DEFAULT_DEM, self.cfg))
         # Pass-1 wind field from the last mass run, for upstream-crest Pass-2 BC (M3).
         self._pass1_vel_path = None
         self._pass1_ang_path = None
@@ -88,30 +90,68 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self._build_analyse_tab(), "Analyse locale des zones sous le vent")
         self.setCentralWidget(self.tabs)
 
-        self._run_buttons = [self.btn_geom, self.btn_mass, self.btn_hourly,
-                             self.btn_subzones, self.btn_load_p2]
+        self._run_buttons = [self.btn_validate, self.btn_geom, self.btn_mass,
+                             self.btn_hourly, self.btn_subzones, self.btn_load_p2]
         self.statusBar().showMessage("Prêt")
 
     def _on_aoi_selected(self, s: float, w: float, n: float, e: float) -> None:
         self.selected_bbox = (s, w, n, e)
         self.statusBar().showMessage(
-            f"Zone Pass-1 : S {s:.4f}, O {w:.4f} → N {n:.4f}, E {e:.4f} (lat,lon). "
-            "Préparation du MNT depuis cette zone : à venir."
+            f"Zone sélectionnée : S {s:.4f}, O {w:.4f} → N {n:.4f}, E {e:.4f}. "
+            "Clique « Valider la zone » pour préparer le MNT."
         )
+
+    def on_validate_zone(self) -> None:
+        """Prepare a coarse DEM for the drawn rectangle (worker thread), then go to tab 2."""
+        if self._job is not None:
+            return
+        if self.selected_bbox is None:
+            QtWidgets.QMessageBox.information(
+                self, "Aucune zone",
+                "Dessine d'abord un rectangle sur la carte pour définir la zone de vol.",
+            )
+            return
+        from ..terrain.acquire import prepare_dem_for_bbox
+
+        bbox = self.selected_bbox
+        s, west, n, e = bbox
+        out = self.cfg.cache_dir / "aoi" / f"dem_{s:.3f}_{west:.3f}_{n:.3f}_{e:.3f}_utm.tif"
+
+        def fn(on_progress, cancel):  # worker thread — no Qt here
+            return str(prepare_dem_for_bbox(
+                bbox, out, target_res_m=90.0, on_progress=on_progress, cancel=cancel,
+            ))
+
+        self._cancelling = False
+        self._set_running(True, "Préparation du MNT…")
+        job = SolveJob(fn, self)
+        job.progress.connect(self._on_job_progress)
+        job.finished.connect(self._on_dem_ready)
+        job.failed.connect(self._on_job_failed)
+        self._job = job
+        job.start()
+
+    def _on_dem_ready(self, dem_path: str) -> None:
+        self._dem_path = dem_path
+        self._dem = None  # force a reload on the next Pass-1 action
+        self._finish_job("MNT prêt — passe à la sélection du créneau.")
+        self.tabs.setCurrentWidget(self._creneau_tab)
 
     # --- UI construction (controls live in their own tabs) ---------------------
     def _build_zone_tab(self) -> QtWidgets.QWidget:
-        """Tab 1 — flight-zone selection: the interactive map + the terrain (MNT) input."""
+        """Tab 1 — flight-zone selection: the interactive map + a "Valider" button that
+        prepares the DEM for the drawn rectangle, then moves to the créneau tab."""
         w = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(w)
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(QtWidgets.QLabel("MNT :"))
-        self.dem_edit = QtWidgets.QLineEdit(str(resolve_cache_path(DEFAULT_DEM, self.cfg)))
-        row.addWidget(self.dem_edit)
-        lay.addLayout(row)
         self.map_tab = MapTab()
         self.map_tab.aoiSelected.connect(self._on_aoi_selected)
         lay.addWidget(self.map_tab)
+        row = QtWidgets.QHBoxLayout()
+        row.addStretch(1)
+        self.btn_validate = QtWidgets.QPushButton("Valider la zone (préparer le MNT)")
+        self.btn_validate.clicked.connect(self.on_validate_zone)
+        row.addWidget(self.btn_validate)
+        lay.addLayout(row)
         return w
 
     def _build_creneau_tab(self) -> QtWidgets.QWidget:
@@ -303,7 +343,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_compute_pass1(self) -> None:
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
-            dem = load_dem(self.dem_edit.text(), max_domain_km=self.cfg.max_domain_km)
+            dem = load_dem(self._dem_path, max_domain_km=self.cfg.max_domain_km)
             self._dem = dem
             self._set_single_map_mode(True)
             self._pass1_vel_path = None  # geometry-only has no Pass-1 wind field
@@ -325,7 +365,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._job is not None:
             return
         cfg = self.cfg
-        dem_path = self.dem_edit.text()
+        dem_path = self._dem_path
         wind_dir = self.wind_dir.value()
         wind_spd = self.wind_spd.value()
         resolution_m = 100.0
@@ -401,7 +441,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._job is not None:
             return
         cfg = self.cfg
-        dem_path = self.dem_edit.text()
+        dem_path = self._dem_path
         hours = int(self.hours_spin.value())
         resolution_m = 100.0
         cli = cfg.windninja_cli
@@ -479,7 +519,7 @@ class MainWindow(QtWidgets.QMainWindow):
         from ..screening.subzones import subzone_speed_field
 
         cfg = self.cfg
-        dem_path = self.dem_edit.text()
+        dem_path = self._dem_path
         cli = cfg.windninja_cli
         max_km = cfg.max_domain_km
         rep_dir = self.wind_dir.value()

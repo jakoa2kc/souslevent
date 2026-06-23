@@ -411,6 +411,29 @@ handoff switches to the analysis tab. Tests: 34 passed (exit 0).
 
 ---
 
+## Entry 18 — Zone tab: "Valider" prepares the AOI DEM (worldwide, ADR-0013)  (2026-06-21)
+
+**What changed.** Removed the useless MNT text field from tab 1. Added **"Valider la zone
+(préparer le MNT)"**: it prepares a coarse (~90 m) DEM for the drawn rectangle on the worker
+thread (progress in the status bar) and, when ready, **switches to the créneau tab**. New
+`terrain/acquire.py`: `prepare_dem_for_bbox` fetches worldwide **terrarium** elevation tiles
+(AWS, key-free) via `contextily.bounds2img`, decodes RGB→metres, and reprojects to UTM
+(`zoom_for_resolution` picks/caps the tile zoom). The prepared file replaces `MainWindow.
+_dem_path`, which now feeds every Pass-1 action (the old `dem_edit` is gone).
+
+**Why.** Make the zone selection actually drive Pass-1, worldwide, without IGN per-département
+downloads. Pass-1 is coarse, so no MNT-precision control is needed (ADR-0013).
+
+**Result.** Verified end to end: a ~30 km AOI around Ancelle → "Valider" (progress
+8→60→82→100) → `cache/aoi/dem_*.tif` (528×529 @ 109 m, elev 553-3388 m) → auto-switch to the
+créneau tab. Offline tests mock `bounds2img` (decode→reproject ~1000 m preserved) and check
+`zoom_for_resolution` capping. Tests: 36 passed.
+
+**Open questions.** Per-feature **fine** DEM for Pass-2 (high-zoom crop) rather than reusing
+the coarse zone DEM. Optional IGN RGE ALTI path for high-fidelity French zones.
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

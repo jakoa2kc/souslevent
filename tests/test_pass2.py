@@ -162,6 +162,36 @@ def test_sample_grid_and_upstream_wind(tmp_path):
     assert spd == 7.5 and abs(drc - 315.0) < 1e-6
 
 
+def test_zoom_for_resolution_caps():
+    from sillage.terrain.acquire import zoom_for_resolution
+
+    z_fine = zoom_for_resolution(44.5, 30.0, merc_width_m=20_000, max_px=2500)
+    z_coarse = zoom_for_resolution(44.5, 200.0, merc_width_m=20_000, max_px=2500)
+    assert z_fine > z_coarse  # finer target -> higher zoom
+    z_capped = zoom_for_resolution(44.5, 30.0, merc_width_m=5_000_000, max_px=2500)
+    assert z_capped < z_fine  # a giant AOI is capped down to a coarser DEM
+
+
+def test_prepare_dem_for_bbox_decodes_and_reprojects(tmp_path, monkeypatch):
+    import contextily as cx
+
+    from sillage.terrain import acquire
+    from sillage.terrain.dem import load_dem
+
+    # terrarium encoding of 1000 m: v = 1000 + 32768 = 33768 -> R=131, G=232, B=0
+    img = np.zeros((16, 16, 4), dtype="uint8")
+    img[:, :, 0], img[:, :, 1], img[:, :, 2], img[:, :, 3] = 131, 232, 0, 255
+    ext = (665000.0, 724000.0, 5518000.0, 5577000.0)  # web-mercator (Champsaur-ish)
+    monkeypatch.setattr(cx, "bounds2img", lambda *a, **k: (img, ext))
+
+    out = tmp_path / "aoi.tif"
+    p = acquire.prepare_dem_for_bbox((44.45, 6.0, 44.70, 6.45), out, target_res_m=90.0)
+    assert p.exists()
+    dem = load_dem(str(p), max_domain_km=200.0)
+    assert dem.crs.is_projected
+    assert 950 < float(np.nanmean(dem.elevation)) < 1050  # ~1000 m preserved
+
+
 def test_subzone_bboxes_tiling():
     from sillage.screening.subzones import subzone_bboxes
 

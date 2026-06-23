@@ -312,6 +312,33 @@ in the launcher so WebEngine (map) and VTK (3D viewport) OpenGL coexist.
 
 ---
 
+## ADR-0013 — Worldwide DEM acquisition for the AOI (terrarium tiles); coarse for Pass-1
+
+**Status:** accepted
+
+**Context.** The map tab (ADR-0012) lets the user select **any** AOI worldwide; Pass-1 then
+needs a DEM for it. IGN RGE ALTI is **France-only** and heavy (per-département `.7z`). Pass-1
+is a **coarse screening** (candidates at ~50-100 m), so it only needs ~90 m terrain — **fine
+terrain matters only for Pass-2's small feature window**.
+
+**Decision.** "Valider la zone" prepares a **coarse (~90 m) DEM** for the drawn bbox from the
+worldwide, **key-free "terrarium" elevation tiles** (AWS), via `contextily.bounds2img` →
+decode RGB→metres → reproject to UTM north-up (`terrain/acquire.py`). The tile **zoom** is
+chosen for the target resolution and **capped** so a huge AOI degrades to a coarser DEM
+instead of a giant fetch. **No precision control in the UI** — a finer DEM would not improve
+Pass-1's coarse output. Fine terrain for **Pass-2** is to be fetched **per feature on demand**
+(small crop, high zoom) — a separate step.
+
+**Consequences.**
+- Worldwide and keyless; needs network. Terrarium is ~30 m-capable; we target ~90 m for
+  Pass-1 (fast, small).
+- The DEM acquisition runs on the worker thread with progress; the prepared file feeds all
+  Pass-1 actions (`MainWindow._dem_path`).
+- The IGN RGE ALTI pipeline (`prepare_champsaur_ign.py`) stays available for high-fidelity
+  French work; per-feature fine DEM for Pass-2 is the next acquisition step.
+
+---
+
 ## Open questions tracked as future ADRs
 
 - **Stability / diurnal winds on the momentum solver.** Available on the mass solver
