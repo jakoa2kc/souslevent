@@ -203,6 +203,18 @@ def test_crest_wind_provider(monkeypatch):
     assert spd == 10.0 and abs(drc - 315.0) < 1e-6
 
 
+def test_basemap_sources_and_unknown_raises():
+    import matplotlib.pyplot as plt
+
+    from sillage.viz.map2d import BASEMAP_SOURCES, add_basemap
+
+    assert "IGN plan" in BASEMAP_SOURCES and "OpenStreetMap" in BASEMAP_SOURCES
+    fig, ax = plt.subplots()
+    with pytest.raises(ValueError):  # validated before any network/contextily import
+        add_basemap(ax, "EPSG:32632", source="does-not-exist")
+    plt.close(fig)
+
+
 def test_synthetic_series():
     from sillage.screening.pass1 import synthetic_series
 

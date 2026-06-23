@@ -19,6 +19,33 @@ from ..terrain.dem import Dem
 
 DISCLAIMER = "Candidates (likelihood of disturbed lee air) — NOT rotor boundaries"
 
+# Web-tile basemaps for orientation under the Pass-1 map (contextily). (family, layer).
+# IGN uses the key-free Geoplateforme (data.geopf.fr); OSM/OpenTopoMap are open worldwide.
+BASEMAP_SOURCES = {
+    "IGN plan": ("GeoportailFrance", "plan"),
+    "IGN ortho": ("GeoportailFrance", "orthos"),
+    "OpenStreetMap": ("OpenStreetMap", "Mapnik"),
+    "OpenTopoMap": ("OpenTopoMap", None),
+}
+
+
+def add_basemap(ax, crs, source: str = "IGN plan", attribution: bool = False, zorder: int = 0):
+    """Add a web-tile basemap under the current axes (reprojected to ``crs``).
+
+    Needs network. Raises if the source is unknown or tiles can't be fetched (callers should
+    fall back to the hillshade). ``crs`` is a rasterio/pyproj CRS or an "EPSG:xxxx" string.
+    """
+    if source not in BASEMAP_SOURCES:
+        raise ValueError(f"Unknown basemap source {source!r}; have {list(BASEMAP_SOURCES)}")
+    import contextily as cx
+
+    family, layer = BASEMAP_SOURCES[source]
+    provider = getattr(cx.providers, family)
+    if layer is not None:
+        provider = provider[layer]
+    crs_str = crs.to_string() if hasattr(crs, "to_string") else str(crs)
+    cx.add_basemap(ax, crs=crs_str, source=provider, attribution=attribution, zorder=zorder)
+
 
 @dataclass
 class HotspotClick:

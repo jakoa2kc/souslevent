@@ -67,6 +67,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pass1_ang_path = None
         # Hourly stack: list of (label, hazard, vel_path, ang_path) for the time slider.
         self._hourly: list[tuple] = []
+        # Last rendered (dem, hazard, title) so toggling the basemap can redraw it.
+        self._last_map = None
 
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         split.addWidget(self._build_controls())
@@ -90,6 +92,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wind_spd = QtWidgets.QDoubleSpinBox()
         self.wind_spd.setRange(0.0, 60.0)
         self.wind_spd.setValue(8.0)
+
+        self.basemap_combo = QtWidgets.QComboBox()
+        self.basemap_combo.addItems(["None", *map2d.BASEMAP_SOURCES.keys()])
+        self.basemap_combo.setCurrentText("IGN plan")
+        self.basemap_combo.currentTextChanged.connect(self._on_basemap_change)
 
         self.btn_geom = QtWidgets.QPushButton("Compute Pass-1 (geometry)")
         self.btn_geom.clicked.connect(self.on_compute_pass1)
@@ -125,6 +132,7 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow("DEM:", self.dem_edit)
         form.addRow("Wind FROM (deg):", self.wind_dir)
         form.addRow("Wind speed (m/s):", self.wind_spd)
+        form.addRow("Basemap:", self.basemap_combo)
         form.addRow(self.btn_geom)
         form.addRow(self.btn_mass)
         form.addRow("Hours:", self.hours_spin)
@@ -232,6 +240,40 @@ class MainWindow(QtWidgets.QMainWindow):
             f"~{_estimate_minutes(mesh_count)} min (rough)"
         )
 
+    # --- map rendering (shared by all Pass-1 views) ----------------------------
+    def _render_map(self, dem, hazard, title: str) -> None:
+        """Draw a Pass-1 hazard map on the embedded canvas, with an optional web basemap."""
+        self._last_map = (dem, hazard, title)
+        source = self.basemap_combo.currentText()
+        left, bottom, right, top = dem.bounds
+        extent = (left, right, bottom, top)
+        self.fig.clear()
+        ax = self.fig.add_subplot(111)
+        if source != "None":
+            from matplotlib import colors
+
+            im = ax.imshow(hazard, cmap="inferno", extent=extent, origin="upper",
+                           alpha=0.5, norm=colors.Normalize(0, 1), zorder=2)
+            ax.set_xlim(left, right)
+            ax.set_ylim(bottom, top)
+            try:
+                map2d.add_basemap(ax, dem.crs, source=source, attribution=False, zorder=0)
+            except Exception as exc:  # offline / tiles unavailable -> hillshade fallback
+                ax.clear()
+                im = map2d.draw_indicator(ax, dem, hazard)
+                self.statusBar().showMessage(f"Basemap unavailable ({exc}); using hillshade")
+            ax.set_xlabel("Easting (m)")
+            ax.set_ylabel("Northing (m)")
+        else:
+            im = map2d.draw_indicator(ax, dem, hazard)
+        self.fig.colorbar(im, ax=ax, label="leeward hazard indicator (0–1)")
+        ax.set_title(f"{title}\n{map2d.DISCLAIMER}")
+        self.canvas.draw()
+
+    def _on_basemap_change(self, *_args) -> None:
+        if self._last_map is not None:
+            self._render_map(*self._last_map)
+
     # --- actions ---------------------------------------------------------------
     def on_compute_pass1(self) -> None:
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
@@ -242,12 +284,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._pass1_vel_path = None  # geometry-only has no Pass-1 wind field
             self._pass1_ang_path = None
             hazard = ind.hazard_indicator(dem, self.wind_dir.value())
-            self.fig.clear()
-            ax = self.fig.add_subplot(111)
-            im = map2d.draw_indicator(ax, dem, hazard)
-            self.fig.colorbar(im, ax=ax, label="leeward hazard indicator (0–1)")
-            ax.set_title(f"Pass-1 geometry-only — wind from {self.wind_dir.value():.0f}°")
-            self.canvas.draw()
+            self._render_map(
+                dem, hazard, f"Pass-1 geometry-only — wind from {self.wind_dir.value():.0f}°"
+            )
             self.statusBar().showMessage(
                 f"Pass-1 geometry on {dem.shape} grid, res {dem.resolution_m:.0f} m"
             )
@@ -321,12 +360,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._dem = dem
         self._pass1_vel_path = vel_path
         self._pass1_ang_path = ang_path
-        self.fig.clear()
-        ax = self.fig.add_subplot(111)
-        im = map2d.draw_indicator(ax, dem, hazard)
-        self.fig.colorbar(im, ax=ax, label="leeward hazard indicator (0–1)")
-        ax.set_title(f"Pass-1 WindNinja mass — wind from {wind_dir:.0f}°")
-        self.canvas.draw()
+        self._render_map(dem, hazard, f"Pass-1 WindNinja mass — wind from {wind_dir:.0f}°")
         self._set_single_map_mode(True)
         self._finish_job("Pass-1 mass done")
 
@@ -403,12 +437,7 @@ class MainWindow(QtWidgets.QMainWindow):
         label, hazard, vel, ang = self._hourly[i]
         self._pass1_vel_path = vel
         self._pass1_ang_path = ang
-        self.fig.clear()
-        ax = self.fig.add_subplot(111)
-        im = map2d.draw_indicator(ax, self._dem, hazard)
-        self.fig.colorbar(im, ax=ax, label="leeward hazard indicator (0–1)")
-        ax.set_title(f"Pass-1 hourly — {label}")
-        self.canvas.draw()
+        self._render_map(self._dem, hazard, f"Pass-1 hourly — {label}")
         self.hour_label.setText(label)
 
     # --- sub-zone spatial Pass-1 (ADR-0007) ------------------------------------
@@ -465,12 +494,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # The mosaic has no single vel/ang grid, so the click handoff falls back to controls.
         self._pass1_vel_path = None
         self._pass1_ang_path = None
-        self.fig.clear()
-        ax = self.fig.add_subplot(111)
-        im = map2d.draw_indicator(ax, dem, hazard)
-        self.fig.colorbar(im, ax=ax, label="leeward hazard indicator (0–1)")
-        ax.set_title(f"Pass-1 sub-zones (spatial wind) — base from {rep_dir:.0f}°")
-        self.canvas.draw()
+        self._render_map(
+            dem, hazard, f"Pass-1 sub-zones (spatial wind) — base from {rep_dir:.0f}°"
+        )
         self._finish_job("Pass-1 sub-zones done")
 
     def _on_job_failed(self, msg: str) -> None:

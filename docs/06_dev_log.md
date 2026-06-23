@@ -330,6 +330,23 @@ feathered, acceptable for a *screening* product. Eventual target = full gridded 
 
 ---
 
+## Entry 14 — IHM: basemap under the Pass-1 map (orientation)  (2026-06-21)
+
+**What changed.** Added an optional web-tile **basemap** under the Pass-1 2D map (**ADR-0010**):
+`viz.map2d.add_basemap` + `BASEMAP_SOURCES` (IGN plan/ortho via the key-free Géoplateforme,
+OpenStreetMap, OpenTopoMap) using **contextily** (reprojects tiles to the DEM CRS). A
+"Basemap" combo in the IHM (default **IGN plan**); all Pass-1 views now go through one
+`_render_map` that overlays the hazard at α≈0.5 over the basemap and **falls back to the
+hillshade** if tiles can't be fetched. `contextily` added to the `[gui]` extra.
+
+**Why.** Orientation — place names / roads / relief under the candidate zones.
+
+**Result.** Verified: OSM / OpenTopoMap / IGN-plan tiles fetch from here; the geometry map
+renders over IGN plan with the hazard on top; an unknown source raises (no-network test).
+Tests: 34 passed.
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

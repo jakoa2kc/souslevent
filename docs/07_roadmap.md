@@ -70,6 +70,8 @@ valley-to-valley wind differentiation.
 **Definition of done:** screening reflects time-of-day & stability, not just gradient wind.
 
 ## M6 — UX hardening
+- [x] Basemap under the Pass-1 map (IGN Géoplateforme / OSM / OpenTopoMap) for orientation,
+      with hillshade fallback offline (ADR-0010). ✔
 - [ ] Uncertainty communication in the UI (candidates ≠ rotors; RANS-mean caveats).
 - [ ] Save/load an analysis with full provenance (DEM, forecast run, params).
 - [ ] **Pass-2 mesh resolution as a quality/time knob (ADR-0008):** preset (coarse/medium/

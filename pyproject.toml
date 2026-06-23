@@ -27,7 +27,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.4"]
-gui = ["PySide6>=6.6", "pyvistaqt>=0.11"]  # desktop IHM (ADR-0009): Qt + embedded VTK
+gui = [
+  "PySide6>=6.6", "pyvistaqt>=0.11",  # desktop IHM (ADR-0009): Qt + embedded VTK
+  "contextily>=1.5",                  # basemap tiles (IGN / OSM) under the Pass-1 map
+]
 # Optional integrations, added as they land:
 # arome = []      # Meteo-France AROME client deps
 # era5  = ["cdsapi>=0.6"]  # reanalysis validation/hindcast

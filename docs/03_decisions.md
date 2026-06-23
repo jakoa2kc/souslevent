@@ -236,6 +236,30 @@ top of the Python core (roadmap *Later/research*), not now.
 
 ---
 
+## ADR-0010 — Basemap under the Pass-1 map via contextily (IGN + open tiles)
+
+**Status:** accepted
+
+**Context.** The Pass-1 2D map (hillshade + hazard indicator) had **no geographic reference**
+— no place names, roads, or valleys to orient against — which the user needs to read the
+screening map. The DEM is in projected UTM.
+
+**Decision.** Add an **optional web-tile basemap** under the Pass-1 map using **contextily**
+(reprojects tiles to the axes CRS). Sources: **IGN plan / ortho** via the **key-free
+Géoplateforme** (`data.geopf.fr`) as the default, plus **OpenStreetMap** and **OpenTopoMap**
+(open, worldwide; topo is handy in the mountains). The hazard indicator is overlaid
+**semi-transparent (α≈0.5)** above the basemap; a "Basemap" combo in the IHM selects the
+source (or "None" = the original hillshade). `contextily` lives in the `[gui]` extra.
+
+**Consequences.**
+- Needs **network** when a basemap is selected; tiles are third-party (attribution applies).
+- **Offline / fetch failure → falls back to the hillshade** (handled in the IHM), so the map
+  always renders.
+- Tile CRS handling is contextily's job; clicks stay in UTM (the axes keep the DEM extent),
+  so the Pass-2 click handoff is unaffected.
+
+---
+
 ## Open questions tracked as future ADRs
 
 - **Stability / diurnal winds on the momentum solver.** Available on the mass solver
