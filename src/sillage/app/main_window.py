@@ -35,6 +35,17 @@ NO_BASEMAP = "Aucun"
 # real Météo-France AROME GRIB is wired, replace with the actual run's last valid hour.
 FORECAST_HORIZON_H = 48
 
+# MNT (DEM) resolution presets for "Valider la zone" -> target_res_m (terrarium zoom).
+# Finer is heavier (the geometry indicator scales with cells); resolution still adapts down
+# for very large zones (the acquire max_px cap). Labels are approximate for typical zones.
+DEM_RES_PRESETS = {
+    "Grossier (~110 m)": 90.0,
+    "Moyen (~55 m)": 50.0,
+    "Fin (~27 m)": 30.0,
+    "Très fin (~14 m)": 15.0,
+}
+DEM_RES_DEFAULT = "Moyen (~55 m)"
+
 # Prominent green button. The explicit :disabled rule is required because a custom
 # stylesheet otherwise overrides Qt's default greyed-out look while running.
 GREEN_BTN_QSS = (
@@ -129,11 +140,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         bbox = self.selected_bbox
         s, west, n, e = bbox
-        out = self.cfg.cache_dir / "aoi" / f"dem_{s:.3f}_{west:.3f}_{n:.3f}_{e:.3f}_utm.tif"
+        target_res = DEM_RES_PRESETS[self.dem_res_combo.currentText()]
+        out = (self.cfg.cache_dir / "aoi" /
+               f"dem_{s:.3f}_{west:.3f}_{n:.3f}_{e:.3f}_{target_res:.0f}m_utm.tif")
 
         def fn(on_progress, cancel):  # worker thread — no Qt here
             return str(prepare_dem_for_bbox(
-                bbox, out, target_res_m=50.0, on_progress=on_progress, cancel=cancel,
+                bbox, out, target_res_m=target_res, on_progress=on_progress, cancel=cancel,
             ))
 
         self._cancelling = False
@@ -177,6 +190,11 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.zone_info.setWordWrap(True)
         bar.addWidget(self.zone_info, stretch=1)  # info bottom-left
+        bar.addWidget(QtWidgets.QLabel("Résolution MNT :"))
+        self.dem_res_combo = QtWidgets.QComboBox()
+        self.dem_res_combo.addItems(list(DEM_RES_PRESETS))
+        self.dem_res_combo.setCurrentText(DEM_RES_DEFAULT)
+        bar.addWidget(self.dem_res_combo)
         self.btn_validate = QtWidgets.QPushButton("✓  Valider la zone et préparer le terrain")
         self.btn_validate.setStyleSheet(GREEN_BTN_QSS)
         self.btn_validate.clicked.connect(self.on_validate_zone)

@@ -568,6 +568,19 @@ hillshade. Tests: 37 passed.
 
 ---
 
+## Entry 25 — MNT resolution selector in the IHM  (2026-06-24)
+
+**What changed.** Tab 1 gains a **"Résolution MNT" combo** (Grossier ~110 m / Moyen ~55 m /
+Fin ~27 m / Très fin ~14 m → `target_res_m` 90/50/30/15). "Valider la zone" prepares the DEM
+at the chosen resolution; the cache filename now includes it, so different resolutions cache
+separately. Default **Moyen (~55 m)**. Finer is heavier (the geometry indicator scales with
+cells: ~0.3 s at 54 m, ~1.3 s at 27 m); resolution still adapts **down** for very large zones
+(the `acquire` `max_px` cap).
+
+**Result.** Verified headless: 4 presets, default Moyen → 50 m, Fin → 30 m. Tests: 37 passed.
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**
