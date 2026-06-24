@@ -133,7 +133,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def fn(on_progress, cancel):  # worker thread — no Qt here
             return str(prepare_dem_for_bbox(
-                bbox, out, target_res_m=90.0, on_progress=on_progress, cancel=cancel,
+                bbox, out, target_res_m=50.0, on_progress=on_progress, cancel=cancel,
             ))
 
         self._cancelling = False

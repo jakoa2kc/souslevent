@@ -556,6 +556,18 @@ WindNinja work-dir cache).
 
 ---
 
+## Entry 24 — Finer AOI DEM (~54 m)  (2026-06-24)
+
+**What changed.** `prepare_dem_for_bbox` default `target_res_m` 90 → **50** (terrarium zoom
+11, ~54 m; `max_px` 2500 → 3000), and the IHM "Valider la zone" uses 50 m — so the MNT is
+**~2× more detailed**. Measured: the geometry indicator stays **~0.3 s** on the finer grid
+(528² for a ~28 km zone, vs 1.3 s at 27 m), so no criblage slowdown.
+
+**Result.** Verified: a 28 km zone → 528×529 @ 54 m, clearly more terrain detail in the MNT
+hillshade. Tests: 37 passed.
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

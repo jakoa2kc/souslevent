@@ -66,8 +66,8 @@ def _crop_to_bbox(elev, ext, bbox_lonlat):
 
 
 def prepare_dem_for_bbox(
-    bbox_latlon, out_path, target_res_m: float = 90.0,
-    on_progress=None, cancel=None, max_px: int = 2500,
+    bbox_latlon, out_path, target_res_m: float = 50.0,
+    on_progress=None, cancel=None, max_px: int = 3000,
 ) -> Path:
     """Prepare a UTM north-up DEM GeoTIFF for ``bbox_latlon`` = (south, west, north, east).
 
