@@ -660,6 +660,29 @@ progress refinement.
 
 ---
 
+## Entry 30 — Pass-2 progress (no frozen 99%) + 3D: basemap drape & rotor by height/intensity  (2026-06-24)
+
+**What changed.**
+- **Pass-2 "stuck at 99%"**: the long post-solver phase (mass-mesh sampling/output, ~1 min)
+  prints no "%", so the bar froze. `flow.windninja._run` now also surfaces **phase lines**
+  (meshing, solving, sampling, generating, writing, …) with the last %, and the IHM switches
+  the progress bar to **"busy" (pulsing) at ≥99 %** — clearly working, not frozen.
+- **3D rendering (`volume3d`)**:
+  - the terrain is **draped with the basemap** (IGN/OSM/…) via a planar texture (needs the
+    CRS, passed from the IHM) instead of the elevation colormap (fallback when no CRS).
+  - the **rotor** (reversed-flow volume) is coloured by **height above ground** (yellow near
+    the ground → red → purple high) with **opacity ∝ intensity** (|reversed along-flow|), via
+    a per-cell RGBA array; height-AGL from a KD-tree lookup on the terrain surface.
+
+**Result.** Verified: an off-screen 3D render shows the basemap-draped terrain + the
+height/intensity-coded rotor; the Pass-2 phase lines now emit. Tests: 39 passed (adjusted the
+streaming-progress assertion for the new phase emission).
+
+**Open questions.** The texture is a top-down planar drape (web-mercator ≈ UTM over a few km);
+"intensity" uses reversed-flow magnitude (turbulence intensity is an alternative).
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

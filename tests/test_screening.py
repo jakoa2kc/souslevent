@@ -97,7 +97,7 @@ def test_run_streams_progress_and_captures_output(tmp_path):
     rc, out, err = wn._run([sys.executable, "-c", code], tmp_path, dry_run=False,
                            on_progress=lambda pct, msg: seen.append(pct))
     assert rc == 0
-    assert seen == [10, 50, 100]
+    assert seen[:3] == [10, 50, 100]  # phase lines (e.g. "Run number 0 done!") may re-emit 100
     assert "Run number 0 done!" in out
 
 

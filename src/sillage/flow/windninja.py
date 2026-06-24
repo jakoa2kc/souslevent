@@ -26,6 +26,13 @@ from pathlib import Path
 
 # WindNinja prints phase progress like "Run 0: (solver) 36% complete...".
 _PROGRESS_RE = re.compile(r"(\d+)\s*%\s*complete", re.IGNORECASE)
+# Momentum phases that print NO percentage (the long post-solver mass-mesh sampling lives
+# here) — surface them so the UI shows activity instead of looking frozen at 99%.
+_PHASE_RE = re.compile(
+    r"meshing|solving|sampling|generating|writing|renumber|refine|blockmesh|toposet|"
+    r"initial conditions|applyinit|movedynamicmesh|stl|conversion|run number",
+    re.IGNORECASE,
+)
 
 
 def _parse_progress(line: str) -> int | None:
@@ -89,13 +96,18 @@ def _run(cmd, cwd, dry_run, on_progress=None, cancel=None):
 
     out_chunks: list[str] = []
     cancelled = False
+    last_pct = 0
     assert popen.stdout is not None
     for line in popen.stdout:
         out_chunks.append(line)
         if on_progress is not None:
             pct = _parse_progress(line)
             if pct is not None:
+                last_pct = pct
                 on_progress(pct, line.strip())
+            elif _PHASE_RE.search(line):
+                # phase line without a %: keep the bar, update the text so it isn't "frozen"
+                on_progress(last_pct, line.strip())
         if cancel is not None and cancel():
             cancelled = True
             popen.terminate()

@@ -58,45 +58,102 @@ def _seed_streamlines(mesh, mean_flow_dir: np.ndarray, n_points: int = 200):
         return None
 
 
+def _drape_basemap(plotter, terrain, crs, source: str) -> bool:
+    """Texture-drape a web-tile basemap (top-down) onto the terrain surface. Returns success.
+
+    Needs the terrain CRS (UTM) to fetch the basemap for the right lon/lat area. Over a few
+    km, web-mercator ≈ UTM, so a planar drape is fine.
+    """
+    try:
+        import contextily as cx
+        import pyvista as pv
+        from rasterio.crs import CRS as RCRS
+        from rasterio.warp import transform as warp_xy
+
+        from .map2d import BASEMAP_SOURCES
+
+        if source not in BASEMAP_SOURCES:
+            return False
+        b = terrain.bounds
+        xmin, xmax, ymin, ymax = b[0], b[1], b[2], b[3]
+        lons, lats = warp_xy(crs, RCRS.from_epsg(4326), [xmin, xmax], [ymin, ymax])
+        w, e = min(lons), max(lons)
+        s, n = min(lats), max(lats)
+        family, layer = BASEMAP_SOURCES[source]
+        prov = getattr(cx.providers, family)
+        if layer is not None:
+            prov = prov[layer]
+        img, _ext = cx.bounds2img(w, s, e, n, source=prov, ll=True)
+        img = np.ascontiguousarray(img[::-1, :, :3])  # flip so row 0 -> south (v=0)
+        tex = pv.numpy_to_texture(img)
+        terrain.texture_map_to_plane(
+            origin=(xmin, ymin, 0.0), point_u=(xmax, ymin, 0.0), point_v=(xmin, ymax, 0.0),
+            inplace=True)
+        plotter.add_mesh(terrain, texture=tex)
+        return True
+    except Exception:
+        return False
+
+
+def _add_rotor(plotter, rev, terrain) -> None:
+    """Add the reversed-flow (rotor) volume coloured by HEIGHT ABOVE GROUND (yellow near the
+    ground -> red -> purple high up) with OPACITY proportional to rotor intensity."""
+    from matplotlib.colors import LinearSegmentedColormap, Normalize
+    from scipy.spatial import cKDTree
+
+    centers = rev.cell_centers().points
+    tpts = np.asarray(terrain.points)
+    idx = cKDTree(tpts[:, :2]).query(centers[:, :2])[1]
+    hagl = centers[:, 2] - tpts[idx, 2]  # height above the terrain
+    along = rev.cell_data.get("along_flow")
+    intensity = np.clip(-np.asarray(along), 0.0, None) if along is not None else np.ones(len(centers))
+
+    cmap = LinearSegmentedColormap.from_list("yrp", ["#ffff00", "#ff2a00", "#7a00b0"])
+    lo, hi = np.nanpercentile(hagl, 5), np.nanpercentile(hagl, 95)
+    rgb = cmap(np.clip(Normalize(lo, max(hi, lo + 1e-6))(hagl), 0, 1))[:, :3]
+    imax = max(float(np.nanpercentile(intensity, 95)), 1e-6)
+    alpha = 0.12 + 0.85 * np.clip(intensity / imax, 0.0, 1.0)  # weak transparent -> strong opaque
+    rev.cell_data["rotor_rgba"] = (np.c_[rgb, alpha] * 255).astype(np.uint8)
+    plotter.add_mesh(rev, scalars="rotor_rgba", rgba=True)
+
+
 def populate_plotter(
     plotter,
     case_dir: str,
     mean_flow_dir: np.ndarray,
-    show_streamlines: bool = True,
+    show_streamlines: bool = False,
     show_reversed_flow: bool = True,
     show_turbulence: bool = False,
     turbulence_threshold: float = 0.2,
+    crs=None,
+    basemap_source: str = "IGN plan",
 ):
-    """Add the Pass-2 scene (terrain + volumes + streamlines) to an EXISTING plotter.
-
-    Works with both a standalone ``pyvista.Plotter`` and an embedded
-    ``pyvistaqt.QtInteractor`` (the IHM, ADR-0009), so the scene-building logic lives in one
-    place. Returns the same plotter.
+    """Add the Pass-2 scene to an EXISTING plotter (standalone Plotter or embedded
+    QtInteractor). Terrain is draped with a basemap (if ``crs`` is given) instead of an
+    elevation colormap; the rotor is coloured by height-above-ground with opacity ∝ intensity.
     """
     mesh = ofr.read_case(case_dir)
-    labelled = False
-
-    # Terrain surface: the STL ground NinjaFOAM derived from the DEM (lower boundary).
     terrain = ofr.read_terrain_stl(case_dir)
+
     if terrain is not None and terrain.n_points:
-        terrain["elevation_m"] = terrain.points[:, 2]
-        plotter.add_mesh(terrain, scalars="elevation_m", cmap="gist_earth",
-                         show_scalar_bar=False, opacity=1.0)
+        if not (crs is not None and _drape_basemap(plotter, terrain, crs, basemap_source)):
+            terrain["elevation_m"] = terrain.points[:, 2]
+            plotter.add_mesh(terrain, scalars="elevation_m", cmap="gist_earth",
+                             show_scalar_bar=False)
 
     if show_streamlines:
         lines = _seed_streamlines(mesh, mean_flow_dir)
         if lines is not None:
             plotter.add_mesh(lines.tube(radius=max(lines.length / 1500.0, 1.0)),
-                             color="white", opacity=0.6)
+                             color="white", opacity=0.5)
 
     if show_reversed_flow:
-        along = ofr.along_flow_component(mesh, mean_flow_dir)
-        mesh["along_flow"] = along
-        reversed_vol = mesh.threshold(value=0.0, scalars="along_flow", invert=True)
-        if reversed_vol.n_cells:
-            plotter.add_mesh(reversed_vol, color=REVERSED_COLOR, opacity=0.5,
-                             label="reversed flow (rotor)")
-            labelled = True
+        mesh["along_flow"] = ofr.along_flow_component(mesh, mean_flow_dir)
+        rev = mesh.threshold(value=0.0, scalars="along_flow", invert=True)
+        if rev.n_cells and terrain is not None and terrain.n_points:
+            _add_rotor(plotter, rev, terrain)
+        elif rev.n_cells:
+            plotter.add_mesh(rev, color=REVERSED_COLOR, opacity=0.5)
 
     if show_turbulence:
         ti = ofr.turbulence_intensity(mesh)
@@ -104,14 +161,12 @@ def populate_plotter(
             mesh["turb_intensity"] = ti
             turb_vol = mesh.threshold(value=turbulence_threshold, scalars="turb_intensity")
             if turb_vol.n_cells:
-                plotter.add_mesh(turb_vol, color=TURB_COLOR, opacity=0.4,
-                                 label="high turbulence intensity")
-                labelled = True
+                plotter.add_mesh(turb_vol, color=TURB_COLOR, opacity=0.35)
 
     plotter.add_text(SCENE_TEXT, font_size=9)
+    plotter.add_text("Rotor : jaune = près du sol → rouge → violet = haut ·"
+                     " opacité = intensité", position="lower_left", font_size=8)
     plotter.show_axes()
-    if labelled:
-        plotter.add_legend()
     plotter.view_isometric()
     return plotter
 
@@ -119,10 +174,12 @@ def populate_plotter(
 def build_scene(
     case_dir: str,
     mean_flow_dir: np.ndarray,
-    show_streamlines: bool = True,
+    show_streamlines: bool = False,
     show_reversed_flow: bool = True,
     show_turbulence: bool = False,
     turbulence_threshold: float = 0.2,
+    crs=None,
+    basemap_source: str = "IGN plan",
     off_screen: bool = False,
 ):
     """Assemble a standalone PyVista plotter for one Pass-2 feature. Returns the Plotter.
@@ -136,6 +193,7 @@ def build_scene(
         plotter, case_dir, mean_flow_dir,
         show_streamlines=show_streamlines, show_reversed_flow=show_reversed_flow,
         show_turbulence=show_turbulence, turbulence_threshold=turbulence_threshold,
+        crs=crs, basemap_source=basemap_source,
     )
 
 

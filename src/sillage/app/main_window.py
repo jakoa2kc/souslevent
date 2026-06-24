@@ -623,6 +623,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.progress.setVisible(running)
         self.btn_cancel.setVisible(running)
         if running:
+            self.progress.setRange(0, 100)
             self.progress.setValue(0)
             if msg:
                 self.statusBar().showMessage(msg)
@@ -634,7 +635,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(status)
 
     def _on_job_progress(self, pct: int, msg: str) -> None:
-        self.progress.setValue(pct)
+        # >= 99% but not done: the long WindNinja post-solve (mass-mesh sampling, output
+        # writing). Switch the bar to "busy" so it pulses instead of looking frozen.
+        if pct >= 99:
+            if self.progress.maximum() != 0:
+                self.progress.setRange(0, 0)
+        else:
+            if self.progress.maximum() == 0:
+                self.progress.setRange(0, 100)
+            self.progress.setValue(pct)
         self.statusBar().showMessage(msg)
 
     def _on_mass_finished(self, result) -> None:
@@ -996,7 +1005,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         mfd = volume3d.mean_flow_vector(wind_dir)
         self.plotter.clear()
-        volume3d.populate_plotter(self.plotter, case_dir, mfd, show_turbulence=False)
+        crs = self._dem.crs if self._dem is not None else None
+        volume3d.populate_plotter(self.plotter, case_dir, mfd, show_turbulence=False,
+                                  crs=crs, basemap_source=self.basemap_combo.currentText())
         self.plotter.reset_camera()
         self.tabs.setCurrentWidget(self._analyse_tab)
         self._finish_job(f"Rotor Pass-2 en ({xy[0]:.0f}, {xy[1]:.0f})")
@@ -1023,7 +1034,9 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             mfd = volume3d.mean_flow_vector(self._representative_wind()[1])
             self.plotter.clear()
-            volume3d.populate_plotter(self.plotter, case, mfd, show_turbulence=False)
+            crs = self._dem.crs if self._dem is not None else None
+            volume3d.populate_plotter(self.plotter, case, mfd, show_turbulence=False,
+                                      crs=crs, basemap_source=self.basemap_combo.currentText())
             self.plotter.reset_camera()
             self.tabs.setCurrentWidget(self._analyse_tab)
             self.statusBar().showMessage(f"Case Pass-2 chargé : {Path(case).name}")
