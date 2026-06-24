@@ -421,16 +421,29 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Prévision disponible jusqu'à ~ {_fmt(limit)}  (AROME ~{FORECAST_HORIZON_H} h)")
 
     def _render_terrain(self, dem) -> None:
-        """Show the bare MNT hillshade. No basemap overlay here: the IGN plan's contour lines
-        clash with the relief (they look like defects on the MNT). The basemap returns on the
-        criblage result maps, where orientation matters."""
+        """Show the MNT hillshade over the selected basemap (orientation context)."""
         self._last_map = None
+        source = self.basemap_combo.currentText()
         left, bottom, right, top = dem.bounds
+        extent = (left, right, bottom, top)
         self.fig.clear()
         ax = self.fig.add_subplot(111)
-        map2d.draw_hillshade(ax, dem)
+        if source != NO_BASEMAP:
+            ax.imshow(map2d.hillshade(dem), cmap="gray", extent=extent, origin="upper",
+                      alpha=0.55, zorder=2)
+            ax.set_xlim(left, right)
+            ax.set_ylim(bottom, top)
+            try:
+                map2d.add_basemap(ax, dem.crs, source=source, attribution=False, zorder=0)
+            except Exception:
+                ax.clear()
+                map2d.draw_hillshade(ax, dem)
+            ax.set_xlabel("Est (m)")
+            ax.set_ylabel("Nord (m)")
+        else:
+            map2d.draw_hillshade(ax, dem)
         ax.set_title("MNT — zone de vol  (choisis un créneau, puis lance le criblage)")
-        self._home_extent = (left, right, bottom, top)
+        self._home_extent = extent
         self.canvas.draw()
 
     def _build_analyse_tab(self) -> QtWidgets.QWidget:

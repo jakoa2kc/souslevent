@@ -640,6 +640,26 @@ mesh, regardless of AOI/MNT size. Now:
 
 ---
 
+## Entry 29 — Fix IGN "stair-step" striping (native 5 m fetch + average) + restore MNT basemap  (2026-06-24)
+
+**What changed.** The "steps/lines" on the IGN MNT — also visible on the WindNinja outputs —
+were a **real DEM artifact**, not the basemap (my earlier diagnosis was wrong). The
+Géoplateforme elevation WMS returns **vertically-striped** data (~21% duplicated rows,
+sawtooth row-means) for **any off-native-grid** request; it is clean **only at its ~5 m
+native grid** (measured: vert frac==0 0.044 at 5 m vs ~0.20 at 7/14/28 m). Fix:
+`prepare_dem_ign` now fetches at ~5 m native (**tiled**, ≤ `tile_cap` per axis) and
+**block-averages** down to the target resolution. Restored the **basemap under the MNT
+preview** (the lines were never the basemap).
+
+**Result.** Verified: a ~13 km IGN zone at 50 m → **vertical striping frac 0.21 → 0.00**,
+vert/horz mean ratio 2.2 → 1.3 (isotropic), clean hillshade, ~19 s (native-5 m tiled fetch +
+average). Tests: 39 passed.
+
+**Open questions.** Heavier IGN fetch for big/fine zones (tiled 5 m); a fetch-size guard /
+progress refinement.
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

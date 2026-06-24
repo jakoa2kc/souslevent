@@ -29,15 +29,47 @@ def in_france(bbox_latlon) -> bool:
     return 41.3 <= clat <= 51.2 and -5.2 <= clon <= 9.6
 
 
+IGN_NATIVE_M = 5.0  # RGE ALTI HIGHRES is artifact-free only at its ~5 m native grid
+
+
+def _ign_bil(south, west, north, east, w, h, timeout=90):
+    """One IGN WMS GetMap BIL tile -> float32 (h, w) array."""
+    import requests
+
+    params = {
+        "SERVICE": "WMS", "VERSION": "1.3.0", "REQUEST": "GetMap", "LAYERS": IGN_ELEV_LAYER,
+        "CRS": "EPSG:4326", "BBOX": f"{south},{west},{north},{east}",  # 1.3.0: lat,lon order
+        "WIDTH": str(w), "HEIGHT": str(h), "FORMAT": "image/x-bil;bits=32", "STYLES": "",
+    }
+    r = requests.get(IGN_ELEV_WMS, params=params, timeout=timeout)
+    r.raise_for_status()
+    if "bil" not in r.headers.get("Content-Type", "") or len(r.content) != w * h * 4:
+        raise RuntimeError(
+            f"réponse IGN inattendue ({r.headers.get('Content-Type')}, {len(r.content)} o)")
+    return np.frombuffer(r.content, dtype="<f4").astype("float32").reshape(h, w)
+
+
+def _block_average(arr: np.ndarray, factor: int) -> np.ndarray:
+    """Mean-pool by an integer factor (NaN-aware), trimming any remainder."""
+    if factor <= 1:
+        return arr
+    h = (arr.shape[0] // factor) * factor
+    w = (arr.shape[1] // factor) * factor
+    blocks = arr[:h, :w].reshape(h // factor, factor, w // factor, factor)
+    return np.nanmean(blocks, axis=(1, 3)).astype("float32")
+
+
 def prepare_dem_ign(bbox_latlon, out_path, target_res_m: float = 50.0,
-                    on_progress=None, cancel=None, max_px: int = 2048) -> Path:
+                    on_progress=None, cancel=None, max_px: int = 2048, tile_cap: int = 4) -> Path:
     """Prepare a UTM DEM from IGN RGE ALTI for ``bbox_latlon`` = (south, west, north, east).
 
-    One key-free Géoplateforme WMS GetMap (BIL float32) clipped to the bbox, decoded and
-    reprojected to UTM north-up. Real ~1-5 m source data over France. Raises if the response
-    is unexpected or the area is outside IGN coverage (the dispatcher then falls back).
+    The Géoplateforme elevation WMS only returns artifact-free data at its **~5 m native
+    grid** (off-grid requests stripe vertically — duplicated rows that show as "steps" in the
+    hillshade and propagate to WindNinja). So we fetch at ~5 m (tiled if needed, ``tile_cap``
+    per axis), then **block-average** down to ``target_res_m`` — clean at any target.
+    Reprojected to UTM north-up. Key-free. Raises if outside IGN coverage (dispatcher falls
+    back to the worldwide source).
     """
-    import requests
     import rasterio
     from rasterio.crs import CRS
     from rasterio.transform import from_origin
@@ -58,28 +90,37 @@ def prepare_dem_ign(bbox_latlon, out_path, target_res_m: float = 50.0,
     clat = (south + north) / 2.0
     w_m = (east - west) * 111320.0 * max(0.05, math.cos(math.radians(clat)))
     h_m = (north - south) * 111320.0
-    w = max(16, min(max_px, round(w_m / target_res_m)))
-    h = max(16, min(max_px, round(h_m / target_res_m)))
+    nat_w = max(2, round(w_m / IGN_NATIVE_M))
+    nat_h = max(2, round(h_m / IGN_NATIVE_M))
+    tx = min(tile_cap, max(1, math.ceil(nat_w / max_px)))
+    ty = min(tile_cap, max(1, math.ceil(nat_h / max_px)))
+    tile_w = min(nat_w, tx * max_px) // tx  # ~5 m unless capped (very large zones only)
+    tile_h = min(nat_h, ty * max_px) // ty
 
-    prog(8, f"Téléchargement IGN RGE ALTI ({w}x{h})…")
-    params = {
-        "SERVICE": "WMS", "VERSION": "1.3.0", "REQUEST": "GetMap", "LAYERS": IGN_ELEV_LAYER,
-        "CRS": "EPSG:4326", "BBOX": f"{south},{west},{north},{east}",  # 1.3.0: lat,lon order
-        "WIDTH": str(w), "HEIGHT": str(h), "FORMAT": "image/x-bil;bits=32", "STYLES": "",
-    }
-    r = requests.get(IGN_ELEV_WMS, params=params, timeout=90)
-    r.raise_for_status()
-    if "bil" not in r.headers.get("Content-Type", "") or len(r.content) != w * h * 4:
-        raise RuntimeError(
-            f"réponse IGN inattendue ({r.headers.get('Content-Type')}, {len(r.content)} o)")
-    if cancel is not None and cancel():
-        raise RuntimeError("cancelled")
-
-    prog(55, "Décodage de l'altimétrie IGN…")
-    arr = np.frombuffer(r.content, dtype="<f4").astype("float32").reshape(h, w).copy()
-    arr[(arr < -400.0) | (arr > 9000.0)] = np.nan  # mask IGN nodata / out-of-range
+    prog(8, f"Téléchargement IGN RGE ALTI ~5 m ({tx}×{ty} tuiles)…")
+    n = tx * ty
+    rows = []
+    for j in range(ty):
+        tn = north - (north - south) * j / ty
+        ts = north - (north - south) * (j + 1) / ty
+        cols = []
+        for i in range(tx):
+            if cancel is not None and cancel():
+                raise RuntimeError("cancelled")
+            tw = west + (east - west) * i / tx
+            te = west + (east - west) * (i + 1) / tx
+            cols.append(_ign_bil(ts, tw, tn, te, tile_w, tile_h))
+            prog(8 + (j * tx + i + 1) / n * 50.0, f"IGN tuile {j * tx + i + 1}/{n}…")
+        rows.append(np.hstack(cols))
+    arr = np.vstack(rows)
+    arr[(arr < -400.0) | (arr > 9000.0)] = np.nan  # mask nodata / out-of-range
     if not np.isfinite(arr).any():
         raise RuntimeError("zone hors couverture IGN RGE ALTI")
+
+    prog(62, "Lissage vers la résolution cible…")
+    cur_res = w_m / arr.shape[1]
+    arr = _block_average(arr, max(1, round(target_res_m / cur_res)))
+    h, w = arr.shape
     transform = from_origin(west, north, (east - west) / w, (north - south) / h)
 
     prog(82, "Reprojection en UTM…")

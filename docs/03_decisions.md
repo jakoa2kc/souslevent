@@ -369,6 +369,10 @@ resolution.
   refinement.
 - The resolution presets are **honest for IGN**; for terrarium, finer than ~30 m is
   interpolation (the UI labels stay approximate).
+- **Native-grid fetch (2026-06-24):** the elevation WMS only returns artifact-free data at
+  its **~5 m native grid** — off-grid requests **stripe vertically** (duplicated rows that
+  show as "steps" in the hillshade and propagate to WindNinja). So `prepare_dem_ign` fetches
+  at ~5 m (tiled if needed) and **block-averages** to the target; heavier fetch, clean result.
 
 ---
 
