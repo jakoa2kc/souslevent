@@ -339,6 +339,33 @@ Pass-1's coarse output. Fine terrain for **Pass-2** is to be fetched **per featu
 
 ---
 
+## ADR-0014 — DEM source: IGN RGE ALTI over France, terrarium worldwide
+
+**Status:** accepted
+
+**Context.** The worldwide **terrarium** tiles (ADR-0013) are **~30 m real resolution**
+(SRTM/Copernicus class) — resampling them finer (the IHM resolution presets) yields a finer
+*grid* but **no real detail** beyond ~30 m. **IGN RGE ALTI** is **real 1–5 m** over France.
+Measured on a Champsaur AOI at a 30 m grid: **IGN roughness ≈ 13 m vs terrarium ≈ 5.5 m**
+(2.4× more real relief), and IGN is **faster** (one WMS BIL request vs many tile fetches).
+
+**Decision.** Prepare the AOI DEM from **IGN RGE ALTI** (Géoplateforme **WMS**, `image/x-bil;
+bits=32` float32, key-free, clipped to the bbox) **over France**, and from **terrarium**
+elsewhere. A **"Source MNT"** selector offers **Auto** (IGN where covered, terrarium
+elsewhere — default) / **IGN France** / **Monde**. `prepare_dem(...)` dispatches and **falls
+back to terrarium** if IGN fails or returns no data. The cache key includes the source +
+resolution.
+
+**Consequences.**
+- Real fine terrain over France → better Pass-1 geometry (ridges/Winstral) *and* Pass-2 crops.
+- Worldwide fallback keeps non-France usable; both are key-free.
+- IGN WMS max image dims cap the grid; multi-request tiling for huge *fine* zones is a future
+  refinement.
+- The resolution presets are **honest for IGN**; for terrarium, finer than ~30 m is
+  interpolation (the UI labels stay approximate).
+
+---
+
 ## Open questions tracked as future ADRs
 
 - **Stability / diurnal winds on the momentum solver.** Available on the mass solver

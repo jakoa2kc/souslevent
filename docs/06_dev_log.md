@@ -581,6 +581,27 @@ cells: ~0.3 s at 54 m, ~1.3 s at 27 m); resolution still adapts **down** for ver
 
 ---
 
+## Entry 26 — MNT source selector: IGN RGE ALTI over France (ADR-0014)  (2026-06-24)
+
+**What changed.** Added a **"Source MNT"** selector to tab 1 (Auto / IGN France / Monde,
+default Auto). New `terrain.acquire.prepare_dem_ign` fetches **IGN RGE ALTI** elevation from
+the Géoplateforme **WMS** (BIL float32, key-free, clipped to the bbox) and reprojects to UTM;
+`prepare_dem(...)` dispatches IGN-over-France vs terrarium and falls back to terrarium if IGN
+fails. `in_france` is a rough cover test. "Valider la zone" reports the used source; the cache
+key includes source + resolution.
+
+**Why (the user's question).** Sources differ in real precision: terrarium is ~30 m
+worldwide (resampling finer is interpolation), IGN is real 1–5 m over France.
+
+**Result.** Verified on a Champsaur AOI at a 30 m grid: **IGN roughness 13 m vs terrarium
+5.5 m** (2.4× more real relief), IGN 2 s vs terrarium 10 s. Source selector headless-checked
+(default Auto → "auto"). Tests: 39 passed (added `in_france`, `prepare_dem_ign`).
+
+**Open questions.** Multi-request WMS tiling for huge *fine* IGN zones (current single GetMap
+is capped at the WMS max dims). IGN coverage beyond métropole (DOM-TOM layers).
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

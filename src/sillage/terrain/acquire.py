@@ -16,6 +16,104 @@ import numpy as np
 TERRARIUM = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
 _MERC_M_PER_PX_Z0 = 156543.03  # web-mercator ground resolution at the equator, zoom 0
 
+# IGN RGE ALTI elevation (real 1-5 m in France) via the Géoplateforme WMS (BIL float32,
+# key-free, clipped to a bbox). Much finer than the worldwide ~30 m terrarium source.
+IGN_ELEV_WMS = "https://data.geopf.fr/wms-r/wms"
+IGN_ELEV_LAYER = "ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES"
+
+
+def in_france(bbox_latlon) -> bool:
+    """Rough test: is the AOI centre over mainland France + Corsica (IGN RGE ALTI cover)?"""
+    south, west, north, east = bbox_latlon
+    clat, clon = (south + north) / 2.0, (west + east) / 2.0
+    return 41.3 <= clat <= 51.2 and -5.2 <= clon <= 9.6
+
+
+def prepare_dem_ign(bbox_latlon, out_path, target_res_m: float = 50.0,
+                    on_progress=None, cancel=None, max_px: int = 2048) -> Path:
+    """Prepare a UTM DEM from IGN RGE ALTI for ``bbox_latlon`` = (south, west, north, east).
+
+    One key-free Géoplateforme WMS GetMap (BIL float32) clipped to the bbox, decoded and
+    reprojected to UTM north-up. Real ~1-5 m source data over France. Raises if the response
+    is unexpected or the area is outside IGN coverage (the dispatcher then falls back).
+    """
+    import requests
+    import rasterio
+    from rasterio.crs import CRS
+    from rasterio.transform import from_origin
+
+    from .dem import load_dem, write_dem
+
+    south, west, north, east = bbox_latlon
+    if not (north > south and east > west):
+        raise ValueError("AOI invalide (bornes lat/lon).")
+
+    def prog(p, m):
+        if on_progress is not None:
+            on_progress(int(p), m)
+
+    if cancel is not None and cancel():
+        raise RuntimeError("cancelled")
+
+    clat = (south + north) / 2.0
+    w_m = (east - west) * 111320.0 * max(0.05, math.cos(math.radians(clat)))
+    h_m = (north - south) * 111320.0
+    w = max(16, min(max_px, round(w_m / target_res_m)))
+    h = max(16, min(max_px, round(h_m / target_res_m)))
+
+    prog(8, f"Téléchargement IGN RGE ALTI ({w}x{h})…")
+    params = {
+        "SERVICE": "WMS", "VERSION": "1.3.0", "REQUEST": "GetMap", "LAYERS": IGN_ELEV_LAYER,
+        "CRS": "EPSG:4326", "BBOX": f"{south},{west},{north},{east}",  # 1.3.0: lat,lon order
+        "WIDTH": str(w), "HEIGHT": str(h), "FORMAT": "image/x-bil;bits=32", "STYLES": "",
+    }
+    r = requests.get(IGN_ELEV_WMS, params=params, timeout=90)
+    r.raise_for_status()
+    if "bil" not in r.headers.get("Content-Type", "") or len(r.content) != w * h * 4:
+        raise RuntimeError(
+            f"réponse IGN inattendue ({r.headers.get('Content-Type')}, {len(r.content)} o)")
+    if cancel is not None and cancel():
+        raise RuntimeError("cancelled")
+
+    prog(55, "Décodage de l'altimétrie IGN…")
+    arr = np.frombuffer(r.content, dtype="<f4").astype("float32").reshape(h, w).copy()
+    arr[(arr < -400.0) | (arr > 9000.0)] = np.nan  # mask IGN nodata / out-of-range
+    if not np.isfinite(arr).any():
+        raise RuntimeError("zone hors couverture IGN RGE ALTI")
+    transform = from_origin(west, north, (east - west) / w, (north - south) / h)
+
+    prog(82, "Reprojection en UTM…")
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_path.with_name(out_path.stem + "_wgs84.tif")
+    profile = dict(driver="GTiff", height=h, width=w, count=1, dtype="float32",
+                   crs=CRS.from_epsg(4326), transform=transform, nodata=np.nan)
+    with rasterio.open(tmp, "w", **profile) as dst:
+        dst.write(arr, 1)
+    dem = load_dem(str(tmp), max_domain_km=200.0)
+    write_dem(dem, out_path)
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
+
+    prog(100, "MNT IGN prêt.")
+    return out_path
+
+
+def prepare_dem(bbox_latlon, out_path, target_res_m: float = 50.0, source: str = "auto",
+                on_progress=None, cancel=None):
+    """Prepare a DEM, picking the source: "ign" (France RGE ALTI), "world" (terrarium), or
+    "auto" (IGN over France, terrarium elsewhere). Returns (path, used_label). Falls back to
+    the worldwide source if IGN fails/empty. ADR-0014."""
+    want_ign = source == "ign" or (source == "auto" and in_france(bbox_latlon))
+    if want_ign:
+        try:
+            return prepare_dem_ign(bbox_latlon, out_path, target_res_m, on_progress, cancel), "IGN"
+        except Exception:
+            pass  # outside coverage / WMS hiccup -> worldwide
+    return prepare_dem_for_bbox(bbox_latlon, out_path, target_res_m, on_progress, cancel), "Monde"
+
 
 def zoom_for_resolution(center_lat: float, target_res_m: float, merc_width_m: float,
                         max_px: int = 2500) -> int:

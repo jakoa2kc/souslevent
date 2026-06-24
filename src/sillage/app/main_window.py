@@ -46,6 +46,15 @@ DEM_RES_PRESETS = {
 }
 DEM_RES_DEFAULT = "Moyen (~55 m)"
 
+# MNT source: IGN RGE ALTI (real 1-5 m over France) vs the worldwide ~30 m terrarium, or
+# auto (IGN where covered). See ADR-0014.
+DEM_SOURCES = {
+    "Auto (IGN en France)": "auto",
+    "IGN France (fin)": "ign",
+    "Monde (terrarium ~30 m)": "world",
+}
+DEM_SOURCE_DEFAULT = "Auto (IGN en France)"
+
 # Prominent green button. The explicit :disabled rule is required because a custom
 # stylesheet otherwise overrides Qt's default greyed-out look while running.
 GREEN_BTN_QSS = (
@@ -136,18 +145,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Dessine d'abord un rectangle sur la carte pour définir la zone de vol.",
             )
             return
-        from ..terrain.acquire import prepare_dem_for_bbox
+        from ..terrain.acquire import prepare_dem
 
         bbox = self.selected_bbox
         s, west, n, e = bbox
         target_res = DEM_RES_PRESETS[self.dem_res_combo.currentText()]
+        source = DEM_SOURCES[self.dem_source_combo.currentText()]
         out = (self.cfg.cache_dir / "aoi" /
-               f"dem_{s:.3f}_{west:.3f}_{n:.3f}_{e:.3f}_{target_res:.0f}m_utm.tif")
+               f"dem_{s:.3f}_{west:.3f}_{n:.3f}_{e:.3f}_{target_res:.0f}m_{source}_utm.tif")
 
         def fn(on_progress, cancel):  # worker thread — no Qt here
-            return str(prepare_dem_for_bbox(
-                bbox, out, target_res_m=target_res, on_progress=on_progress, cancel=cancel,
-            ))
+            path, used = prepare_dem(
+                bbox, out, target_res_m=target_res, source=source,
+                on_progress=on_progress, cancel=cancel,
+            )
+            return str(path), used
 
         self._cancelling = False
         self._set_running(True, "Préparation du MNT…")
@@ -158,7 +170,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._job = job
         job.start()
 
-    def _on_dem_ready(self, dem_path: str) -> None:
+    def _on_dem_ready(self, result) -> None:
+        dem_path, used = result if isinstance(result, tuple) else (result, "")
         self._dem_path = dem_path
         self._set_single_map_mode(True)
         self._pass1_vel_path = None
@@ -169,7 +182,8 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:
             self._dem = None
             QtWidgets.QMessageBox.warning(self, "MNT", f"MNT préparé, affichage impossible : {exc}")
-        self._finish_job("MNT prêt — sélectionne le créneau de vol.")
+        tag = f" (source {used})" if used else ""
+        self._finish_job(f"MNT prêt{tag} — sélectionne le créneau de vol.")
         self.tabs.setCurrentWidget(self._creneau_tab)
 
     # --- UI construction (controls live in their own tabs) ---------------------
@@ -190,6 +204,11 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.zone_info.setWordWrap(True)
         bar.addWidget(self.zone_info, stretch=1)  # info bottom-left
+        bar.addWidget(QtWidgets.QLabel("Source :"))
+        self.dem_source_combo = QtWidgets.QComboBox()
+        self.dem_source_combo.addItems(list(DEM_SOURCES))
+        self.dem_source_combo.setCurrentText(DEM_SOURCE_DEFAULT)
+        bar.addWidget(self.dem_source_combo)
         bar.addWidget(QtWidgets.QLabel("Résolution MNT :"))
         self.dem_res_combo = QtWidgets.QComboBox()
         self.dem_res_combo.addItems(list(DEM_RES_PRESETS))

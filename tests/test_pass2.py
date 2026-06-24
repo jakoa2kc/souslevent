@@ -162,6 +162,38 @@ def test_sample_grid_and_upstream_wind(tmp_path):
     assert spd == 7.5 and abs(drc - 315.0) < 1e-6
 
 
+def test_in_france():
+    from sillage.terrain.acquire import in_france
+
+    assert in_france((44.4, 6.0, 44.7, 6.4))            # French Alps
+    assert not in_france((40.0, -74.0, 40.1, -73.9))    # New York
+
+
+def test_prepare_dem_ign_decodes(tmp_path, monkeypatch):
+    import requests
+
+    from sillage.terrain import acquire
+    from sillage.terrain.dem import load_dem
+
+    class _Resp:
+        def __init__(self, content):
+            self.content = content
+            self.headers = {"Content-Type": "image/x-bil;bits=32"}
+
+        def raise_for_status(self):
+            pass
+
+    def fake_get(url, params=None, timeout=None):
+        w, h = int(params["WIDTH"]), int(params["HEIGHT"])
+        return _Resp(np.full((h, w), 1200.0, dtype="<f4").tobytes())
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    p = acquire.prepare_dem_ign((44.55, 6.15, 44.70, 6.35), tmp_path / "ign.tif", target_res_m=60.0)
+    dem = load_dem(str(p), max_domain_km=200.0)
+    assert dem.crs.is_projected
+    assert 1150 < float(np.nanmean(dem.elevation)) < 1250  # ~1200 m preserved
+
+
 def test_zoom_for_resolution_caps():
     from sillage.terrain.acquire import zoom_for_resolution
 
