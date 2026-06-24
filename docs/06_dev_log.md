@@ -529,6 +529,33 @@ label is correct. Tests: 37 passed.
 
 ---
 
+## Entry 23 — Temporal-first criblage + per-hour spatial refine; bbox crop; button polish  (2026-06-24)
+
+**What changed.**
+- **"Valider le créneau horaire"** now runs a **fast TEMPORAL criblage**: a single-domain
+  Pass-1 per hour (forecast wind at the domain centre, 200 m) — **~7–8 s/hour** (6 h ≈ 45 s),
+  and it keeps the per-hour `vel`/`ang` grids (so the Pass-2 upstream wind works).
+- New **"Affiner spatialement l'heure affichée"** button: runs the spatial sub-zone criblage
+  for the **currently shown hour** (~20 s) and **stores it back** into the hourly stack —
+  re-shown (tagged "(spatial)") when you scrub back to that hour.
+- Removed the now-useless **"Aperçu (géométrie)"** button.
+- Green "Valider" buttons now **grey out while running** (explicit `:disabled` QSS — a custom
+  stylesheet was masking Qt's disabled look). `btn_refine` is disabled until a criblage runs.
+- **Fixed "a new zone shows the old MNT":** terrarium `bounds2img` over-fetches a tile-aligned
+  mosaic (we saw 57 km for a 36 km AOI), so nearby selections shared most of the same DEM.
+  The mosaic is now **cropped to the exact bbox** (`acquire._crop_to_bbox`) → distinct zones
+  give distinct DEMs, and the DEM stays under ~50 km.
+
+**Result.** Verified end to end: temporal 2 h = 15 s (vel grids set), spatial refine of one
+hour = 19 s (tagged "(spatial)"); two different bboxes → different DEMs (Champsaur 1053 m vs
+Mont-Blanc 1687 m, ~25 km). Tests: 37 passed.
+
+**Open questions.** Prune dead single-shot handlers (`on_compute_pass1`, `on_run_mass`,
+`on_run_subzones`). Persist refined hours to disk across sessions (currently in-memory +
+WindNinja work-dir cache).
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

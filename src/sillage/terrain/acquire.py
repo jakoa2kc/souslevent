@@ -37,6 +37,34 @@ def decode_terrarium(img: np.ndarray) -> np.ndarray:
     return ((r * 256.0 + g + b / 256.0) - 32768.0).astype("float32")
 
 
+def _crop_to_bbox(elev, ext, bbox_lonlat):
+    """Crop a web-mercator (elev array, extent) to the lon/lat bbox (west, south, east, north).
+
+    bounds2img returns tile-aligned mosaics that often far exceed the requested area, so two
+    nearby selections would otherwise share most of the same DEM. Cropping makes the DEM match
+    the selected zone (distinct zones -> distinct DEMs; keeps it under ~50 km).
+    """
+    from rasterio.crs import CRS
+    from rasterio.warp import transform as warp_xy
+
+    west, south, east, north = bbox_lonlat
+    xs, ys = warp_xy(CRS.from_epsg(4326), CRS.from_epsg(3857), [west, east], [south, north])
+    bx0, bx1 = sorted(xs)
+    by0, by1 = sorted(ys)
+    xmin, xmax, ymin, ymax = ext
+    h, w = elev.shape
+    px, py = (xmax - xmin) / w, (ymax - ymin) / h
+    c0 = max(0, int((bx0 - xmin) / px))
+    c1 = min(w, int(math.ceil((bx1 - xmin) / px)))
+    r0 = max(0, int((ymax - by1) / py))  # row 0 = top (ymax)
+    r1 = min(h, int(math.ceil((ymax - by0) / py)))
+    if c1 - c0 < 2 or r1 - r0 < 2:
+        return elev, ext
+    sub = np.ascontiguousarray(elev[r0:r1, c0:c1])
+    new_ext = (xmin + c0 * px, xmin + c1 * px, ymax - r1 * py, ymax - r0 * py)
+    return sub, new_ext
+
+
 def prepare_dem_for_bbox(
     bbox_latlon, out_path, target_res_m: float = 90.0,
     on_progress=None, cancel=None, max_px: int = 2500,
@@ -75,6 +103,7 @@ def prepare_dem_for_bbox(
 
     prog(60, "Décodage de l'altimétrie…")
     elev = decode_terrarium(img)
+    elev, ext = _crop_to_bbox(elev, ext, (west, south, east, north))  # match the exact AOI
     h, w = elev.shape
     xmin, xmax, ymin, ymax = ext  # web-mercator extent (left, right, bottom, top)
     transform = from_origin(xmin, ymax, (xmax - xmin) / w, (ymax - ymin) / h)

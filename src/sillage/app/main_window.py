@@ -35,6 +35,14 @@ NO_BASEMAP = "Aucun"
 # real Météo-France AROME GRIB is wired, replace with the actual run's last valid hour.
 FORECAST_HORIZON_H = 48
 
+# Prominent green button. The explicit :disabled rule is required because a custom
+# stylesheet otherwise overrides Qt's default greyed-out look while running.
+GREEN_BTN_QSS = (
+    "QPushButton { font-weight:bold; padding:8px 18px; border-radius:5px;"
+    " background:#2d7d2d; color:white; }"
+    " QPushButton:disabled { background:#a9c7a9; color:#eef; }"
+)
+
 PASS2_HALF_WIDTH_M = 2500.0  # ~5 km feature window around the clicked hotspot
 
 # ADR-0008: Pass-2 mesh resolution is a quality/time knob. Each preset = (mesh_count,
@@ -67,6 +75,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pass1_ang_path = None
         # Hourly stack: list of (label, hazard, vel_path, ang_path) for the time slider.
         self._hourly: list[tuple] = []
+        self._creneau_lo = 0          # window start hour, for spatial refinement
+        self._creneau_start = None
         # Last rendered (dem, hazard, title) so toggling the basemap can redraw it.
         self._last_map = None
         # AOI selected on the zone tab (south, west, north, east) in lat/lon.
@@ -91,8 +101,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self._build_analyse_tab(), "Analyse locale des zones sous le vent")
         self.setCentralWidget(self.tabs)
 
-        self._run_buttons = [self.btn_validate, self.btn_geom, self.btn_creneau,
-                             self.btn_load_p2]
+        self._run_buttons = [self.btn_validate, self.btn_creneau, self.btn_load_p2]
         self.statusBar().showMessage("Prêt")
 
     def _on_aoi_selected(self, s: float, w: float, n: float, e: float) -> None:
@@ -169,10 +178,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.zone_info.setWordWrap(True)
         bar.addWidget(self.zone_info, stretch=1)  # info bottom-left
         self.btn_validate = QtWidgets.QPushButton("✓  Valider la zone et préparer le terrain")
-        self.btn_validate.setStyleSheet(
-            "font-weight: bold; padding: 10px 22px; background:#2d7d2d; color:white;"
-            " border-radius:5px;"
-        )
+        self.btn_validate.setStyleSheet(GREEN_BTN_QSS)
         self.btn_validate.clicked.connect(self.on_validate_zone)
         bar.addWidget(self.btn_validate)
         lay.addLayout(bar)
@@ -205,10 +211,8 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(self.horizon_label)
 
         self.btn_creneau = QtWidgets.QPushButton(
-            "Valider le créneau horaire (lancer le criblage)")
-        self.btn_creneau.setStyleSheet(
-            "font-weight: bold; padding: 8px 18px; background:#2d7d2d; color:white;"
-            " border-radius:5px;")
+            "Valider le créneau horaire (criblage temporel)")
+        self.btn_creneau.setStyleSheet(GREEN_BTN_QSS)
         self.btn_creneau.clicked.connect(self.on_run_hourly)
         lay.addWidget(self.btn_creneau)
 
@@ -219,9 +223,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.basemap_combo.currentTextChanged.connect(self._on_basemap_change)
         opt.addWidget(QtWidgets.QLabel("Fond :"))
         opt.addWidget(self.basemap_combo)
-        self.btn_geom = QtWidgets.QPushButton("Aperçu (géométrie)")
-        self.btn_geom.clicked.connect(self.on_compute_pass1)
-        opt.addWidget(self.btn_geom)
         opt.addStretch(1)
         lay.addLayout(opt)
 
@@ -249,6 +250,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hour_widget.setLayout(slider_row)
         self.hour_widget.setVisible(False)
         lay.addWidget(self.hour_widget)
+
+        self.btn_refine = QtWidgets.QPushButton("Affiner spatialement l'heure affichée")
+        self.btn_refine.setEnabled(False)
+        self.btn_refine.clicked.connect(self.on_refine_spatial)
+        lay.addWidget(self.btn_refine)
 
         hint = QtWidgets.QLabel(
             "Glisser = déplacer · molette = zoom · double-clic = vue complète · "
@@ -555,6 +561,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_running(self, running: bool, msg: str = "") -> None:
         for b in self._run_buttons:
             b.setEnabled(not running)
+        self.btn_refine.setEnabled(not running and bool(self._hourly))
         self.progress.setVisible(running)
         self.btn_cancel.setVisible(running)
         if running:
@@ -589,9 +596,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._hourly = []
 
     def on_run_hourly(self) -> None:
-        """Validate the flight window: a SPATIAL (sub-zone) Pass-1 per hour, driven by the
-        real forecast (Open-Meteo crest wind) with a synthetic fallback if there's no
-        network. Populates the result hour slider."""
+        """TEMPORAL criblage: a fast single-domain Pass-1 per hour over the flight window,
+        using the forecast wind at the domain centre (synthetic fallback). Spatial detail is
+        added per hour on demand with "Affiner spatialement"."""
         if self._job is not None:
             return
         from datetime import timedelta
@@ -605,8 +612,10 @@ class MainWindow(QtWidgets.QMainWindow):
         cache_dir = cfg.cache_dir
         lo, hi = self._window_hours()
         count = hi - lo
-        window_start = self._window_start()  # Qt-free below this point
-        syn = synthetic_series(count, start=window_start)  # fallback winds
+        window_start = self._window_start()
+        self._creneau_lo = lo            # remembered for spatial refinement of a shown hour
+        self._creneau_start = window_start
+        syn = synthetic_series(count, start=window_start)
 
         def _lab(t):
             return f"{_FR_DAYS[t.weekday()]} {t:%d/%m} {t:%Hh}"
@@ -617,16 +626,12 @@ class MainWindow(QtWidgets.QMainWindow):
         def fn(on_progress, cancel):  # worker thread — no Qt here
             import numpy as np
 
-            from ..screening import indicator as ind2
-            from ..screening.pass1 import mask_edge_buffer
-            from ..screening.subzones import subzone_speed_field
             from ..wind.profile import window_forecast_provider
 
             dem = load_dem(dem_path, max_domain_km=max_km)
             left, bottom, right, top = dem.bounds
             cx, cy = (left + right) / 2.0, (bottom + top) / 2.0
             crest = float(np.nanpercentile(dem.elevation, 80))
-
             make = window_forecast_provider(dem, crest, n_hours=hi, source="open_meteo")
             try:
                 make(lo)(cx, cy)  # probe: real crest forecast available?
@@ -641,29 +646,25 @@ class MainWindow(QtWidgets.QMainWindow):
                     raise RuntimeError("cancelled")
                 h = lo + i
                 if make is not None:
-                    provider = make(h)
-                    geo_dir = provider(cx, cy)[1]
+                    spd, drc = make(h)(cx, cy)  # one domain-average wind per hour
                 else:
-                    _l, s_spd, s_drc = syn[i]
-                    provider = lambda x, y, s=s_spd, d=s_drc: (s, d)
-                    geo_dir = s_drc
+                    _l, spd, drc = syn[i]
+                work = cache_dir / "aoi" / "creneau" / f"{day_tag}_h{h:02d}_t"
 
                 def hp(pct, msg, i=i):
                     on_progress(int((i + pct / 100.0) / count * 100),
                                 f"{src} {i + 1}/{count} : {msg}")
 
-                field = subzone_speed_field(
-                    dem=dem, cli=cli, wind_at_center=provider, nx=2, ny=2,
-                    work_root=cache_dir / "aoi" / "creneau" / f"{day_tag}_h{h:02d}",
-                    resolution_m=150.0, on_progress=hp, cancel=cancel,
+                hazard, vel = hourly_indicator(
+                    dem=dem, cli=cli, dem_path=dem_path, work_dir=work,
+                    wind_speed_ms=spd, wind_from_deg=drc, resolution_m=200.0,
+                    force_run=False, on_progress=hp, cancel=cancel,
                 )
-                hazard = ind2.hazard_indicator(dem, geo_dir, speed_grid=field)
-                hazard = mask_edge_buffer(hazard, dem.resolution_m, 1500.0)
-                out.append((labels[i], hazard, None, None))  # mosaic -> no single vel/ang
+                out.append((labels[i], hazard, vel, find_direction_grid(work)))
             return dem, src, out
 
         self._cancelling = False
-        self._set_running(True, f"Criblage du créneau ({count} h)…")
+        self._set_running(True, f"Criblage temporel ({count} h)…")
         job = SolveJob(fn, self)
         job.progress.connect(self._on_job_progress)
         job.finished.connect(self._on_hourly_finished)
@@ -681,7 +682,74 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hour_slider.setValue(0)
         self.hour_slider.blockSignals(False)
         self._show_hour(0)
-        self._finish_job(f"Criblage du créneau ({src}) : {len(stack)} heures")
+        self._finish_job(f"Criblage temporel ({src}) : {len(stack)} heures")
+
+    def on_refine_spatial(self) -> None:
+        """Refine the currently displayed hour with the SPATIAL sub-zone criblage and store
+        it back in the hourly stack (re-shown when scrubbing back to that hour)."""
+        if self._job is not None or not self._hourly:
+            return
+        i = int(self.hour_slider.value())
+        if not (0 <= i < len(self._hourly)):
+            return
+        cfg = self.cfg
+        dem_path = self._dem_path
+        cli = cfg.windninja_cli
+        max_km = cfg.max_domain_km
+        cache_dir = cfg.cache_dir
+        lo = getattr(self, "_creneau_lo", 0)
+        start = getattr(self, "_creneau_start", None) or self._window_start()
+        count = len(self._hourly)
+        n_hours = lo + count
+        h = lo + i
+        day_tag = start.strftime("%Y%m%d")
+        label = self._hourly[i][0].replace("  (spatial)", "")
+        _ls, s_spd, s_drc = synthetic_series(count, start=start)[i]
+
+        def fn(on_progress, cancel):  # worker thread — no Qt here
+            import numpy as np
+
+            from ..screening import indicator as ind2
+            from ..screening.pass1 import mask_edge_buffer
+            from ..screening.subzones import subzone_speed_field
+            from ..wind.profile import window_forecast_provider
+
+            dem = load_dem(dem_path, max_domain_km=max_km)
+            left, bottom, right, top = dem.bounds
+            cx, cy = (left + right) / 2.0, (bottom + top) / 2.0
+            crest = float(np.nanpercentile(dem.elevation, 80))
+            make = window_forecast_provider(dem, crest, n_hours=n_hours, source="open_meteo")
+            try:
+                provider = make(h)
+                geo_dir = provider(cx, cy)[1]
+            except Exception:
+                provider = lambda x, y: (s_spd, s_drc)
+                geo_dir = s_drc
+            field = subzone_speed_field(
+                dem=dem, cli=cli, wind_at_center=provider, nx=2, ny=2,
+                work_root=cache_dir / "aoi" / "creneau" / f"{day_tag}_h{h:02d}_s",
+                resolution_m=150.0, on_progress=on_progress, cancel=cancel,
+            )
+            hazard = ind2.hazard_indicator(dem, geo_dir, speed_grid=field)
+            hazard = mask_edge_buffer(hazard, dem.resolution_m, 1500.0)
+            return i, label, hazard
+
+        self._cancelling = False
+        self._set_running(True, f"Affinage spatial — {label}…")
+        job = SolveJob(fn, self)
+        job.progress.connect(self._on_job_progress)
+        job.finished.connect(self._on_refine_finished)
+        job.failed.connect(self._on_job_failed)
+        self._job = job
+        job.start()
+
+    def _on_refine_finished(self, result) -> None:
+        i, label, hazard = result
+        if 0 <= i < len(self._hourly):
+            self._hourly[i] = (f"{label}  (spatial)", hazard, None, None)
+        self._finish_job(f"Heure affinée spatialement — {label}")
+        if int(self.hour_slider.value()) == i:
+            self._show_hour(i)
 
     def _on_slider_change(self, val: int) -> None:
         if self._hourly:
