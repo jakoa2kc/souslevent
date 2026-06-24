@@ -602,6 +602,25 @@ is capped at the WMS max dims). IGN coverage beyond métropole (DOM-TOM layers).
 
 ---
 
+## Entry 27 — Clean MNT preview (no basemap contours) + spatial-refine scale selector  (2026-06-24)
+
+**What changed.**
+- **"Lines on the IGN MNT" diagnosed**: they were the **IGN plan basemap's contour lines**
+  showing through the semi-transparent hillshade (the pure hillshade is smooth) — not an MNT
+  defect. The **MNT preview is now a bare hillshade** (no basemap overlay); the basemap
+  returns on the **criblage result maps**, where orientation matters.
+- Tab 2 gains an **"Échelle d'affinage"** selector (Standard 150 m / Fin 75 m / Très fin 40 m
+  / Maximum 25 m) driving the spatial sub-zone refine mesh (`subzone_speed_field` resolution);
+  the cache key includes it. Finer = more local detail, slower.
+
+**Result.** Verified: the MNT preview is clean even with "IGN plan" selected; the refine
+presets are wired (default 150 m). Tests: 39 passed.
+
+**Open questions.** A "MNT + fond" toggle if the user wants context back on the preview (e.g.
+over IGN ortho, which has no contour clash). Per-tile time estimate for the finest refine.
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

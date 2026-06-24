@@ -55,6 +55,16 @@ DEM_SOURCES = {
 }
 DEM_SOURCE_DEFAULT = "Auto (IGN en France)"
 
+# Spatial-refinement mesh resolution (WindNinja mass mesh of the sub-zone tiles). Finer = more
+# local detail but slower; bounded by the prepared DEM. -> resolution_m for subzone_speed_field.
+REFINE_RES_PRESETS = {
+    "Standard (150 m)": 150.0,
+    "Fin (75 m)": 75.0,
+    "Très fin (40 m)": 40.0,
+    "Maximum (25 m)": 25.0,
+}
+REFINE_RES_DEFAULT = "Standard (150 m)"
+
 # Prominent green button. The explicit :disabled rule is required because a custom
 # stylesheet otherwise overrides Qt's default greyed-out look while running.
 GREEN_BTN_QSS = (
@@ -288,10 +298,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hour_widget.setVisible(False)
         lay.addWidget(self.hour_widget)
 
+        refine_row = QtWidgets.QHBoxLayout()
+        refine_row.addWidget(QtWidgets.QLabel("Échelle d'affinage :"))
+        self.refine_res_combo = QtWidgets.QComboBox()
+        self.refine_res_combo.addItems(list(REFINE_RES_PRESETS))
+        self.refine_res_combo.setCurrentText(REFINE_RES_DEFAULT)
+        refine_row.addWidget(self.refine_res_combo)
         self.btn_refine = QtWidgets.QPushButton("Affiner spatialement l'heure affichée")
         self.btn_refine.setEnabled(False)
         self.btn_refine.clicked.connect(self.on_refine_spatial)
-        lay.addWidget(self.btn_refine)
+        refine_row.addWidget(self.btn_refine)
+        refine_row.addStretch(1)
+        lay.addLayout(refine_row)
 
         hint = QtWidgets.QLabel(
             "Glisser = déplacer · molette = zoom · double-clic = vue complète · "
@@ -401,28 +419,16 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Prévision disponible jusqu'à ~ {_fmt(limit)}  (AROME ~{FORECAST_HORIZON_H} h)")
 
     def _render_terrain(self, dem) -> None:
-        """Show the MNT (hillshade over the basemap), no hazard overlay — default tab-2 view."""
+        """Show the bare MNT hillshade. No basemap overlay here: the IGN plan's contour lines
+        clash with the relief (they look like defects on the MNT). The basemap returns on the
+        criblage result maps, where orientation matters."""
         self._last_map = None
-        source = self.basemap_combo.currentText()
         left, bottom, right, top = dem.bounds
-        extent = (left, right, bottom, top)
         self.fig.clear()
         ax = self.fig.add_subplot(111)
-        if source != NO_BASEMAP:
-            ax.imshow(map2d.hillshade(dem), cmap="gray", extent=extent, origin="upper",
-                      alpha=0.45, zorder=2)
-            ax.set_xlim(left, right)
-            ax.set_ylim(bottom, top)
-            try:
-                map2d.add_basemap(ax, dem.crs, source=source, attribution=False, zorder=0)
-            except Exception:
-                pass
-            ax.set_xlabel("Est (m)")
-            ax.set_ylabel("Nord (m)")
-        else:
-            map2d.draw_hillshade(ax, dem)
+        map2d.draw_hillshade(ax, dem)
         ax.set_title("MNT — zone de vol  (choisis un créneau, puis lance le criblage)")
-        self._home_extent = extent
+        self._home_extent = (left, right, bottom, top)
         self.canvas.draw()
 
     def _build_analyse_tab(self) -> QtWidgets.QWidget:
@@ -741,6 +747,7 @@ class MainWindow(QtWidgets.QMainWindow):
         h = lo + i
         day_tag = start.strftime("%Y%m%d")
         label = self._hourly[i][0].replace("  (spatial)", "")
+        refine_res = REFINE_RES_PRESETS[self.refine_res_combo.currentText()]
         _ls, s_spd, s_drc = synthetic_series(count, start=start)[i]
 
         def fn(on_progress, cancel):  # worker thread — no Qt here
@@ -764,8 +771,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 geo_dir = s_drc
             field = subzone_speed_field(
                 dem=dem, cli=cli, wind_at_center=provider, nx=2, ny=2,
-                work_root=cache_dir / "aoi" / "creneau" / f"{day_tag}_h{h:02d}_s",
-                resolution_m=150.0, on_progress=on_progress, cancel=cancel,
+                work_root=cache_dir / "aoi" / "creneau" / f"{day_tag}_h{h:02d}_s{refine_res:.0f}",
+                resolution_m=refine_res, on_progress=on_progress, cancel=cancel,
             )
             hazard = ind2.hazard_indicator(dem, geo_dir, speed_grid=field)
             hazard = mask_edge_buffer(hazard, dem.resolution_m, 1500.0)
