@@ -174,6 +174,12 @@ parameterized by an altitude-appropriate wind — not altitude bands as independ
   informed*, it does not let the mass solver show rotors.
 - Partially resolves the open "AROME ingestion route" question: **Open-Meteo AROME per
   sub-zone for now**; full gridded `wxModel` init remains the eventual target.
+- **Adaptive grid (2026-06-24):** the sub-zone count is **not fixed** — it scales with
+  `AOI / forecast-cell` (`~11 km` for the Open-Meteo crest wind, **not** AROME's 1.3 km, which
+  we don't have and which would mean hundreds of runs), clamped to ≤ 4×4. A small AOI (< a
+  forecast cell) collapses to 1×1 (no spurious inter-zone blending). Intra-tile detail comes
+  from WindNinja downscaling on the terrain, so the **WindNinja mesh is tied to the MNT
+  resolution** (a mesh finer than the DEM is moot), floored for compute.
 
 ---
 

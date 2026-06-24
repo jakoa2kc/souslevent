@@ -621,6 +621,25 @@ over IGN ortho, which has no contour clash). Per-tile time estimate for the fine
 
 ---
 
+## Entry 28 — Adaptive sub-zone count + WindNinja mesh tied to the MNT (refines ADR-0007)  (2026-06-24)
+
+**What changed.** The spatial refine was a **fixed 2×2** (4 wind zones) at a manually-selected
+mesh, regardless of AOI/MNT size. Now:
+- **Wind sub-zone count adapts**: `nx,ny = clamp(round(extent_km / FORECAST_CELL_KM=11), 1,
+  MAX_SUBZONES=4)`. A small AOI (< one forecast cell) → **1×1** (a single domain — no spurious
+  inter-zone blending); ~30 km → 3×3; large → 4×4 (capped). Based on the Open-Meteo crest
+  wind's **~11 km** effective resolution, **not** AROME's 1.3 km (which we don't have, and
+  which would mean hundreds of WindNinja runs). Intra-tile detail comes from WindNinja
+  downscaling on the terrain.
+- **WindNinja mesh tied to the MNT resolution**: `max(25 m floor, MNT res, tile/600 px)`,
+  replacing the manual "Échelle d'affinage" selector (a mesh finer than the DEM is moot). A
+  grey label shows the auto grid ("3×3 zones · maille ~54 m").
+
+**Result.** Verified: 10 km@54 m → 1×1 / 54 m; 30 km@54 m → 3×3 / 54 m; 50 km@110 m → 4×4 /
+110 m; 30 km@14 m → 3×3 / 25 m. Tests: 39 passed.
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

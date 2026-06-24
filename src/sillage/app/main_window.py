@@ -55,15 +55,18 @@ DEM_SOURCES = {
 }
 DEM_SOURCE_DEFAULT = "Auto (IGN en France)"
 
-# Spatial-refinement mesh resolution (WindNinja mass mesh of the sub-zone tiles). Finer = more
-# local detail but slower; bounded by the prepared DEM. -> resolution_m for subzone_speed_field.
-REFINE_RES_PRESETS = {
-    "Standard (150 m)": 150.0,
-    "Fin (75 m)": 75.0,
-    "Très fin (40 m)": 40.0,
-    "Maximum (25 m)": 25.0,
-}
-REFINE_RES_DEFAULT = "Standard (150 m)"
+# Spatial refinement is adaptive (no manual mesh selector):
+#  - number of wind sub-zones ~ AOI size / forecast cell (capped) — sampling the forecast's
+#    spatial variation; finer than the forecast is pointless (adjacent tiles ~identical wind).
+#    We use the Open-Meteo crest wind (~11 km effective), NOT AROME's native 1.3 km (which we
+#    don't have and which would mean hundreds of WindNinja runs). Intra-tile detail comes from
+#    WindNinja downscaling on the terrain (so few zones + a fine mesh on a fine MNT is right).
+#  - WindNinja mass mesh ~ the prepared MNT resolution (a finer mesh than the DEM is moot),
+#    floored for compute and per-tile cell count.
+FORECAST_CELL_KM = 11.0       # effective horizontal resolution of the Open-Meteo crest wind
+MAX_SUBZONES = 4              # cap per side -> at most MAX_SUBZONES^2 WindNinja runs / hour
+REFINE_MESH_FLOOR_M = 25.0    # don't mesh finer than this (Pass-1 is screening; keep it fast)
+REFINE_MAX_MESH_PX = 600      # cap cells per tile side -> raises the mesh on big single tiles
 
 # Prominent green button. The explicit :disabled rule is required because a custom
 # stylesheet otherwise overrides Qt's default greyed-out look while running.
@@ -192,6 +195,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:
             self._dem = None
             QtWidgets.QMessageBox.warning(self, "MNT", f"MNT préparé, affichage impossible : {exc}")
+        self._update_refine_info()
         tag = f" (source {used})" if used else ""
         self._finish_job(f"MNT prêt{tag} — sélectionne le créneau de vol.")
         self.tabs.setCurrentWidget(self._creneau_tab)
@@ -299,15 +303,13 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(self.hour_widget)
 
         refine_row = QtWidgets.QHBoxLayout()
-        refine_row.addWidget(QtWidgets.QLabel("Échelle d'affinage :"))
-        self.refine_res_combo = QtWidgets.QComboBox()
-        self.refine_res_combo.addItems(list(REFINE_RES_PRESETS))
-        self.refine_res_combo.setCurrentText(REFINE_RES_DEFAULT)
-        refine_row.addWidget(self.refine_res_combo)
         self.btn_refine = QtWidgets.QPushButton("Affiner spatialement l'heure affichée")
         self.btn_refine.setEnabled(False)
         self.btn_refine.clicked.connect(self.on_refine_spatial)
         refine_row.addWidget(self.btn_refine)
+        self.refine_info = QtWidgets.QLabel("")  # auto grid (zones x mesh) from the MNT
+        self.refine_info.setStyleSheet("color: #555;")
+        refine_row.addWidget(self.refine_info)
         refine_row.addStretch(1)
         lay.addLayout(refine_row)
 
@@ -718,6 +720,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_hourly_finished(self, result) -> None:
         dem, src, stack = result
         self._dem = dem
+        self._update_refine_info()
         self._hourly = stack
         self.hour_widget.setVisible(True)
         self.hour_slider.blockSignals(True)
@@ -727,9 +730,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self._show_hour(0)
         self._finish_job(f"Criblage temporel ({src}) : {len(stack)} heures")
 
+    def _refine_grid(self) -> tuple[int, int, int]:
+        """(nx, ny, mesh_m) for the spatial refine. Wind sub-zones ~ AOI / forecast cell
+        (capped), WindNinja mesh ~ the MNT resolution (floored and capped per tile)."""
+        ex, ey = self._dem.extent_km
+        nx = max(1, min(MAX_SUBZONES, round(ex / FORECAST_CELL_KM)))
+        ny = max(1, min(MAX_SUBZONES, round(ey / FORECAST_CELL_KM)))
+        tile_km = max(ex / nx, ey / ny)
+        mesh = max(REFINE_MESH_FLOOR_M, self._dem.resolution_m,
+                   tile_km * 1000.0 / REFINE_MAX_MESH_PX)
+        return nx, ny, int(round(mesh))
+
+    def _update_refine_info(self) -> None:
+        if self._dem is None:
+            self.refine_info.setText("")
+            return
+        nx, ny, mesh = self._refine_grid()
+        self.refine_info.setText(f"→ {nx}×{ny} zones de vent · maille WindNinja ~{mesh} m")
+
     def on_refine_spatial(self) -> None:
         """Refine the currently displayed hour with the SPATIAL sub-zone criblage and store
-        it back in the hourly stack (re-shown when scrubbing back to that hour)."""
+        it back in the hourly stack (re-shown when scrubbing back to that hour). The sub-zone
+        count and the WindNinja mesh are derived from the AOI size and the MNT resolution."""
         if self._job is not None or not self._hourly:
             return
         i = int(self.hour_slider.value())
@@ -747,7 +769,7 @@ class MainWindow(QtWidgets.QMainWindow):
         h = lo + i
         day_tag = start.strftime("%Y%m%d")
         label = self._hourly[i][0].replace("  (spatial)", "")
-        refine_res = REFINE_RES_PRESETS[self.refine_res_combo.currentText()]
+        nx, ny, refine_res = self._refine_grid()
         _ls, s_spd, s_drc = synthetic_series(count, start=start)[i]
 
         def fn(on_progress, cancel):  # worker thread — no Qt here
@@ -770,16 +792,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 provider = lambda x, y: (s_spd, s_drc)
                 geo_dir = s_drc
             field = subzone_speed_field(
-                dem=dem, cli=cli, wind_at_center=provider, nx=2, ny=2,
-                work_root=cache_dir / "aoi" / "creneau" / f"{day_tag}_h{h:02d}_s{refine_res:.0f}",
-                resolution_m=refine_res, on_progress=on_progress, cancel=cancel,
+                dem=dem, cli=cli, wind_at_center=provider, nx=nx, ny=ny,
+                work_root=(cache_dir / "aoi" / "creneau" /
+                           f"{day_tag}_h{h:02d}_s{nx}x{ny}_{refine_res}"),
+                resolution_m=float(refine_res), on_progress=on_progress, cancel=cancel,
             )
             hazard = ind2.hazard_indicator(dem, geo_dir, speed_grid=field)
             hazard = mask_edge_buffer(hazard, dem.resolution_m, 1500.0)
             return i, label, hazard
 
         self._cancelling = False
-        self._set_running(True, f"Affinage spatial — {label}…")
+        self._set_running(True, f"Affinage spatial {nx}×{ny} (maille {refine_res} m) — {label}…")
         job = SolveJob(fn, self)
         job.progress.connect(self._on_job_progress)
         job.finished.connect(self._on_refine_finished)
