@@ -21,6 +21,7 @@ of these are *silent* failures (plausible-looking but wrong output) — the dang
 | `WindNinja_cli` not found | `WINDNINJA_CLI` unset / wrong path | Set it in `.env`; verify `WindNinja_cli --help`. |
 | Momentum run rejects weather-model or point init | Momentum solver supports **domain-average only** | Provide a single (speed, dir, height); read it from the Pass-1 field. (docs/05) |
 | Unknown/!changed CLI flag | WindNinja version differs from docs/05 | Re-check `WindNinja_cli --help`; update **only** `flow/windninja.py` (flags are centralized there). |
+| `unknown option number_of_threads` | Wrong thread flag for WindNinja 3.12 | Use `--num_threads` (`flow.windninja.FLAG["num_threads"]`). |
 | Momentum run very slow / OOM | `mesh_count` too high / domain too large | Lower mesh/iterations; shrink the crop; remember mesh (not DEM res) drives cost. |
 | Can't find the OpenFOAM case dir to read | Temp case path not captured | Run with a known working dir; log/record the solver temp path; keep it until read. (docs/05) |
 | Lee accuracy poor even with momentum | Too few iterations; lee regions converge slowest | Increase `number_of_iterations` (lee/recirculation needs more than attached flow). |

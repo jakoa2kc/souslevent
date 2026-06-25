@@ -284,3 +284,41 @@ Verifications:
 Etat M2: la chaine Pass 2 est complete de bout en bout sous Windows natif
 (crop -> momentum -> case OpenFOAM -> lecture 3D -> volumes/rendu). Reste du polish
 (streamlines plus lisibles, surface terrain opaque vs volumes) et le handoff M3.
+
+### 2026-06-25 — Revue corrective WindNinja / error boxes (Codex)
+
+Contexte:
+- Demande: revue complete puis correction des bugs recurrents WindNinja signales dans l'IHM
+  ("Erreur WindNinja").
+- Tests hors sandbox au depart: `57 passed`, mais revue manuelle/probes sur le binaire local
+  ont revele un bug non couvert.
+
+Corrections:
+- `flow/windninja.py`: `FLAG["num_threads"]` passe de `number_of_threads` a `num_threads`.
+  Verification binaire: WindNinja 3.12 expose `--num_threads`; `--number_of_threads` retourne
+  `Exception caught: unknown option number_of_threads`. Cause directe probable des erreurs
+  d'affinage spatial/sous-zones.
+- `config.py` / `flow/windninja.py`: `load_config()` ne modifie plus globalement
+  `TMP`/`TEMP`/`TMPDIR`. `_subprocess_env(tmp_dir=None)` restaure les variables temp systeme
+  capturees avant config, pour que momentum/OpenFOAM ne herite plus du temp projet. Les runs
+  mass concurrents gardent leur temp isole explicite (`<tile workdir>/_wn_tmp`) + cache PROJ
+  isole.
+- `screening/pass1.py`: recherche `*_vel.asc` / `*_ang.asc` par fichier le plus recent;
+  `hourly_indicator` passe un temp explicite sous le workdir mass.
+- IHM `main_window.py`: dossiers de travail WindNinja incluent le stem du DEM actif
+  (evite de relire des sorties d'une autre AOI); Pass-2 utilise `format_run_failure`, donc
+  les boites d'erreur contiennent maintenant rc, cwd, commande, stderr et stdout.
+- `terrain/acquire.py`: le fallback IGN -> Monde ne masque plus les annulations ni les erreurs
+  quand l'utilisateur a demande explicitement `IGN`.
+- Scripts CLI: memes diagnostics d'erreur WindNinja et temp mass explicite sur les demos.
+
+Docs/tests:
+- `docs/03_decisions.md`, `docs/support/environment.md`, `docs/support/troubleshooting.md`
+  et `docs/06_dev_log.md` alignes sur `--num_threads` et la regle temp.
+- Tests ajoutes/ajustes: verification `--num_threads`, non-fuite du TMP projet dans
+  `_subprocess_env()` sans `tmp_dir`, PROJ cache isole avec `tmp_dir`.
+
+Verification avant commit:
+- `.\.venv\Scripts\python.exe -m pytest -q` -> `58 passed`
+- Probe binaire: `WindNinja_cli --help` expose `--num_threads` et pas
+  `--number_of_threads`.

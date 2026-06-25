@@ -18,11 +18,50 @@ wrapper is testable without the binary installed.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
+_BASE_TEMP_ENV = {
+    key: os.environ.get(key)
+    for key in ("TMP", "TEMP", "TMPDIR", "CPL_TMPDIR", "PROJ_USER_WRITABLE_DIRECTORY")
+}
+
+
+def _subprocess_env(tmp_dir=None) -> dict:
+    """Environment for WindNinja subprocesses.
+
+    Two safeguards for **parallel** runs (sub-zones, ADR-0017):
+    - ``PROJ_NETWORK=OFF`` so PROJ/GDAL never fetch datum grids over the network (those fetches
+      surface as "ERROR 1: HTTP error code : 500" and trip under concurrent load).
+    - An **isolated temp dir** when requested (``TMP``/``TEMP``/``TMPDIR``/``CPL_TMPDIR``).
+      Concurrent WindNinja/GDAL processes can race on same-named scratch files → intermittent
+      ``rc=-1`` (4294967295). A per-run temp dir removes that collision. Momentum/OpenFOAM
+      intentionally keeps the system temp environment unless a caller explicitly opts in.
+    """
+    env = os.environ.copy()
+    env["PROJ_NETWORK"] = "OFF"
+    if tmp_dir is not None:
+        tmp = Path(tmp_dir)
+        tmp.mkdir(parents=True, exist_ok=True)
+        for key in ("TMP", "TEMP", "TMPDIR", "CPL_TMPDIR"):
+            env[key] = str(tmp)
+        # Isolate PROJ's writable cache (proj cache.db) per run too: concurrent processes
+        # otherwise contend on the shared SQLite cache → "database is locked" → rc=-1.
+        env["PROJ_USER_WRITABLE_DIRECTORY"] = str(tmp)
+    else:
+        # Momentum/OpenFOAM is sensitive to project TMP redirection. Restore temp-related
+        # variables captured before load_config() can pin them to the generated root.
+        for key, value in _BASE_TEMP_ENV.items():
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
+    return env
 
 # WindNinja prints phase progress like "Run 0: (solver) 36% complete...".
 _PROGRESS_RE = re.compile(r"(\d+)\s*%\s*complete", re.IGNORECASE)
@@ -45,6 +84,7 @@ FLAG = {
     "momentum": "momentum_flag",
     "iterations": "number_of_iterations",
     "mesh_count": "mesh_count",
+    "num_threads": "num_threads",
     "turbulence_out": "turbulence_output_flag",
     "write_vtk": "write_vtk_output",  # NOTE: momentum VTK = mass mesh, not foam field
     "ascii_uv": "ascii_out_uv",
@@ -66,23 +106,40 @@ class WindNinjaRun:
     openfoam_case_dir: Path | None = None  # set for momentum runs once located
 
 
-def _run(cmd, cwd, dry_run, on_progress=None, cancel=None):
+def format_run_failure(run: WindNinjaRun, label: str, tail: int = 1200) -> str:
+    """Human-readable WindNinja failure with enough context for an IHM error box."""
+    cmd = " ".join(str(part) for part in run.command)
+    return (
+        f"{label} failed rc={run.returncode}\n"
+        f"CWD: {run.working_dir}\n"
+        f"CMD:\n{cmd}\n"
+        f"--- stderr tail ---\n{run.stderr[-tail:]}\n"
+        f"--- stdout tail ---\n{run.stdout[-tail:]}"
+    )
+
+
+def _run(cmd, cwd, dry_run, on_progress=None, cancel=None, tmp_dir=None):
     """Execute a WindNinja command. Returns (returncode, stdout, stderr).
 
     With no callbacks this is a plain blocking ``subprocess.run`` (unchanged behavior).
     If ``on_progress`` or ``cancel`` is given, switch to a streaming ``Popen`` that parses
     ``% complete`` lines for progress and terminates the subprocess when ``cancel()`` turns
     True — this is what the IHM worker thread uses to stay responsive (ADR-0009).
+
+    ``tmp_dir`` isolates the run's temp + PROJ cache (only needed for **concurrent** runs, e.g.
+    parallel sub-zones). It is intentionally NOT used for the single momentum run — redirecting
+    OpenFOAM's temp env there destabilises it (access-violation while writing output).
     """
     if dry_run:
         return None, "", ""
+    env = _subprocess_env(tmp_dir)
     if on_progress is None and cancel is None:
-        proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
+        proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, env=env)
         return proc.returncode, proc.stdout, proc.stderr
 
     popen = subprocess.Popen(
         cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, bufsize=1,
+        text=True, bufsize=1, env=env,
     )
     err_chunks: list[str] = []
 
@@ -136,6 +193,8 @@ def run_mass(
     output_resolution_m: float = 50.0,
     vegetation: str = "grass",
     weather_model_init: dict | None = None,
+    num_threads: int | None = None,
+    tmp_dir=None,
     dry_run: bool = False,
     on_progress=None,
     cancel=None,
@@ -189,8 +248,11 @@ def run_mass(
         "--write_ascii_output=true",
         f"--output_path={wd}",
     ]
+    if num_threads is not None:
+        # Cap per-run threads so parallel sub-zone solves don't oversubscribe the CPU.
+        cmd.append(f"--{FLAG['num_threads']}={int(num_threads)}")
 
-    rc, out, err = _run(cmd, wd, dry_run, on_progress=on_progress, cancel=cancel)
+    rc, out, err = _run(cmd, wd, dry_run, on_progress=on_progress, cancel=cancel, tmp_dir=tmp_dir)
     run = WindNinjaRun(command=cmd, working_dir=wd, returncode=rc, stdout=out, stderr=err)
     if not dry_run:
         run.output_paths = sorted(wd.glob("*.asc"))

@@ -334,3 +334,109 @@ def test_pass2_mesh_presets_and_estimate():
         assert mesh_count > 0 and iters > 0
     assert _estimate_minutes(20_000) >= 1
     assert _estimate_minutes(400_000) > _estimate_minutes(20_000)
+
+
+def test_bbox_latlon_from_utm_window():
+    from rasterio.warp import transform
+
+    from sillage.terrain.acquire import bbox_latlon_from_utm_window
+
+    crs = CRS.from_epsg(32631)
+    x, y, half = 500000.0, 4958344.0, 2500.0  # central meridian, ~44.7°N; 5 km window
+    s, w, n, e = bbox_latlon_from_utm_window(crs, x, y, half)
+    assert s < n and w < e
+    # the bbox centre round-trips back to (x, y)
+    bx, by = transform(CRS.from_epsg(4326), crs, [(w + e) / 2], [(s + n) / 2])
+    assert abs(bx[0] - x) < 50 and abs(by[0] - y) < 50
+    assert 0.03 < (n - s) < 0.06  # ~5 km of latitude is ~0.045°
+
+
+def test_mean_flow_vector_blows_to():
+    v = mean_flow_vector(270.0)            # FROM west -> blows toward east (+X)
+    assert v[0] > 0.99 and abs(v[1]) < 1e-6 and v[2] == 0.0
+    n = mean_flow_vector(180.0)            # FROM south -> blows toward north (+Y)
+    assert n[1] > 0.99 and abs(n[0]) < 1e-6
+
+
+def test_clip_domain_boundary_drops_lateral_frame_and_lid():
+    pv = pytest.importorskip("pyvista")
+    from sillage.viz.volume3d import _clip_domain_boundary
+
+    grid = pv.ImageData(dimensions=(21, 21, 21))  # 20×20×20 cells over 0..20
+    grid.cell_data["v"] = np.ones(grid.n_cells)
+    vol = grid.threshold(0.5, scalars="v")
+    clipped = _clip_domain_boundary(vol, grid, lateral_frac=0.1, lid_frac=0.1)
+    c = clipped.cell_centers().points
+    assert clipped.n_cells < vol.n_cells
+    assert c[:, 0].min() >= 2 and c[:, 0].max() <= 18  # E/W frame removed (0.1×20 = 2)
+    assert c[:, 1].min() >= 2 and c[:, 1].max() <= 18  # N/S frame removed
+    assert c[:, 2].max() <= 18                          # lid removed
+
+    # explicit AOI bounds clip the rotor back to the drawn zone (here 5..15 in x/y)
+    aoi = _clip_domain_boundary(vol, grid, aoi_bounds=(5, 15, 5, 15), lid_frac=0.0)
+    ca = aoi.cell_centers().points
+    assert ca[:, 0].min() >= 5 and ca[:, 0].max() <= 15
+    assert ca[:, 1].min() >= 5 and ca[:, 1].max() <= 15
+
+
+def test_populate_pass1_3d_builds_scene():
+    pytest.importorskip("pyvista")
+    from sillage.viz import volume3d as v3
+
+    ridge = np.exp(-(np.linspace(-1, 1, 40) ** 2) / 0.05) * 400.0
+    dem = Dem(elevation=np.tile(ridge, (40, 1)).astype("float32"),
+              transform=from_origin(600000.0, 4900000.0, 50.0, 50.0),
+              crs=CRS.from_epsg(32631), resolution_m=50.0)
+    hazard = np.zeros((40, 40))
+    hazard[:20, :] = 0.8  # north half flagged
+
+    class _FakePlotter:
+        def __init__(self):
+            self.meshes = self.texts = self.labels = 0
+
+        def add_mesh(self, *a, **k):
+            self.meshes += 1
+
+        def add_text(self, *a, **k):
+            self.texts += 1
+
+        def add_point_labels(self, *a, **k):
+            self.labels += 1
+
+        def show_axes(self):
+            pass
+
+        def view_isometric(self):
+            pass
+
+    p = _FakePlotter()
+    # crs=None -> no basemap fetch (offline): falls back to the elevation colormap
+    v3.populate_pass1_3d(p, dem, hazard, winds=[(600000.0 + 1000, 4900000.0 - 1000, 10.0, 270.0)],
+                         crs=None)
+    assert p.meshes >= 3  # terrain + hazard overlay + wind arrow + north arrow
+    assert p.texts >= 1 and p.labels >= 1
+
+
+def test_add_compass_adds_north_and_wind_arrows():
+    pv = pytest.importorskip("pyvista")
+    from sillage.viz import volume3d as v3
+
+    xx, yy = np.meshgrid(np.linspace(0, 2000, 12), np.linspace(0, 1500, 12))
+    terrain = pv.StructuredGrid(xx, yy, 50.0 * np.sin(xx / 400.0))
+
+    class _FakePlotter:
+        def __init__(self):
+            self.meshes = 0
+            self.labels = None
+
+        def add_mesh(self, *a, **k):
+            self.meshes += 1
+
+        def add_point_labels(self, pts, labels, **k):
+            self.labels = list(labels)
+
+    p = _FakePlotter()
+    v3._add_compass(p, terrain, mean_flow_vector(270.0), wind_speed_ms=12.0, wind_from_deg=270.0)
+    assert p.meshes == 2  # north + wind arrows
+    assert p.labels[0] == "N"
+    assert "12 m/s" in p.labels[1] and "270" in p.labels[1]

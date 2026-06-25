@@ -44,8 +44,14 @@ Setup for developers and for AI tools reproducing the environment.
 - Copy `.env.example` → `.env` and set paths/keys:
   - `WINDNINJA_CLI` — path to the `WindNinja_cli` binary (or how to invoke the Docker run).
   - `WINDNINJA_DATA` — path to WindNinja data dir if needed.
-  - `SILLAGE_CACHE_DIR` — where prepared DEMs/forecasts/cases are cached.
-  - `METEOFRANCE_API_KEY` — only if using AROME via the Météo-France API.
+  - `SILLAGE_GENERATED_ROOT` — out-of-tree root for generated artefacts
+    (`cache/`, `outputs/`, `tmp/`); Windows default is `C:\A2K\SousLeVent`.
+  - `SILLAGE_CACHE_DIR`, `SILLAGE_OUTPUT_DIR`, `SILLAGE_TMP_DIR` — optional per-directory
+    overrides. `SILLAGE_TMP_DIR` is a project workspace; it is not forced into every
+    subprocess because WindNinja momentum/OpenFOAM is sensitive to `TMP`/`TEMP` redirection.
+  - `METEOFRANCE_API_KEY` — AROME (1.3 km) via the Météo-France API. Key/login/renewal:
+    [meteofrance_arome.md](meteofrance_arome.md). Stored in `.env` only (never committed);
+    validated offline at startup (popup on expiry).
 - `src/sillage/config.py` reads these and centralizes settings.
 
 ## Sanity check sequence

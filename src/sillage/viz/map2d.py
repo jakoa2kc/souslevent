@@ -29,14 +29,21 @@ BASEMAP_SOURCES = {
 }
 
 
-def add_basemap(ax, crs, source: str = "IGN plan", attribution: bool = False, zorder: int = 0):
+def add_basemap(ax, crs, source: str = "IGN plan", attribution: bool = False, zorder: int = 0,
+                zoom_adjust: int = 1):
     """Add a web-tile basemap under the current axes (reprojected to ``crs``).
 
     Needs network. Raises if the source is unknown or tiles can't be fetched (callers should
     fall back to the hillshade). ``crs`` is a rasterio/pyproj CRS or an "EPSG:xxxx" string.
+
+    ``zoom_adjust`` bumps contextily's auto-detected tile zoom by that many levels for a more
+    detailed basemap on a small crop (+1 ≈ one level finer; each level ~4× the tiles). Ignored
+    on contextily builds without the parameter.
     """
     if source not in BASEMAP_SOURCES:
         raise ValueError(f"Unknown basemap source {source!r}; have {list(BASEMAP_SOURCES)}")
+    import inspect
+
     import contextily as cx
 
     family, layer = BASEMAP_SOURCES[source]
@@ -44,7 +51,10 @@ def add_basemap(ax, crs, source: str = "IGN plan", attribution: bool = False, zo
     if layer is not None:
         provider = provider[layer]
     crs_str = crs.to_string() if hasattr(crs, "to_string") else str(crs)
-    cx.add_basemap(ax, crs=crs_str, source=provider, attribution=attribution, zorder=zorder)
+    kwargs = dict(crs=crs_str, source=provider, attribution=attribution, zorder=zorder)
+    if zoom_adjust and "zoom_adjust" in inspect.signature(cx.add_basemap).parameters:
+        kwargs["zoom_adjust"] = zoom_adjust
+    cx.add_basemap(ax, **kwargs)
 
 
 @dataclass

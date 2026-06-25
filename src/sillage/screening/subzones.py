@@ -20,8 +20,9 @@ from pathlib import Path
 
 import numpy as np
 
+from ..flow.windninja import format_run_failure, run_mass
 from ..terrain.dem import Dem, crop_dem, write_dem
-from .pass1 import find_speed_grid, load_speed_grid, run_mass
+from .pass1 import find_speed_grid, load_speed_grid
 
 
 def subzone_bboxes(
@@ -112,20 +113,42 @@ def subzone_speed_field(
     overlap_frac: float = 0.2,
     on_progress=None,
     cancel=None,
+    max_workers: int | None = None,
 ) -> np.ndarray:
     """Run the mass solver per sub-zone with its own wind, mosaic the speed fields.
 
     ``wind_at_center(x, y) -> (speed_ms, from_deg)`` supplies each tile's representative wind
     (AROME/Open-Meteo in production, synthetic in tests). Returns a full-DEM-grid speed field.
+
+    The per-tile solves are **independent**, so they run **concurrently** on a thread pool
+    (WindNinja is a subprocess — the GIL is released while it runs). ``max_workers`` defaults to
+    ~the CPU count (capped by tile count); each WindNinja run is limited to ``cpu // workers``
+    threads so the parallel tiles don't oversubscribe the CPU.
+
+    Robustness: a tile that fails in the parallel pass is **retried sequentially** at the end,
+    with no other run in flight — this rules out any cross-process contention (the cause of the
+    intermittent ``rc=-1``). Only a tile that fails even *alone* raises (with the full WindNinja
+    output). ``on_progress`` is reported from this thread; ``cancel`` stops the loop and
+    terminates in-flight runs.
     """
+    import os
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     work_root = Path(work_root)
     work_root.mkdir(parents=True, exist_ok=True)
     tiles = subzone_bboxes(dem, nx, ny, overlap_frac)
     n = len(tiles)
-    contributions = []
-    for i, (bbox, (cx, cy)) in enumerate(tiles):
+    if n == 0:
+        return assemble_mosaic(dem, [])
+
+    cpu = os.cpu_count() or 4
+    workers = max(1, min(n, cpu if max_workers is None else max_workers))
+    per_run_threads = max(1, cpu // workers)
+
+    def _solve(i, threads):
         if cancel is not None and cancel():
             raise RuntimeError("cancelled")
+        bbox, (cx, cy) = tiles[i]
         spd, drc = wind_at_center(cx, cy)
         half_w = (bbox[2] - bbox[0]) / 2.0
         half_h = (bbox[3] - bbox[1]) / 2.0
@@ -134,22 +157,46 @@ def subzone_speed_field(
         crop_path = work_root / f"tile_{i:02d}.tif"
         write_dem(crop, crop_path)
         work = work_root / f"tile_{i:02d}"
-
-        def _hp(pct, msg, i=i):
-            if on_progress is not None:
-                on_progress(int((i + pct / 100.0) / n * 100), f"zone {i + 1}/{n}: {msg}")
-
         run = run_mass(
             cli=cli, dem_path=str(crop_path), working_dir=str(work),
             wind_speed_ms=spd, wind_from_deg=drc, output_resolution_m=resolution_m,
-            vegetation=vegetation, on_progress=_hp, cancel=cancel,
+            vegetation=vegetation, num_threads=threads,
+            tmp_dir=work / "_wn_tmp", cancel=cancel,
         )
         if run.returncode not in (0, None):
-            raise RuntimeError(
-                f"sub-zone {i} mass failed rc={run.returncode}\n{run.stderr[-600:]}"
-            )
+            raise RuntimeError(format_run_failure(run, f"sub-zone {i} mass"))
         vel = find_speed_grid(work)
         if vel is None:
             raise RuntimeError(f"sub-zone {i}: no *_vel.asc in {work}")
-        contributions.append((bbox, load_speed_grid(vel)))
-    return assemble_mosaic(dem, contributions)
+        return bbox, load_speed_grid(vel)
+
+    contributions: list = [None] * n
+    done = 0
+    failed: list[int] = []
+    if on_progress is not None:
+        on_progress(0, f"0/{n} zones (parallèle ×{workers})…")
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(_solve, i, per_run_threads): i for i in range(n)}
+        for fut in as_completed(futs):
+            i = futs[fut]
+            try:
+                contributions[i] = fut.result()
+                done += 1
+                if on_progress is not None:
+                    on_progress(int(done / n * 100), f"{done}/{n} zones (parallèle ×{workers})")
+            except Exception:
+                if cancel is not None and cancel():
+                    for f in futs:
+                        f.cancel()
+                    raise
+                failed.append(i)  # retry alone, after the pool drains
+
+    for i in sorted(failed):  # sequential fallback: no concurrency -> no contention
+        if cancel is not None and cancel():
+            raise RuntimeError("cancelled")
+        if on_progress is not None:
+            on_progress(int(done / n * 100), f"reprise séquentielle de la zone {i + 1}/{n}…")
+        contributions[i] = _solve(i, cpu)  # full threads, alone; raises if it truly fails
+        done += 1
+
+    return assemble_mosaic(dem, [c for c in contributions if c is not None])

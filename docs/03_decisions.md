@@ -369,10 +369,223 @@ resolution.
   refinement.
 - The resolution presets are **honest for IGN**; for terrarium, finer than ~30 m is
   interpolation (the UI labels stay approximate).
-- **Native-grid fetch (2026-06-24):** the elevation WMS only returns artifact-free data at
-  its **~5 m native grid** — off-grid requests **stripe vertically** (duplicated rows that
-  show as "steps" in the hillshade and propagate to WindNinja). So `prepare_dem_ign` fetches
-  at ~5 m (tiled if needed) and **block-averages** to the target; heavier fetch, clean result.
+- **De-stripe by fetching near native + ×5 average (revised 2026-06-25):** off-grid requests
+  **stripe** (the WMS nearest-neighbour downsamples its **~1 m** true native to the target →
+  duplicated rows that show as "steps" and propagate to WindNinja). Averaging removes it, but
+  only at **~×5**: clean from 25 m (= 5 m fetch ×5), still striped at 5/10 m when the factor was
+  <5. So `prepare_dem_ign` fetches at **`max(1 m, target/5)`** (≈native) and **block-averages
+  ×5** — 5 m ⇒ 1 m fetch, 10 m ⇒ 2 m, 25 m ⇒ 5 m, 50 m ⇒ 10 m. Heavier fetch at fine targets,
+  clean at every preset. *(Supersedes the earlier "5 m native / ×1–×10" note.)*
+- IHM presets stay **5 / 10 / 25 / 50 m**. On the **worldwide** source real detail floors at
+  **~30 m** (SRTM class; terrarium zoom capped at z13 ≈ 13–19 m grid), so 5/10 m there only
+  upsample — the "Monde" label says ~30 m.
+
+---
+
+## ADR-0015 — Pass-2 selection by rectangle, parameters on the créneau tab, 3D tab display-only
+
+**Status:** accepted
+
+**Context.** Pass-2 was launched by a **single left-click** ("hotspot") on the Pass-1 result
+map, which cropped a **fixed ±2.5 km** square; the mesh-quality preset and a "load a case"
+control lived on the **3D (analyse) tab**. This split the act of *defining* an analysis (where
++ how) across two tabs, made the analysis window non-adjustable, and was inconsistent with the
+**rectangle** AOI selection already used for the flight zone (ADR-0012).
+
+**Decision.** The Pass-2 analysis window is now drawn as a **rectangle on the créneau map**
+(toggle **"▭ Définir la zone Pass-2"** → drag a rectangle; pan/zoom otherwise), exactly mirroring
+the Pass-1 AOI gesture. The **mesh-quality preset (ADR-0008)** and the **"▶ Lancer l'analyse
+Pass-2 (3D)"** button move onto the **créneau tab** — so *define + parameterize + launch* happen
+in one place, and the user **returns there to relaunch** with other parameters. The rectangle
+sets the crop: centre = its centre, half-width = max(½ width, ½ height) (square covering it,
+floored at `PASS2_MIN_HALF_WIDTH_M`). The **3D (analyse) tab becomes display-only** — just the
+embedded viewport showing the **last** Pass-2 result; the "load a case" control is removed (for
+now). The rectangle persists across hour-scrub/basemap re-renders and is cleared when a new zone
+DEM is prepared (old UTM coords are meaningless).
+
+**Consequences.**
+- One coherent "local analysis" gesture; the window is **user-sized**, not fixed at 5 km.
+- `_handle_hotspot` and `on_load_pass2`/`case_edit` are gone; `_launch_pass2_at` takes an
+  explicit `half_m`. The Pass-2 **BC wind is unchanged** (`_pass2_wind_at` at the rectangle
+  centre — Pass-1 field sampled upstream, else the créneau wind).
+- No in-session way to reload a *previous* case without recomputing (acceptable "pour le
+  moment"; easy to re-add a loader later).
+
+**Note — Pass-2 wind source (recurring confusion, reaffirmed).** Pass-2's constant upstream
+wind is **NOT AROME 1.3 km**. It is the **Open-Meteo crest wind (~11 km effective)**, either
+**downscaled by the Pass-1 WindNinja field sampled just upstream** of the feature, or the
+créneau wind at domain centre. The "local" character comes from the **position + crest-altitude
+sampling** and **WindNinja terrain downscaling**, not from a finer forecast. Likewise Pass-1
+**wind sub-zones are not 1.3 km**: the forecast we have is ~11 km, so sub-11 km tiles would
+sample the **same** value (zero added spatial information) — the intra-tile detail comes from
+WindNinja downscaling on the terrain. The 4×4 sub-zone cap (ADR-0007) is only a *secondary*
+compute limit. Real AROME 1.3 km would need the **Météo-France GRIB API (key)** — not wired.
+
+---
+
+## ADR-0016 — AROME (Météo-France API) as the fine forecast source; key validated offline
+
+**Status:** accepted (key + validation now; GRIB ingestion later)
+
+**Context.** Pass-1 wind is Open-Meteo (~11 km effective); finer spatial wind needs a
+convection-permitting model. **AROME (1.3 km)** is the natural fit over France but requires a
+**Météo-France API key** (free, account-based) — unlike the keyless ~11 km path. The project
+expects an **apiKey** subscribed to AROME (`/public/arome/1.0`). The key is a **JWT**: expiry
+(`exp`) and subscribed APIs are readable **offline** in its payload.
+
+**Decision.** Adopt AROME as the fine forecast source. **Now:** store the key only in **`.env`**
+(gitignored, `METEOFRANCE_API_KEY`, already read by `config.py`) — *not* committed — and add
+`wind/meteofrance.check_arome_key()` that validates it **offline** (decode JWT → ok / missing /
+malformed / expired / not_subscribed / expiring_soon). The IHM checks it at startup
+(`MainWindow._check_meteofrance_key`, deferred via `QTimer.singleShot` so it never blocks
+headless tests): a *missing* key is silent (AROME optional, Open-Meteo default), a valid key is
+a status-bar note, and an **invalid/expired/expiring** key raises a **popup** carrying the
+renewal procedure. **Later:** a GRIB2 provider (cfgrib/eccodes) feeding the criblage
+(roadmap M4). The renewal procedure is documented in **docs/support/meteofrance_arome.md**.
+
+**Consequences.**
+- The secret stays out of git (only `.env`); optional account hints also stay local via
+  `METEOFRANCE_ACCOUNT_LOGIN` / `METEOFRANCE_ACCOUNT_EMAIL`.
+- Offline validation = no network at startup, deterministic, unit-testable (forged JWTs).
+- The popup + doc make renewal self-service without committing account details.
+- A *signature* is not verified (we only read claims) — acceptable: the gateway enforces auth;
+  we only need to detect "your key won't work / is about to stop".
+
+---
+
+## ADR-0017 — Sub-zone Pass-1 solves run in parallel (thread pool, CPU-capped per run)
+
+**Status:** accepted
+
+**Context.** The spatial refine (ADR-0007) runs one WindNinja **mass** solve per sub-zone,
+nx×ny of them (up to 4×4). It did so **sequentially**, so a 3×3 / 4×4 refine felt very slow
+even though each tile is a few seconds. The tiles are **independent** (own crop, own wind, own
+work dir), and WindNinja is an **external subprocess** (Python's GIL is released while it runs).
+
+**Decision.** `screening.subzones.subzone_speed_field` now runs the per-tile solves on a
+**`ThreadPoolExecutor`**. `max_workers` defaults to ~`os.cpu_count()` (capped by tile count);
+each WindNinja run is limited to **`cpu // workers`** threads (new `run_mass(num_threads=…)` →
+`--num_threads`, as exposed by WindNinja 3.12) so parallel tiles **don't oversubscribe** the CPU. Progress is reported
+from the pooling thread as tiles complete (kept single-threaded); `cancel` both stops the loop
+and terminates in-flight runs (each `run_mass` polls `cancel`). The mosaic/blending step is
+unchanged.
+
+**Consequences.**
+- ~`workers`× faster refine (≈ the number of cores, minus the per-run thread split); a 4×4 on
+  an 8-core box drops from ~16 sequential solves to ~4 waves.
+- WindNinja mass is light, so even with the per-run thread cap the parallelism dominates.
+- Thread-safety holds because tiles touch disjoint files and only read the shared DEM array.
+- The momentum Pass-2 is **not** parallelized here (single feature, one solve); this is Pass-1
+  screening only.
+- **Concurrent runs need isolation (2026-06-25):** parallel tiles failed intermittently with
+  `rc=-1` (4294967295), sometimes with "ERROR 1: HTTP error code : 500", sometimes not. Two
+  fixes in `flow.windninja._subprocess_env`: (1) **`PROJ_NETWORK=OFF`** stops PROJ/GDAL fetching
+  datum grids from cdn.proj.org (the 500s); (2) the **real** root cause was a **shared temp dir**
+  — concurrent WindNinja/GDAL processes raced on same-named scratch files. Each mass tile now
+  gets an **isolated temp dir** (`<tile workdir>/_wn_tmp` via `TMP`/`TEMP`/`TMPDIR`/`CPL_TMPDIR`).
+  Momentum/OpenFOAM keeps the normal system temp environment because project temp redirection can
+  trigger access violations on this Windows build. Each tile also **retries once**.
+
+---
+
+## ADR-0018 — Pass-2 re-fetches its window at IGN 5 m (per-feature fine DEM)
+
+**Status:** accepted (default on; toggle in the UI)
+
+**Context.** Pass-2's 3D terrain was a **crop of the prepared zone MNT**, so its detail equalled
+the zone resolution the user picked (5/10/25/50 m — ADR-0014). At the default 25 m the 3D was
+25 m, never the IGN 5 m the source can give. Re-fetching is cheap because the Pass-2 window is
+**small** (a few km).
+
+**Decision.** On Pass-2 launch, by default **re-fetch just the rectangle at IGN 5 m native**
+(`terrain.acquire.prepare_dem(..., target_res_m=5.0, source="auto")`; terrarium fallback outside
+France) and run the momentum solve on that, instead of cropping the zone MNT. The window's
+lat/lon comes from `bbox_latlon_from_utm_window(dem.crs, cx, cy, half_m)`. A **"MNT fin 5 m
+(IGN)"** checkbox (default on) lets the user keep the old crop (faster / offline). The crop's
+**own CRS** is read back and passed to the 3D drape (so the basemap aligns even if the fine
+fetch lands in a different UTM zone). Fetch progress is folded into the first 25 % of the bar.
+
+**Consequences.**
+- Best-available 3D terrain regardless of the zone resolution; honest IGN 5 m over France.
+- One extra network fetch per Pass-2 (small area, fast); the checkbox covers offline/speed.
+- The **momentum mesh** (ADR-0008) still caps the *effective* 3D resolution — a fine DEM helps
+  the STL/terrain detail but the solved field is as fine as the mesh allows.
+
+---
+
+## ADR-0019 — Optional 3D view of the Pass-1 screening (2D map stays for selection)
+
+**Status:** accepted
+
+**Context.** The créneau tab shows Pass-1 screening on a flat matplotlib map. A 3D drape on the
+real relief reads much better for a pilot, but that **2D map is also the surface for the Pass-2
+rectangle selection** (ADR-0015) and the hour scrubbing — so a pure 3D replacement would break a
+core interaction.
+
+**Decision.** Add a **"Vue 3D" toggle** (a `QStackedWidget`: the matplotlib map on page 0, a lazy
+`pyvistaqt` viewport on page 1). 2D stays the default and the place to draw the Pass-2 rectangle;
+3D is a **view** of the displayed hour — the zone terrain draped with the basemap + the hazard
+field as a translucent inferno overlay (`viz.volume3d.populate_pass1_3d`, reusing the corrected
+basemap drape), with per-zone wind arrows and a north arrow. Scrubbing hours / changing the
+basemap re-renders 3D while **keeping the camera**. The 3D viewport is created on first toggle
+(no GL cost otherwise).
+
+**Consequences.**
+- One screening, two reads; selection and scrubbing keep working in 2D.
+- Reuses the Pass-2 3D building blocks (drape, arrows) — the basemap-orientation fix and the
+  texture approach carry over (no StructuredGrid scalar-ordering pitfalls).
+- A second embedded `QtInteractor` (créneau + analyse tabs); acceptable GL cost, both lazy.
+
+---
+
+## ADR-0020 — Grow the prepared DEM by the edge-mask buffer so results cover the whole zone
+
+**Status:** accepted
+
+**Context.** The screening masks a ~1500 m border (`mask_edge_buffer`) to drop WindNinja
+crop-edge artifacts, so the valid hazard ended up **noticeably smaller than the drawn zone** —
+candidate results were missing near the edges the user selected.
+
+**Decision.** "Valider la zone" now **grows the fetched bbox by `EDGE_BUFFER_M` (= the mask
+width, 1500 m) on every side**, runs the criblage on the grown DEM, and the masking then trims
+exactly that buffer — so the **valid area == the drawn zone**. The 2D view is **cropped back to
+the selection** (`_aoi_inner_extent`, the DEM bounds minus the buffer) so the masked margin isn't
+shown; "reset view" and the wind-arrow sizing use that inner extent. The cache key carries a
+`_b1500` marker (old un-buffered DEMs aren't reused).
+
+**Consequences.**
+- Candidate results cover the full selection; the buffer is computed but hidden.
+- Slightly larger fetch + compute per zone (~1.5 km margin); fine for typical flying areas, and
+  a very small zone (margin would consume it) keeps the full view.
+- Pass-2 crops near the zone edge get real terrain context from the buffer instead of nodata.
+
+---
+
+## ADR-0021 — Pass-2 solved on a buffered domain; rotor clipped back to the drawn zone
+
+**Status:** accepted
+
+**Context.** A lee/rotor reaching a **lateral domain boundary** (the downwind edge — east for a
+west wind, north for a south wind, …) gets deflected **up** by the outlet BC, so the rotor seems
+to "climb the map edge" (a BC artifact). Clipping that frame in the viz alone would eat into the
+**drawn zone** if the real lee reached the edge — same problem the Pass-1 edge buffer solved
+(ADR-0020).
+
+**Decision.** The momentum solve runs on the drawn rectangle **grown by `PASS2_EDGE_BUFFER_M`
+(700 m)** so the lateral boundaries sit away from the feature; the crop (or the IGN 5 m re-fetch)
+uses the buffered window. The 3D rotor is then **clipped back to the drawn zone**
+(`aoi_bounds` → `volume3d._clip_domain_boundary`), so the boundary artifacts (which live in the
+buffer) are dropped and the displayed result == the selected zone. `_clip_domain_boundary` also
+trims the top lid; without `aoi_bounds` (standalone/loaded scenes) it falls back to a fixed
+lateral-margin frame.
+
+**Consequences.**
+- The rotor fills the drawn zone, free of the downwind-edge "climbing" artifact, at any wind
+  direction (all four lateral edges handled).
+- Slightly larger momentum domain (+700 m/side) → a bit more compute (and the same `mesh_count`
+  spread over more area); fine for the small Pass-2 windows.
+- The terrain still shows the buffered context; only the rotor is clipped to the zone.
+- A genuinely taller/wider need (very large lee) would still want a larger drawn zone.
 
 ---
 

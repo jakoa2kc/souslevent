@@ -84,7 +84,10 @@ def _drape_basemap(plotter, terrain, crs, source: str) -> bool:
         if layer is not None:
             prov = prov[layer]
         img, _ext = cx.bounds2img(w, s, e, n, source=prov, ll=True)
-        img = np.ascontiguousarray(img[::-1, :, :3])  # flip so row 0 -> south (v=0)
+        # Keep the tile mosaic north-up (row 0 = north): with texture_map_to_plane below,
+        # VTK maps array row 0 to the north (point_v) edge, so NO vertical flip — flipping
+        # renders the basemap (and its text) upside down. Verified by a top-down drape test.
+        img = np.ascontiguousarray(img[:, :, :3])
         tex = pv.numpy_to_texture(img)
         terrain.texture_map_to_plane(
             origin=(xmin, ymin, 0.0), point_u=(xmax, ymin, 0.0), point_v=(xmin, ymax, 0.0),
@@ -93,6 +96,113 @@ def _drape_basemap(plotter, terrain, crs, source: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def _terrain_mesh(dem, lift: float = 0.0):
+    """A PyVista StructuredGrid from a north-up DEM (row 0 = north), optionally lifted in Z."""
+    import pyvista as pv
+
+    z = np.array(dem.elevation, dtype="float64")
+    if not np.isfinite(z).all():
+        fill = float(np.nanmin(z)) if np.isfinite(z).any() else 0.0
+        z = np.where(np.isfinite(z), z, fill)
+    left, bottom, right, top = dem.bounds
+    ny, nx = z.shape
+    xs = np.linspace(left, right, nx)
+    ys = np.linspace(top, bottom, ny)  # row 0 -> north (top)
+    xx, yy = np.meshgrid(xs, ys)
+    return pv.StructuredGrid(xx, yy, z + lift)
+
+
+def _hazard_texture_image(hazard):
+    """RGBA image (row 0 = north) of the hazard field: inferno colour with alpha ∝ hazard, fully
+    transparent where masked/zero so the draped basemap shows through outside danger zones."""
+    import matplotlib
+
+    h = np.array(hazard, dtype="float64")
+    finite = np.isfinite(h)
+    hc = np.clip(np.where(finite, h, 0.0), 0.0, 1.0)
+    rgba = matplotlib.colormaps["inferno"](hc)
+    rgba[..., 3] = np.where(finite, hc, 0.0) * 0.85
+    return (rgba * 255).astype("uint8")
+
+
+def _add_north_arrow(plotter, terrain) -> None:
+    import pyvista as pv
+
+    b = terrain.bounds
+    dx, dy, dz = b[1] - b[0], b[3] - b[2], b[5] - b[4]
+    length = 0.16 * min(dx, dy)
+    base = (b[0] + 0.10 * dx, b[2] + 0.10 * dy, b[5] + 0.20 * max(dz, length))
+    arrow = pv.Arrow(start=base, direction=(0.0, 1.0, 0.0), scale=length,
+                     tip_length=0.28, tip_radius=0.09, shaft_radius=0.035)
+    plotter.add_mesh(arrow, color="#222222")
+    plotter.add_point_labels([(base[0], base[1] + length * 1.15, base[2])], ["N"], font_size=12,
+                             text_color="black", shape_color="white", shape_opacity=0.55,
+                             always_visible=True)
+
+
+def _add_wind_arrows_3d(plotter, terrain, winds) -> None:
+    """One wind arrow per WindNinja zone, sitting above the terrain, coloured by speed (turbo)."""
+    import matplotlib
+    import pyvista as pv
+    from matplotlib.colors import Normalize
+    from scipy.spatial import cKDTree
+
+    tpts = np.asarray(terrain.points)
+    tree = cKDTree(tpts[:, :2])
+    b = terrain.bounds
+    side = max(1, round(len(winds) ** 0.5))
+    length = min(0.14 * min(b[1] - b[0], b[3] - b[2]),
+                 0.42 * min(b[1] - b[0], b[3] - b[2]) / side)
+    lift = 0.04 * (b[5] - b[4]) + 10.0
+    norm = Normalize(0.0, 20.0)
+    cmap = matplotlib.colormaps["turbo"]
+    for x, y, spd, drc in winds:
+        zi = float(tpts[tree.query([x, y])[1], 2])
+        blow = np.deg2rad((float(drc) + 180.0) % 360.0)
+        d = (float(np.sin(blow)), float(np.cos(blow)), 0.0)
+        start = (x - d[0] * length / 2, y - d[1] * length / 2, zi + lift)
+        arrow = pv.Arrow(start=start, direction=d, scale=length,
+                         tip_length=0.30, tip_radius=0.10, shaft_radius=0.04)
+        plotter.add_mesh(arrow, color=cmap(norm(float(spd)))[:3])
+
+
+def populate_pass1_3d(plotter, dem, hazard=None, winds=None, crs=None,
+                      basemap_source: str = "IGN plan"):
+    """Pass-1 screening in 3D: the zone terrain draped with a basemap, the hazard field (if
+    given) as a translucent coloured overlay (candidate zones), per-zone wind arrows and a north
+    arrow. The 3D twin of viz.map2d, on the real relief. ``hazard=None`` shows the bare relief
+    (e.g. before a criblage). The caller sets the camera (no view reset here, to keep it on
+    hour-scrub re-renders)."""
+    import pyvista as pv
+
+    from .map2d import DISCLAIMER
+
+    terrain = _terrain_mesh(dem)
+    if not (crs is not None and _drape_basemap(plotter, terrain, crs, basemap_source)):
+        terrain["elevation_m"] = terrain.points[:, 2]
+        plotter.add_mesh(terrain, scalars="elevation_m", cmap="gist_earth",
+                         show_scalar_bar=False, reset_camera=False)
+
+    if hazard is not None:
+        b = terrain.bounds
+        overlay = _terrain_mesh(dem, lift=max(0.012 * (b[5] - b[4]), 8.0))
+        tex = pv.numpy_to_texture(_hazard_texture_image(hazard))
+        ob = overlay.bounds
+        overlay.texture_map_to_plane(
+            origin=(ob[0], ob[2], 0.0), point_u=(ob[1], ob[2], 0.0), point_v=(ob[0], ob[3], 0.0),
+            inplace=True)
+        plotter.add_mesh(overlay, texture=tex, reset_camera=False)
+
+    if winds:
+        _add_wind_arrows_3d(plotter, terrain, winds)
+    _add_north_arrow(plotter, terrain)
+
+    plotter.add_text("Pass 1 — zones candidates (drapé 3D)", font_size=9)
+    plotter.add_text(DISCLAIMER, position="lower_left", font_size=8)
+    plotter.show_axes()
+    return plotter
 
 
 def _add_rotor(plotter, rev, terrain) -> None:
@@ -110,11 +220,93 @@ def _add_rotor(plotter, rev, terrain) -> None:
 
     cmap = LinearSegmentedColormap.from_list("yrp", ["#ffff00", "#ff2a00", "#7a00b0"])
     lo, hi = np.nanpercentile(hagl, 5), np.nanpercentile(hagl, 95)
-    rgb = cmap(np.clip(Normalize(lo, max(hi, lo + 1e-6))(hagl), 0, 1))[:, :3]
+    hi = max(hi, lo + 1e-6)
+    rgb = cmap(np.clip(Normalize(lo, hi)(hagl), 0, 1))[:, :3]
     imax = max(float(np.nanpercentile(intensity, 95)), 1e-6)
     alpha = 0.12 + 0.85 * np.clip(intensity / imax, 0.0, 1.0)  # weak transparent -> strong opaque
     rev.cell_data["rotor_rgba"] = (np.c_[rgb, alpha] * 255).astype(np.uint8)
     plotter.add_mesh(rev, scalars="rotor_rgba", rgba=True)
+
+    # Legend for the colour -> height-above-ground (m) mapping. The rotor itself is drawn with
+    # raw RGBA (colour=height, opacity=intensity), which carries no scalar bar, so add a tiny
+    # invisible proxy carrying the [lo, hi] range + the same colormap to render the bar.
+    import pyvista as pv
+
+    seed = centers[:2] if len(centers) >= 2 else np.zeros((2, 3))
+    proxy = pv.PolyData(np.asarray(seed, dtype="float64"))
+    proxy["Hauteur sol (m)"] = np.array([lo, hi], dtype="float64")
+    plotter.add_mesh(
+        proxy, scalars="Hauteur sol (m)", cmap=cmap, clim=(lo, hi), style="points",
+        point_size=1.0, opacity=0.0, reset_camera=False, show_scalar_bar=True,
+        scalar_bar_args=dict(title="Hauteur sol (m)", n_labels=5, fmt="%.0f", vertical=True,
+                             title_font_size=14, label_font_size=12, position_x=0.86,
+                             position_y=0.30, width=0.10, height=0.45),
+    )
+
+
+def _clip_domain_boundary(rev, mesh, aoi_bounds=None, lateral_frac: float = 0.08,
+                          lid_frac: float = 0.12):
+    """Drop reversed-flow cells hugging the momentum domain's boundaries.
+
+    The solver's boundaries induce spurious reversed/stagnant flow: chiefly at the **lateral
+    edges** — a lee reaching the N/S/E/W boundary gets deflected UP, so the rotor seems to
+    "climb the map edge" (the user's "ça bute contre le bord") — and a little under the top lid.
+    When ``aoi_bounds`` = (xmin, xmax, ymin, ymax) is given (the drawn zone, which the momentum
+    domain was buffered around), keep only cells **inside the drawn zone** — the boundary
+    artifacts live in the buffer outside it. Otherwise fall back to a fixed ``lateral_frac``
+    margin. Always drops the top ``lid_frac``. Returns the input unchanged if clipping empties
+    it (don't blank the view)."""
+    if not rev.n_cells:
+        return rev
+    b = mesh.bounds  # xmin, xmax, ymin, ymax, zmin, zmax
+    if aoi_bounds is not None:
+        x0, x1, y0, y1 = aoi_bounds
+    else:
+        mx, my = lateral_frac * (b[1] - b[0]), lateral_frac * (b[3] - b[2])
+        x0, x1, y0, y1 = b[0] + mx, b[1] - mx, b[2] + my, b[3] - my
+    lid = b[5] - lid_frac * (b[5] - b[4])
+    c = rev.cell_centers().points
+    keep = ((c[:, 0] > x0) & (c[:, 0] < x1) & (c[:, 1] > y0) & (c[:, 1] < y1) & (c[:, 2] < lid))
+    if not keep.any():
+        return rev
+    out = rev.extract_cells(np.nonzero(keep)[0])
+    return out if out.n_cells else rev
+
+
+def _add_compass(plotter, terrain, mean_flow_dir, wind_speed_ms=None, wind_from_deg=None):
+    """Add an info compass above the terrain: a NORTH arrow (+Y, dark) and a LOCAL-WIND arrow
+    (blue, pointing where the wind blows TO) labelled with speed + meteo direction."""
+    import pyvista as pv
+
+    b = terrain.bounds  # xmin, xmax, ymin, ymax, zmin, zmax
+    dx, dy, dz = b[1] - b[0], b[3] - b[2], b[5] - b[4]
+    length = 0.22 * min(dx, dy)
+    base = (b[0] + 0.14 * dx, b[2] + 0.14 * dy, b[5] + 0.30 * max(dz, length))
+
+    pts, labels = [], []
+    north = pv.Arrow(start=base, direction=(0.0, 1.0, 0.0), scale=length,
+                     tip_length=0.28, tip_radius=0.09, shaft_radius=0.035)
+    plotter.add_mesh(north, color="#222222")
+    pts.append((base[0], base[1] + length * 1.15, base[2]))
+    labels.append("N")
+
+    wd = np.asarray(mean_flow_dir, dtype="float64") if mean_flow_dir is not None else None
+    if wd is not None and np.linalg.norm(wd) > 1e-9:
+        wd = wd / np.linalg.norm(wd)
+        wind = pv.Arrow(start=base, direction=tuple(wd), scale=length,
+                        tip_length=0.28, tip_radius=0.09, shaft_radius=0.035)
+        plotter.add_mesh(wind, color="#1565c0")
+        txt = "vent"
+        if wind_speed_ms is not None:
+            txt = f"vent {wind_speed_ms:.0f} m/s"
+            if wind_from_deg is not None:
+                txt += f" · {wind_from_deg:.0f}°"
+        pts.append((base[0] + wd[0] * length * 1.15, base[1] + wd[1] * length * 1.15,
+                    base[2] + wd[2] * length * 1.15))
+        labels.append(txt)
+
+    plotter.add_point_labels(pts, labels, font_size=12, text_color="black",
+                             shape_color="white", shape_opacity=0.55, always_visible=True)
 
 
 def populate_plotter(
@@ -127,10 +319,16 @@ def populate_plotter(
     turbulence_threshold: float = 0.2,
     crs=None,
     basemap_source: str = "IGN plan",
+    wind_speed_ms=None,
+    wind_from_deg=None,
+    aoi_bounds=None,
 ):
     """Add the Pass-2 scene to an EXISTING plotter (standalone Plotter or embedded
     QtInteractor). Terrain is draped with a basemap (if ``crs`` is given) instead of an
     elevation colormap; the rotor is coloured by height-above-ground with opacity ∝ intensity.
+    A north arrow + a local-wind arrow (speed/direction) are added as orientation cues.
+    ``aoi_bounds`` (xmin, xmax, ymin, ymax) clips the rotor back to the drawn zone (the solve was
+    buffered around it), keeping the boundary artifacts out of the result.
     """
     mesh = ofr.read_case(case_dir)
     terrain = ofr.read_terrain_stl(case_dir)
@@ -140,6 +338,7 @@ def populate_plotter(
             terrain["elevation_m"] = terrain.points[:, 2]
             plotter.add_mesh(terrain, scalars="elevation_m", cmap="gist_earth",
                              show_scalar_bar=False)
+        _add_compass(plotter, terrain, mean_flow_dir, wind_speed_ms, wind_from_deg)
 
     if show_streamlines:
         lines = _seed_streamlines(mesh, mean_flow_dir)
@@ -150,6 +349,9 @@ def populate_plotter(
     if show_reversed_flow:
         mesh["along_flow"] = ofr.along_flow_component(mesh, mean_flow_dir)
         rev = mesh.threshold(value=0.0, scalars="along_flow", invert=True)
+        # Drop the spurious rotor hugging the domain boundaries: clip to the drawn zone (the
+        # solve was buffered, so the downwind-edge artifact is outside it), + the lid.
+        rev = _clip_domain_boundary(rev, mesh, aoi_bounds=aoi_bounds)
         if rev.n_cells and terrain is not None and terrain.n_points:
             _add_rotor(plotter, rev, terrain)
         elif rev.n_cells:
@@ -180,6 +382,9 @@ def build_scene(
     turbulence_threshold: float = 0.2,
     crs=None,
     basemap_source: str = "IGN plan",
+    wind_speed_ms=None,
+    wind_from_deg=None,
+    aoi_bounds=None,
     off_screen: bool = False,
 ):
     """Assemble a standalone PyVista plotter for one Pass-2 feature. Returns the Plotter.
@@ -194,6 +399,7 @@ def build_scene(
         show_streamlines=show_streamlines, show_reversed_flow=show_reversed_flow,
         show_turbulence=show_turbulence, turbulence_threshold=turbulence_threshold,
         crs=crs, basemap_source=basemap_source,
+        wind_speed_ms=wind_speed_ms, wind_from_deg=wind_from_deg, aoi_bounds=aoi_bounds,
     )
 
 

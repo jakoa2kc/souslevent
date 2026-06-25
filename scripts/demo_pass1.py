@@ -66,16 +66,17 @@ def main(dem_path, wind_from_deg, wind_speed_ms, resolution_m, run_windninja,
     speed_grid = None
     if run_windninja:
         click.echo("[3/4] Running WindNinja mass solver ...")
-        from sillage.flow.windninja import run_mass
+        from sillage.flow.windninja import format_run_failure, run_mass
+        work_dir = cfg.cache_dir / "pass1_demo"
         run = run_mass(
             cli=cfg.windninja_cli, dem_path=str(Path(dem_path).resolve()),
-            working_dir=str(cfg.cache_dir / "pass1_demo"),
+            working_dir=str(work_dir),
             wind_speed_ms=wind_speed_ms, wind_from_deg=wind_from_deg,
             output_resolution_m=resolution_m,
+            tmp_dir=work_dir / "_tmp",
         )
         if run.returncode not in (0, None):
-            click.echo(f"      WindNinja failed (rc={run.returncode}). "
-                       f"See docs/support/troubleshooting.md.\n{run.stderr[:500]}")
+            click.echo(format_run_failure(run, "WindNinja mass"))
         else:
             speed_grid = _load_speed_grid(run.output_paths, dem.shape)
             click.echo(f"      outputs: {[p.name for p in run.output_paths]}")

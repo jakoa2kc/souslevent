@@ -53,12 +53,6 @@ def _resolve_under(base: Path, path: str | Path, legacy_prefix: str) -> Path:
     return (base / raw).resolve()
 
 
-def _pin_project_temp_dir(temp_dir: Path) -> None:
-    """Route Python and child-process temporary files to the project data root."""
-    for name in ("TMP", "TEMP", "TMPDIR"):
-        os.environ[name] = str(temp_dir)
-
-
 @dataclass(frozen=True)
 class Config:
     """Resolved runtime configuration."""
@@ -98,7 +92,6 @@ def load_config() -> Config:
 
     for path in (generated_root, cache, output, temp):
         path.mkdir(parents=True, exist_ok=True)
-    _pin_project_temp_dir(temp)
 
     return Config(
         windninja_cli=_get("WINDNINJA_CLI", "WindNinja_cli"),

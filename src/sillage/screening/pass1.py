@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..flow.windninja import run_mass
+from ..flow.windninja import format_run_failure, run_mass
 from ..terrain.dem import Dem
 from . import indicator as ind
 
@@ -50,7 +50,7 @@ def find_speed_grid(work_dir: Path) -> Path | None:
     work_dir = Path(work_dir)
     if not work_dir.exists():
         return None
-    matches = sorted(work_dir.glob("*_vel.asc"))
+    matches = sorted(work_dir.glob("*_vel.asc"), key=lambda p: p.stat().st_mtime, reverse=True)
     return matches[0] if matches else None
 
 
@@ -59,7 +59,7 @@ def find_direction_grid(work_dir: Path) -> Path | None:
     work_dir = Path(work_dir)
     if not work_dir.exists():
         return None
-    matches = sorted(work_dir.glob("*_ang.asc"))
+    matches = sorted(work_dir.glob("*_ang.asc"), key=lambda p: p.stat().st_mtime, reverse=True)
     return matches[0] if matches else None
 
 
@@ -164,14 +164,12 @@ def hourly_indicator(
             wind_from_deg=wind_from_deg,
             output_resolution_m=resolution_m,
             vegetation=vegetation,
+            tmp_dir=work_dir / "_tmp",
             on_progress=on_progress,
             cancel=cancel,
         )
         if run.returncode not in (0, None):
-            raise RuntimeError(
-                f"WindNinja mass failed rc={run.returncode}\n"
-                f"STDERR tail:\n{run.stderr[-1000:]}"
-            )
+            raise RuntimeError(format_run_failure(run, "WindNinja mass"))
         speed_path = find_speed_grid(work_dir)
         if speed_path is None:
             raise RuntimeError(f"WindNinja succeeded but no *_vel.asc in {work_dir}")

@@ -683,6 +683,275 @@ streaming-progress assertion for the new phase emission).
 
 ---
 
+## Entry 42 — WindNinja error-box review: real `num_threads`, temp isolation, clearer failures  (2026-06-25)
+
+**What changed.**
+- **Root cause confirmed against the installed binary:** WindNinja 3.12 exposes
+  `--num_threads`, not `--number_of_threads`. The wrapper and tests now use the real flag.
+  This directly fixes spatial refine/sub-zone error boxes caused by "unknown option
+  number_of_threads".
+- **Momentum temp environment:** `load_config()` no longer mutates global `TMP`/`TEMP`/`TMPDIR`.
+  `_subprocess_env(tmp_dir=None)` restores the system temp-related variables captured at import
+  time, so Pass-2/OpenFOAM keeps its normal temp environment. Concurrent mass sub-zones still
+  opt into isolated per-run temp dirs (`<tile workdir>/_wn_tmp`) plus isolated PROJ cache.
+- **Stale output protection:** Pass-1 speed/direction grid discovery now prefers the newest
+  WindNinja ASCII raster, and IHM workdirs include the active DEM stem so different AOIs no
+  longer share the same hourly/refine/sub-zone cache.
+- **Diagnostics:** WindNinja failures now include rc, cwd, command, stderr tail, and stdout tail
+  via `format_run_failure(...)`; the IHM Pass-2 error box no longer drops stderr.
+- **DEM fallback:** explicit `source="ign"` and user cancellation are no longer swallowed by the
+  automatic IGN -> world fallback.
+
+**Result.** Tests: `.\.venv\Scripts\python.exe -m pytest -q` -> **58 passed**.
+`WindNinja_cli --help` shows `--num_threads` and not `--number_of_threads`. Probes to keep in
+mind: `_subprocess_env()` with no `tmp_dir` must not leak project TMP markers, while
+`_subprocess_env(tmp)` must set TMP/TEMP/TMPDIR/CPL_TMPDIR and `PROJ_USER_WRITABLE_DIRECTORY`
+to that run directory.
+
+---
+
+## Entry 41 — Pass-2: kill the rotor "climbing the map edge" — buffered solve + clip to the drawn zone (ADR-0021)  (2026-06-25)
+
+**What changed.** A lee/rotor reaching a **lateral domain boundary** (the downwind edge — east
+for a west wind, north for a south wind) is deflected up by the outlet BC and "climbs the map
+edge" (a BC artifact; I first mis-read it as an altitude/lid issue). Two-part fix:
+- **Buffered solve (ADR-0021):** momentum runs on the drawn rectangle **grown by
+  `PASS2_EDGE_BUFFER_M` = 700 m** (crop + IGN 5 m re-fetch use the buffered window), so the
+  boundaries sit away from the feature.
+- **Clip back to the drawn zone:** `volume3d._clip_domain_boundary(rev, mesh, aoi_bounds=…)`
+  keeps only rotor cells **inside the drawn zone** (+ trims the top lid); the artifacts live in
+  the buffer and are dropped. Without `aoi_bounds` it falls back to a fixed lateral-margin frame
+  (all four edges). `aoi_bounds` is threaded through `_launch_pass2_at` → result → `populate_plotter`.
+
+**Result.** Tests: **57 passed** (`_clip_domain_boundary` drops the lateral frame + lid, and
+clips to explicit AOI bounds). Same idea as the Pass-1 edge buffer (ADR-0020).
+
+## Entry 40 — Full-zone coverage (edge buffer), 5/10 m de-stripe (1 m native ×5), 3D toggle fixes  (2026-06-25)
+
+**What changed.**
+- **Results cover the whole selected zone (ADR-0020):** the prepared DEM is grown by
+  `EDGE_BUFFER_M` (1500 m, = the mask) and the 2D view is cropped back to the selection
+  (`_aoi_inner_extent`). Cache key gets a `_b1500` marker.
+- **Striping still at 5/10 m:** the WMS's true native is **~1 m**, so 5 m requests stair-step and
+  need **~×5** averaging to clean (25 m was clean = 5 m fetch ×5; 5/10 m weren't). `prepare_dem_ign`
+  now fetches at **`max(1 m, target/5)`** and averages ×5 (5 m⇒1 m fetch, 10 m⇒2 m…). Updates
+  the ADR-0014 note.
+- **"Vue 3D" checkbox didn't work:** it was gated on a hazard existing (so it did nothing before
+  a criblage) and swallowed errors. Now it works with the **bare relief** too (`populate_pass1_3d`
+  takes `hazard=None`), **surfaces errors** in a dialog, and **preserves the camera** across
+  hour-scrub re-renders (no `view_isometric` inside; `reset_camera=False` on the draped meshes;
+  caller restores `camera_position`).
+
+**Result.** Tests: **56 passed**; de-stripe factors verified ×5 at 5/10/25/50 m; terrain-only 3D
+builds the expected actors.
+
+## Entry 39 — Optional 3D view of the créneau screening (2D/3D toggle, ADR-0019)  (2026-06-25)
+
+**What changed.** A **"Vue 3D"** checkbox on the créneau tab swaps the matplotlib map for an
+embedded 3D viewport (`QStackedWidget` + lazy `pyvistaqt`). `viz.volume3d.populate_pass1_3d`
+builds the zone terrain (`_terrain_mesh`), drapes the basemap (reusing the fixed, non-flipped
+drape), overlays the hazard as a **translucent inferno texture** (alpha ∝ hazard — transparent
+outside danger zones, no StructuredGrid scalar-ordering issues), and adds per-zone wind arrows +
+a north arrow. The 2D map stays the default and keeps the Pass-2 rectangle selection + hour
+scrub; toggling/scrubbing/basemap re-renders 3D while **preserving the camera**.
+
+**Result.** Verified headless: top-down render places the north-half hazard correctly at the top,
+basemap readable, N + wind arrows present; isometric shows the relief draped. Tests: **56 passed**
+(+ `populate_pass1_3d` builds the expected actors).
+
+**Open questions.** Still pending: candidate results should cover the **full selected zone** —
+the edge-buffer mask shrinks the valid area, so the compute domain needs to be expanded by the
+buffer upstream (next).
+
+## Entry 38 — Robustness: refine rc=-1 sequential fallback, Pass-2 crash (momentum env), IGN de-stripe at 5 m  (2026-06-25)
+
+**What changed.**
+- **Refine `rc=-1` persisted** after PROJ/TMP isolation. New strategy in `subzone_speed_field`:
+  also isolate the **PROJ cache** per run (`PROJ_USER_WRITABLE_DIRECTORY`), and — decisive — a
+  tile that fails in the parallel pass is **retried sequentially** at the end (no concurrency →
+  rules out contention). Only a tile failing *alone* raises, now with **full stdout+stderr**.
+- **Pass-2 crash `rc=3221225477` (0xC0000005 access violation)** at "Writing output files".
+  Cause: the temp-dir redirect applied to the **momentum/OpenFOAM** run too (it's env-sensitive)
+  and was pointless there (single run). `_run` now takes `tmp_dir` and **only the parallel mass
+  runs isolate temp**; momentum keeps its normal env (just `PROJ_NETWORK=OFF`).
+- **IGN striping back at 5 m.** At the 5 m preset / Pass-2 5 m re-fetch the block-average factor
+  was 1 (no smoothing) and the WMS's own nearest-neighbour downsample-to-target striped.
+  `prepare_dem_ign` now **fetches finer than the target** (`min(native, target/2)`) and averages
+  **≥2** ourselves → de-striped.
+
+**Result.** Tests: **55 passed**. The momentum-crash fix is a hypothesis (env): if it persists
+with "MNT fin 5 m" checked, unchecking it (coarse zone crop) isolates whether the 5 m DEM is the
+trigger.
+
+## Entry 37 — Pass-2 fine 5 m DEM + fixes: slider ticks alignment, parallel rc=-1 (temp isolation)  (2026-06-25)
+
+**What changed.**
+- **Pass-2 re-fetches its window at IGN 5 m (ADR-0018).** New "MNT fin 5 m (IGN)" checkbox
+  (default on): on launch, `_launch_pass2_at` re-fetches just the rectangle at 5 m native
+  (`prepare_dem(target_res_m=5.0, source="auto")`, terrarium fallback) via
+  `acquire.bbox_latlon_from_utm_window`, runs momentum on it, and drapes the basemap with the
+  crop's **own CRS** (returned through the result). Fetch progress folded into 0–25 %.
+- **Slider ticks were all collapsed left.** The `_TickRuler` mapped via the slider geometry
+  (`mapFrom`), which broke when the slider sat in a row with a label/button. Fix: stack the
+  ruler **directly under its slider in a vertical column** so it shares the slider's exact width
+  + x-origin; ticks then map to `handle/2 + frac*(width-handle)` in the ruler's own coords.
+  Verified: ticks span 8→632 of a 640 px ruler.
+- **Parallel refine still failed `rc=-1` (sometimes with HTTP 500, sometimes not).** Root cause
+  was a **shared temp dir**, so concurrent WindNinja/GDAL raced on scratch files.
+  `_subprocess_env` now also gives each mass tile an **isolated temp dir**
+  (`<tile workdir>/_wn_tmp` via TMP/TEMP/TMPDIR/CPL_TMPDIR), on top of `PROJ_NETWORK=OFF` +
+  per-tile retry (ADR-0017). Since Entry 42, `load_config()` no longer pins global TMP/TEMP.
+
+**Result.** Tests: **55 passed** (+ bbox round-trip, + temp-isolation assertions). Slider +
+fine-checkbox verified headless.
+
+**Open questions.** If `rc=-1` ever persists after temp isolation, the next levers are lowering
+the worker count or capturing WindNinja stdout for the real cause (the error box already shows
+the stderr tail).
+
+## Entry 36 — Pass-2 3D: fix upside-down basemap, add north + wind arrows, height legend  (2026-06-25)
+
+**What changed (`viz/volume3d`).**
+- **Basemap was upside down** ("texte à l'envers"). The drape applied `img[::-1]` then
+  `texture_map_to_plane(origin=SW, point_v=NW)`; VTK already maps array row 0 → the north edge,
+  so the extra vertical flip inverted it. Removed the flip (`img[:, :, :3]`). Verified with a
+  deterministic top-down drape of a labelled test texture (corner colours + an "F" — now NW=top-
+  left and the "F" reads upright).
+- **North arrow + local-wind arrow** (`_add_compass`): a dark "N" arrow (+Y) and a blue arrow
+  pointing where the wind blows TO, labelled `vent <spd> m/s · <dir>°`. Wind speed/direction are
+  threaded from the Pass-2 result (`_launch_pass2_at` now returns `bc_spd` too).
+- **Height legend**: the rotor is drawn with raw RGBA (colour=height-AGL, opacity=intensity),
+  which has no scalar bar, so a tiny invisible proxy carries the `[lo, hi]` range + the yellow→
+  red→purple colormap to render a **"Hauteur sol (m)"** scalar bar.
+
+**Result.** Real cached case rendered headless: basemap upright + readable, N + wind arrows, and
+the height scalar bar (8 → 229 m). Tests: **54 passed** (+2: `mean_flow_vector` blow-to,
+`_add_compass` adds 2 arrows + labels).
+
+## Entry 35 — Fix: tick labels aligned to slider values + parallel-refine HTTP 500 (PROJ network)  (2026-06-25)
+
+**What changed.**
+- **Tick labels didn't match the handle.** The evenly-spaced label row ignored the groove
+  geometry (the handle margin insets the usable track), so the label under the cursor was off.
+  Replaced with **`_TickRuler`** — a painted widget that maps each tick *value* to its handle
+  pixel via the slider's own geometry (`PM_SliderLength` + width) and draws the mark there,
+  translated into ruler coords (`mapFrom`). Verified: window ticks → x = 4…628, hour ticks
+  evenly 4/108/…/628 across a 640 px track. Works for QSlider + superqt QRangeSlider.
+- **Spatial refine error box "sub-zone 1 mass failed rc=4294967295 — ERROR 1: HTTP error code
+  : 500".** That's PROJ/GDAL fetching datum grids from cdn.proj.org; the parallel sub-zones
+  (ADR-0017) hit it concurrently and tripped transient 500s. WindNinja subprocesses now run
+  with **`PROJ_NETWORK=OFF`** (`flow.windninja._subprocess_env`, applied to both the blocking
+  and streaming paths), and each tile **retries once**.
+
+**Result.** Tests: **52 passed** (+2: PROJ_NETWORK=OFF in the subprocess env; a tile recovers
+after one transient failure). Ruler alignment checked headless.
+
+## Entry 34 — IHM batch: detailed basemap, per-zone wind arrows, bigger map + ergonomic sliders, parallel sub-zones (ADR-0017)  (2026-06-24)
+
+**What changed.**
+- **Basemap detail**: `map2d.add_basemap` now takes `zoom_adjust` (default **+1**) → contextily
+  fetches one tile-zoom finer for a sharper basemap on the Pass-1 crop (and MNT preview).
+- **Wind arrows per zone/hour**: `_render_map(..., winds=…)` overlays one arrow per WindNinja
+  zone for the displayed hour — direction = where the wind blows TO (meteo FROM), colour by
+  speed (turbo 0–20 m/s) + a "X m/s" label. Winds are stored in the hourly stack (temporal: one
+  domain wind/hour; spatial refine: the nx×ny per-tile input winds). A **"Flèches vent"**
+  checkbox toggles them.
+- **Layout (tab 2)**: the result map gets `stretch=1` + an expanding canvas (min 360 px) so it
+  **dominates and grows on resize**; the flight-window **range slider shares one compact line
+  with "Valider le créneau ▶"**; both sliders are **thicker** (green groove/handle QSS) with a
+  **tick-label strip** (≤6 day/hour marks under the window slider, hour marks under the hour
+  slider).
+- **Parallel sub-zones (ADR-0017)**: `subzone_speed_field` runs the per-tile mass solves on a
+  `ThreadPoolExecutor` (~CPU-count workers, each WindNinja run capped to `cpu // workers`
+  threads via the new `run_mass(num_threads=…)` / `--num_threads`); progress reported as tiles complete; cancel
+  propagates. The refine is now ~cores× faster.
+
+**Result.** Tests: **50 passed** (+4: parallel tiles all solved, a `Barrier` proves true
+concurrency, cancel propagates, `--num_threads` flag). Headless smoke checks for the
+arrows + tick strips + button placement.
+
+**Open questions.** Tick labels are evenly spaced (approximate alignment to the groove, not
+pixel-exact). Parallelism assumes WindNinja mass is light enough that the per-run thread cap
+isn't the bottleneck — true for screening meshes.
+
+## Entry 33 — MNT resolution presets = 5/10/25/50 m (native block-average factors) (refines ADR-0014)  (2026-06-24)
+
+**What changed.** IHM MNT presets are now **5 / 10 / 25 / 50 m** (default **25 m**), replacing
+the old 90/50/30/15 m. They are exact **block-average factors of the IGN ~5 m native fetch**
+(×1/×2/×5/×10) → clean, fast pooling with no resampling artifacts (`_block_average` gets an
+integer factor every time).
+
+**Why (answers the question).** Since IGN is always fetched at 5 m native then averaged, scales
+that are integer multiples of 5 m make the averaging exact and fast — that's the "moyennes
+rapides" the presets should offer. **Worldwide source floor ≈ 30 m** (terrarium = SRTM class;
+`zoom_for_resolution` caps at z13 ≈ 13–19 m grid), so 5/10 m on "Monde" only upsample (no real
+detail) — the label keeps "~30 m".
+
+**Result.** 46 tests pass; default `25 m` confirmed present in the presets.
+
+## Entry 32 — Météo-France AROME key: stored in .env, validated offline, popup on expiry (ADR-0016)  (2026-06-24)
+
+**What changed.**
+- Added support for an AROME apiKey subscribed to `/public/arome/1.0`. Stored **only in `.env`**
+  (`METEOFRANCE_API_KEY`, gitignored) — not committed. Optional account hints also stay local
+  via `METEOFRANCE_ACCOUNT_LOGIN` / `METEOFRANCE_ACCOUNT_EMAIL`.
+- New `wind/meteofrance.py`: `check_arome_key()` decodes the JWT **offline** and returns a
+  `KeyStatus` (ok / missing / malformed / expired / not_subscribed / expiring_soon) +
+  `renewal_text()`. The key is valid → confirmed (1095 j left).
+- IHM: `MainWindow._check_meteofrance_key()` runs at startup (deferred `QTimer.singleShot(0)`
+  so headless tests never hit a modal). Missing key = silent (AROME optional); valid = status
+  note; **invalid/expired/expiring → popup** with the renewal procedure.
+- Docs: **docs/support/meteofrance_arome.md** (model, key location, renewal steps);
+  ADR-0016; env var noted in environment.md.
+
+**Why (also answers two questions).** **ICON-D2** = DWD's *convection-permitting* (non-
+hydrostatic) ~2.2 km limited-area ICON over central Europe, **keyless** — same class as AROME/
+HRRR. **Weather4D** *does* ship AROME 1.3 km, but as a **closed consumer GRIB delivery** (in-
+app/subscription), **not an open/programmatic source** — so for Sillage the open routes are the
+**Météo-France API** (this key) or **meteo.data.gouv.fr**.
+
+**Result.** Tests: **46 passed** (+7 for the key checker, forged JWTs). Local keys validate
+end-to-end through `config` → `check_arome_key`.
+
+**Security note.** Raw key lives only in `.env` (gitignored); the committed doc holds the
+**procedure + login account**, not the secret. Signature is not verified (we only read claims
+to detect expiry/scope — the gateway enforces real auth).
+
+**Open questions.** GRIB2 ingestion (cfgrib/eccodes) + crest-level selection still to wire
+(M4); only then does AROME actually feed the criblage.
+
+## Entry 31 — Pass-2 selection by rectangle; params on the créneau tab; 3D tab display-only (ADR-0015)  (2026-06-24)
+
+**What changed.**
+- Pass-2 is no longer a **single click** on the map. A toggle **"▭ Définir la zone Pass-2"**
+  on the créneau tab switches the result map into **rectangle-draw mode** (press→drag→release,
+  cyan dashed box); it mirrors the Pass-1 AOI gesture. The box persists across hour-scrub /
+  basemap re-renders and is cleared when a **new zone DEM** is prepared.
+- The **mesh-quality preset** and a green **"▶ Lancer l'analyse Pass-2 (3D)"** button moved
+  onto the **créneau tab** — define + parameterize + launch in one place; come back to relaunch
+  with other parameters. The launch button is enabled only when a rectangle exists.
+- The rectangle sets the momentum crop: centre = its centre, half-width =
+  max(½·max(width,height), `PASS2_MIN_HALF_WIDTH_M`). `_launch_pass2_at` now takes `half_m`.
+- The **3D (analyse) tab is display-only**: removed the mesh combo, the case field and the
+  "Charger un case" button (and `on_load_pass2`); it now just hosts the viewport. `_run_buttons`
+  swaps `btn_load_p2` → `btn_pass2`; `_set_running` gates `btn_rect`/`btn_pass2`.
+
+**Why.** The old flow split "where + how" across two tabs and forced a fixed ±2.5 km window.
+The rectangle makes the window user-sized and consistent with zone selection (ADR-0012/0015).
+
+**Result.** Tests: **39 passed**. Off-screen smoke test drives press/motion/release → correct
+`_pass2_rect`, button gating, tiny-click cancel, and rectangle redraw on re-render.
+
+**Clarification recorded (ADR-0015 Note).** Pass-2 wind = **Open-Meteo ~11 km** (upstream-
+sampled Pass-1 field or créneau wind), **not AROME 1.3 km**; Pass-1 sub-zones aren't 1.3 km
+because the forecast itself is ~11 km (finer tiles = same value) — intra-tile detail is from
+WindNinja downscaling. Real AROME 1.3 km needs the Météo-France GRIB API (key), not wired.
+
+**Open questions.** Reloading a *previous* Pass-2 case without recomputing was dropped "pour le
+moment" — re-add a loader if reviewing cached results becomes useful.
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

@@ -22,6 +22,17 @@ IGN_ELEV_WMS = "https://data.geopf.fr/wms-r/wms"
 IGN_ELEV_LAYER = "ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES"
 
 
+def bbox_latlon_from_utm_window(crs, x: float, y: float, half_m: float):
+    """(south, west, north, east) lat/lon for a square window of half-size ``half_m`` centred
+    at (x, y) in ``crs`` (a projected/UTM CRS). Used to re-fetch a fine DEM for a Pass-2 crop."""
+    from rasterio.crs import CRS as RCRS
+    from rasterio.warp import transform as warp_xy
+
+    lons, lats = warp_xy(crs, RCRS.from_epsg(4326),
+                         [x - half_m, x + half_m], [y - half_m, y + half_m])
+    return (min(lats), min(lons), max(lats), max(lons))
+
+
 def in_france(bbox_latlon) -> bool:
     """Rough test: is the AOI centre over mainland France + Corsica (IGN RGE ALTI cover)?"""
     south, west, north, east = bbox_latlon
@@ -29,7 +40,8 @@ def in_france(bbox_latlon) -> bool:
     return 41.3 <= clat <= 51.2 and -5.2 <= clon <= 9.6
 
 
-IGN_NATIVE_M = 5.0  # RGE ALTI HIGHRES is artifact-free only at its ~5 m native grid
+IGN_NATIVE_M = 1.0  # RGE ALTI HIGHRES true native ~1 m; coarser requests stair-step (the WMS
+#                     nearest-neighbour downsamples 1 m -> target), so fetch ~native and average
 
 
 def _ign_bil(south, west, north, east, w, h, timeout=90):
@@ -90,14 +102,19 @@ def prepare_dem_ign(bbox_latlon, out_path, target_res_m: float = 50.0,
     clat = (south + north) / 2.0
     w_m = (east - west) * 111320.0 * max(0.05, math.cos(math.radians(clat)))
     h_m = (north - south) * 111320.0
-    nat_w = max(2, round(w_m / IGN_NATIVE_M))
-    nat_h = max(2, round(h_m / IGN_NATIVE_M))
+    # Fetch at ~target/5 (floored at the ~1 m native) and average ×5 ourselves: the WMS's own
+    # nearest-neighbour downsample-to-target leaves horizontal "stair-step" striping that only a
+    # ~×5 average removes (observed: clean from 25 m = 5 m fetch ×5; striped at 5/10 m when the
+    # factor was <5). So at 5 m we fetch ~1 m native (clean) and average 5×, at 10 m ~2 m, etc.
+    fetch_res = max(IGN_NATIVE_M, target_res_m / 5.0)
+    nat_w = max(2, round(w_m / fetch_res))
+    nat_h = max(2, round(h_m / fetch_res))
     tx = min(tile_cap, max(1, math.ceil(nat_w / max_px)))
     ty = min(tile_cap, max(1, math.ceil(nat_h / max_px)))
-    tile_w = min(nat_w, tx * max_px) // tx  # ~5 m unless capped (very large zones only)
+    tile_w = min(nat_w, tx * max_px) // tx  # ~fetch_res unless capped (very large zones only)
     tile_h = min(nat_h, ty * max_px) // ty
 
-    prog(8, f"Téléchargement IGN RGE ALTI ~5 m ({tx}×{ty} tuiles)…")
+    prog(8, f"Téléchargement IGN RGE ALTI ~{fetch_res:.1f} m ({tx}×{ty} tuiles)…")
     n = tx * ty
     rows = []
     for j in range(ty):
@@ -119,7 +136,7 @@ def prepare_dem_ign(bbox_latlon, out_path, target_res_m: float = 50.0,
 
     prog(62, "Lissage vers la résolution cible…")
     cur_res = w_m / arr.shape[1]
-    arr = _block_average(arr, max(1, round(target_res_m / cur_res)))
+    arr = _block_average(arr, max(2, round(target_res_m / cur_res)))  # >=2 -> de-stripes
     h, w = arr.shape
     transform = from_origin(west, north, (east - west) / w, (north - south) / h)
 
@@ -151,8 +168,14 @@ def prepare_dem(bbox_latlon, out_path, target_res_m: float = 50.0, source: str =
     if want_ign:
         try:
             return prepare_dem_ign(bbox_latlon, out_path, target_res_m, on_progress, cancel), "IGN"
-        except Exception:
-            pass  # outside coverage / WMS hiccup -> worldwide
+        except Exception as exc:
+            if str(exc).lower() == "cancelled" or source == "ign":
+                raise
+            if on_progress is not None:
+                on_progress(
+                    5,
+                    f"IGN indisponible ({type(exc).__name__}: {exc}); fallback monde.",
+                )
     return prepare_dem_for_bbox(bbox_latlon, out_path, target_res_m, on_progress, cancel), "Monde"
 
 

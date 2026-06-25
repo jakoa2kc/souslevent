@@ -12,7 +12,7 @@ import click
 import numpy as np
 
 from sillage.config import load_config, resolve_cache_path, resolve_output_path
-from sillage.flow.windninja import run_mass
+from sillage.flow.windninja import format_run_failure, run_mass
 from sillage.screening import indicator as ind
 from sillage.terrain.dem import load_dem
 
@@ -71,12 +71,10 @@ def main(
             wind_from_deg=wind_from_deg,
             output_resolution_m=resolution_m,
             vegetation=vegetation,
+            tmp_dir=work_dir / "_tmp",
         )
         if run.returncode not in (0, None):
-            raise SystemExit(
-                f"WindNinja failed rc={run.returncode}\n"
-                f"STDOUT tail:\n{run.stdout[-1200:]}\nSTDERR tail:\n{run.stderr[-1200:]}"
-            )
+            raise SystemExit(format_run_failure(run, "WindNinja mass"))
         speed_path = find_speed_grid(work_dir)
         if speed_path is None:
             raise SystemExit(f"WindNinja succeeded but no *_vel.asc found in {work_dir}")
@@ -119,7 +117,7 @@ def find_speed_grid(work_dir: Path) -> Path | None:
     """Return the WindNinja speed magnitude ASCII grid, if present."""
     if not work_dir.exists():
         return None
-    matches = sorted(work_dir.glob("*_vel.asc"))
+    matches = sorted(work_dir.glob("*_vel.asc"), key=lambda p: p.stat().st_mtime, reverse=True)
     return matches[0] if matches else None
 
 

@@ -54,10 +54,15 @@ click-to-detail works end to end; multi-hour + upstream wind are the remaining r
 
 ## M4 — Robust hourly batch + spatial wind input
 - [ ] Full hourly loop over a flight window; caching of DEM + forecasts for reproducibility.
+- [x] **AROME API access (ADR-0016):** Météo-France AROME apiKey supported via `.env`;
+      `wind/meteofrance.check_arome_key` validates it offline + IHM popup on expiry.
+      Renewal procedure: docs/support/meteofrance_arome.md. ✔
 - [~] **Spatial wind via AROME sub-zones (ADR-0007):** mechanism done — `screening.subzones`
-      tiles the domain, runs the mass solver per tile, mosaics with feathered blending;
-      `wind.forecast.fetch_arome` + `wind.profile.crest_wind_provider` supply per-tile winds.
-      *Remaining: verify AROME endpoint live; default the GUI/loop to AROME (vs synthetic).*
+      tiles the domain, runs the mass solver per tile **in parallel** (ThreadPoolExecutor,
+      CPU-capped per run — ADR-0017), mosaics with feathered blending; `wind.forecast.fetch_arome`
+      + `wind.profile.crest_wind_provider` supply per-tile winds.
+      *Remaining: GRIB2 ingestion (cfgrib) of `/public/arome/1.0` at crest levels; default the
+      GUI/loop to AROME (vs the ~11 km Open-Meteo blend / synthetic).*
 - [ ] Evaluate **Docker/Katana** batch vs native subprocess (ADR-0006 open question);
       tied to the eventual GRIB `wxModel` route.
 **Definition of done:** a full-window screening run is one command and reproducible, with
@@ -87,7 +92,8 @@ The "real software" surface. Built incrementally; adapt as results come in.
 - [x] Wire the selected AOI → DEM preparation: "Valider la zone" prepares a coarse (~90 m)
       worldwide DEM from terrarium tiles (`terrain/acquire.py`) on the worker, then moves to
       the créneau tab; the prepared DEM drives Pass-1 (ADR-0013). ✔
-- [ ] Per-feature **fine** DEM for Pass-2 (high-zoom crop) instead of reusing the coarse one.
+- [x] Per-feature **fine** DEM for Pass-2: on launch, re-fetch the window at **IGN 5 m** native
+      (terrarium fallback) instead of reusing the zone MNT (ADR-0018; toggle in the UI). ✔
 - [x] App shell: controls + Pass-1 (2D matplotlib) / Pass-2 (3D pyvistaqt) tabs;
       `sillage-gui` entry. Reuses headless rendering (`map2d.draw_indicator`,
       `volume3d.populate_plotter`); 3D viewport created lazily (needs a GL context). ✔ slice 1
@@ -98,10 +104,13 @@ The "real software" surface. Built incrementally; adapt as results come in.
 - [~] AROME sub-zone Pass-1 (ADR-0007) in the 2D tab. Mechanism + "Run sub-zones (spatial)"
       button done (synthetic provider); *remaining: AROME-fed + per-hour sub-zone stack.* ✔ slice 7
 - [x] Click-on-map hotspot → crop+buffer → launch Pass-2 → show 3D (the M3 handoff). ✔ slice 3
+      *(superseded by the rectangle selection below, ADR-0015.)*
+- [x] **Pass-2 selection by rectangle on the créneau tab** (like the Pass-1 AOI), mesh preset +
+      launch button on that tab, 3D tab **display-only** (ADR-0015). ✔ slice 8
 - [x] Mesh quality/time knob (ADR-0008) in the Pass-2 controls: Coarse/Medium/Fine/Max
       presets + rough cell-count/minutes estimate; the handoff uses the selection. ✔ slice 4
 - [x] Upstream wind sampling from the Pass-1 field for the Pass-2 BC. ✔ slice 5
-**Definition of done:** browse screening by hour, click a hotspot, get the 3D rotor — one app.
+**Definition of done:** browse screening by hour, draw a Pass-2 rectangle, get the 3D rotor — one app.
 
 ## Later / research
 - Humidity & latent effects; lee-wave structure; validation/hindcast against known flying

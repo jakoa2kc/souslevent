@@ -16,7 +16,7 @@ from pathlib import Path
 import click
 
 from sillage.config import load_config, resolve_output_path
-from sillage.flow.windninja import run_momentum
+from sillage.flow.windninja import format_run_failure, run_momentum
 from sillage.viz import volume3d
 
 
@@ -47,10 +47,7 @@ def main(dem_path, wind_from_deg, wind_speed_ms, mesh_count, iterations, turbule
         mesh_count=mesh_count, iterations=iterations, turbulence_output=True,
     )
     if run.returncode not in (0, None):
-        raise SystemExit(
-            f"WindNinja momentum failed (rc={run.returncode}). "
-            f"See docs/support/troubleshooting.md.\n{run.stderr[:800]}"
-        )
+        raise SystemExit(format_run_failure(run, "WindNinja momentum"))
 
     click.echo(f"[2/3] OpenFOAM case dir: {run.openfoam_case_dir}")
     if run.openfoam_case_dir is None:
