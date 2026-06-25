@@ -110,7 +110,13 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 <meta charset="utf-8"/>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css"/>
-<style>html,body,#map{{height:100%;margin:0}}</style>
+<style>html,body,#map{{height:100%;margin:0}}
+/* GIMP-style dashed "marquee" rectangle-select icon for the only draw button. */
+.leaflet-draw-toolbar a.leaflet-draw-draw-rectangle {{
+  background-image:url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='18'%20height='18'%3E%3Crect%20x='2.5'%20y='3.5'%20width='13'%20height='11'%20fill='none'%20stroke='%23222'%20stroke-width='1.6'%20stroke-dasharray='2.4%201.6'/%3E%3C/svg%3E") !important;
+  background-position:4px 4px !important; background-size:18px 18px !important;
+  background-repeat:no-repeat !important;
+}}</style>
 </head><body>
 <div id="map"></div>
 <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
@@ -130,10 +136,12 @@ map.fitBounds([[{south},{west}],[{north},{east}]]);
 
 var drawn = new L.FeatureGroup();
 map.addLayer(drawn);
+L.drawLocal.draw.toolbar.buttons.rectangle = 'Sélectionner la zone (rectangle)';
+// Only the CREATE (rectangle) tool — no edit/delete buttons; draw again to redo the selection.
 var drawControl = new L.Control.Draw({{
   draw: {{rectangle:{{shapeOptions:{{color:'#e6194b',weight:2}}}},
          polygon:false, polyline:false, circle:false, marker:false, circlemarker:false}},
-  edit: {{featureGroup: drawn}}
+  edit: false
 }});
 map.addControl(drawControl);
 
@@ -142,7 +150,6 @@ function emit(layer) {{
   if (window.bridge) window.bridge.on_rectangle(b.getSouth(), b.getWest(), b.getNorth(), b.getEast());
 }}
 map.on(L.Draw.Event.CREATED, function(e) {{ drawn.clearLayers(); drawn.addLayer(e.layer); emit(e.layer); }});
-map.on(L.Draw.Event.EDITED, function(e) {{ e.layers.eachLayer(emit); }});
 
 new QWebChannel(qt.webChannelTransport, function(channel) {{ window.bridge = channel.objects.bridge; }});
 </script>

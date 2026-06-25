@@ -683,6 +683,75 @@ streaming-progress assertion for the new phase emission).
 
 ---
 
+## Entry 47 — Auto concurrency = CPU cores (psutil physical, fallback 14) + momentum thread cap  (2026-06-25)
+
+`AutoConfig.momentum_workers` now defaults to **`pipeline.detect_cores()`** — physical cores via
+psutil (this machine: **14**), else `os.cpu_count()` (logical), else 14. Added `psutil` to deps.
+To avoid oversubscription, each solve is capped to **`cores // workers`** threads
+(`run_momentum(num_threads=…)`, mirroring `run_mass`; no temp redirect — Entry 38) → 14 workers ×
+1 thread on this box. Startup log shows "×14 en parallèle, 1 thr/solve". 70 tests pass.
+
+## Entry 46 — AROME wind connected (Open-Meteo HD 1.5 km) + parallel zones by default  (2026-06-25)
+
+- **Real AROME wind.** Probed the Météo-France AROME GRIB API: U/V wind only at **height-AGL
+  10–100 m**, **GRIB-only** (no GeoTIFF), and **no GRIB lib installed** — an `eccodes` dependency I
+  can't verify here. Pivoted to **Open-Meteo's `arome_france_hd` (1.5 km)**: height-AGL wind as
+  keyless JSON, *finer* than the MF 2.5 km API. `auto.wind.local_wind_provider(source="arome")`
+  reads the **highest available height** (~120 m; 180 m is null for HD) per hour, per sub-zone
+  centre → distinct AROME cells = valley-scale variation; per-point fallback to the Open-Meteo
+  crest blend. **Verified live**: real per-hour wind at a Champsaur point (6.5 m/s @131°, …). The
+  `.env` key still labels/gates the run + drives the slider window (`auto.arome`).
+- **Zones now parallel by default** (`AutoConfig.momentum_workers=2`) — answers "les calculs ne se
+  lancent pas en parallèle ?" (was 1 = sequential). Still small (momentum is CPU-bound, ADR-0006)
+  with the parallel-then-sequential retry as safety; the startup log shows "×N en parallèle".
+
+**Result.** Tests: **70 passed** (+ AROME HD parser; live provider check). Docs: ADR-0022 /
+docs/10 / roadmap M8 updated.
+
+## Entry 45 — Auto UX: AROME-driven absolute-date slider, live progress (%/elapsed/ETA), single rectangle tool  (2026-06-25)
+
+Feedback from first testing of the auto mode:
+- **AROME connected for the time axis** (`auto.arome.forecast_window`): validates the `.env` key
+  (offline JWT) and exposes the available window (now → +48 h) in **absolute dates**. The window
+  slider now ranges over those offsets with a **graduation strip of absolute date/hour labels** +
+  a live "jeu. 25/06 22h → … (N h)" range label + a source line (AROME vs Open-Meteo fallback).
+  Wind *values* still come from Open-Meteo until the GRIB ingest (`auto.wind` seam) — the run is
+  tagged `wind_source="arome"` when the key is valid.
+- **Exhaustive live progress** so it's clearly not frozen: `run_auto` emits per-step messages
+  (DEM phases, `N sous-zones × M h`, per (zone,hour) "vent … · maillage + solveur", and the
+  **momentum solver's own `% complete`/phase lines** forwarded through). The window shows a
+  **scrolling timestamped log** + a bold **« Avancement X% · écoulé … · reste ~… »** line that a
+  **1 s timer keeps ticking** even between steps. Global %, elapsed, ETA.
+- **MapTab — single rectangle tool (both apps):** dropped the edit + delete buttons
+  (`edit:false`); only the **create rectangle** remains (draw again to redo). Gave it a
+  **GIMP-style dashed-marquee icon** (inline SVG) + a French tooltip. Shared widget → applies to
+  the 2-pass app and the auto app.
+
+**Result.** Tests: **69 passed** (+ AROME window fallback/labels). Both windows construct headless;
+`fc.source = AROME` confirmed with the live key.
+
+## Entry 44 — Architecture: automatic full-resolution pipeline `sillage.auto` (ADR-0022)  (2026-06-25)
+
+Started the "one-click" auto mode as an **additive package** (the manual app is untouched), reusing
+every lower layer. Engine in place + tested; UI skeleton wired.
+- **`auto.partition`** — relief-adaptive quadtree (`partition_zone`): split a tile while its mesh
+  budget *or* relief span is exceeded, floored at a min tile. `SubZone` (bbox, centre, crest alt,
+  relief, est cells). Tested (flat→1, relief/cell-budget→split, full non-overlap cover).
+- **`auto.progress`** — `ProgressTracker`: percent + **ETA** (mean task time × remaining). Tested.
+- **`auto.wind`** — `local_wind_provider`: Open-Meteo crest wind now; the **AROME GRIB** seam
+  (`source="arome"` falls back) for the altitude/valley-resolved upgrade (key ready, ADR-0016).
+- **`auto.pipeline.run_auto`** — orchestrates DEM → partition → per-(zone×hour) `run_momentum` on a
+  buffered crop, **bounded concurrency** (`momentum_workers=1` default — CPU-bound, ADR-0006) with
+  parallel-then-sequential retry; returns `AutoResult` (case per zone×hour) + timings.
+- **`auto.scene.populate_auto_scene`** — aggregate one hour's cases into a 3D scene, reusing
+  `viz.volume3d` (drape + per-zone rotor clipped to its bounds, ADR-0021). Added a `show_legend`/
+  `clim` knob to `_add_rotor` for a shared legend.
+- **`auto.window.AutoWindow`** — 2-tab IHM (MapTab + window slider → `SolveJob(run_auto)` with a
+  progress bar + ETA; 3D tab + hour slider). Constructs headless.
+
+**Result.** Tests: **68 passed** (+5 auto). Docs: ADR-0022, docs/10_auto_pipeline.md, roadmap M8.
+**Next (biggest gain):** wire the AROME GRIB local wind.
+
 ## Entry 43 — Code-review follow-ups on the parallel pass (shared planner, hourly retry, parallel IGN tiles)  (2026-06-25)
 
 Reviewed the ChatGPT pass (parallel hourly Pass-1 + `RunTimings` + `format_run_failure` DRY) —

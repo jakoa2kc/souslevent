@@ -626,6 +626,41 @@ optimizations are guided by real wall-clock evidence.
 
 ---
 
+## ADR-0022 — Automatic full-resolution pipeline as an additive package (`sillage.auto`)
+
+**Status:** accepted (architecture in place; AROME wind + UI are follow-ups)
+
+**Context.** The manual app picks ONE feature per Pass-2. We also want a **"one-click" mode**:
+zone + window → solve the *whole* zone at the finest topo scale, automatically, then browse a
+time-sliderable global 3D wake. This is a different orchestration (and UI), but it needs every
+existing lower layer (DEM, partition, momentum, wind, 3D).
+
+**Decision.** Add a **separate package `sillage.auto`** rather than fork the app — the manual
+two-pass tool stays untouched. The auto pipeline:
+- **Subdivides** the zone with a **relief-adaptive quadtree** (`auto.partition`): split while the
+  estimated mesh exceeds a cell budget *or* the relief span exceeds a cap (so one upstream-constant
+  wind stays a sound Pass-2 BC — ADR-0003). Fine tiling where busy, coarse where flat.
+- **Solves** Pass-2 momentum over each **(sub-zone × hour)** on a buffered crop (`run_auto`),
+  reusing `flow.windninja.run_momentum`, the `parallel_run_plan` policy, and the
+  parallel-then-sequential-retry. Momentum is CPU-bound (ADR-0006) and its temp env can't be
+  redirected (Entry 38), so the default is **sequential** (`momentum_workers=1`).
+- **Aggregates** each hour's cases into one scene (`auto.scene`), reusing `viz.volume3d` and
+  clipping each rotor to its zone (ADR-0021); a `ProgressTracker` gives percent + **ETA**.
+
+**Consequences.**
+- Maximal reuse, zero risk to the existing app; the two share all physics/IO/viz code.
+- **AROME wind wired (2026-06-25):** `auto.wind` reads **AROME France HD (1.5 km)** height-AGL
+  wind from **Open-Meteo's `arome_france_hd`** model (keyless JSON), taking the highest available
+  height (~120 m AGL) per hour, per sub-zone centre → real valley-scale spatial variation. This is
+  *finer* than the Météo-France GRIB API (which exposes only 2.5 km wind at 10–100 m, GRIB-only —
+  it would need an `eccodes` dependency), so the GRIB path is deferred. The `.env` AROME key
+  (ADR-0016) still gates/labels the run + drives the slider's available window (`auto.arome`).
+  Per-point fallback to the Open-Meteo crest blend if HD is unavailable.
+- Runs are long (`zones × hours` solves); the ETA + caching manage that. The UI (2-tab select →
+  run → time-slider 3D) is the remaining integration layer (`auto.window`).
+
+---
+
 ## Open questions tracked as future ADRs
 
 - **Stability / diurnal winds on the momentum solver.** Available on the mass solver

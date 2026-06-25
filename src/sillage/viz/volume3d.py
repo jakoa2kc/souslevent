@@ -205,9 +205,13 @@ def populate_pass1_3d(plotter, dem, hazard=None, winds=None, crs=None,
     return plotter
 
 
-def _add_rotor(plotter, rev, terrain) -> None:
+def _add_rotor(plotter, rev, terrain, show_legend: bool = True, clim=None) -> None:
     """Add the reversed-flow (rotor) volume coloured by HEIGHT ABOVE GROUND (yellow near the
-    ground -> red -> purple high up) with OPACITY proportional to rotor intensity."""
+    ground -> red -> purple high up) with OPACITY proportional to rotor intensity.
+
+    ``clim=(lo, hi)`` forces the height scale (so an aggregate of many sub-zone rotors shares one
+    consistent scale + legend); ``show_legend=False`` skips the per-rotor scalar bar (the
+    aggregate adds a single legend itself)."""
     from matplotlib.colors import LinearSegmentedColormap, Normalize
     from scipy.spatial import cKDTree
 
@@ -219,13 +223,15 @@ def _add_rotor(plotter, rev, terrain) -> None:
     intensity = np.clip(-np.asarray(along), 0.0, None) if along is not None else np.ones(len(centers))
 
     cmap = LinearSegmentedColormap.from_list("yrp", ["#ffff00", "#ff2a00", "#7a00b0"])
-    lo, hi = np.nanpercentile(hagl, 5), np.nanpercentile(hagl, 95)
+    lo, hi = clim if clim is not None else (np.nanpercentile(hagl, 5), np.nanpercentile(hagl, 95))
     hi = max(hi, lo + 1e-6)
     rgb = cmap(np.clip(Normalize(lo, hi)(hagl), 0, 1))[:, :3]
     imax = max(float(np.nanpercentile(intensity, 95)), 1e-6)
     alpha = 0.12 + 0.85 * np.clip(intensity / imax, 0.0, 1.0)  # weak transparent -> strong opaque
     rev.cell_data["rotor_rgba"] = (np.c_[rgb, alpha] * 255).astype(np.uint8)
-    plotter.add_mesh(rev, scalars="rotor_rgba", rgba=True)
+    plotter.add_mesh(rev, scalars="rotor_rgba", rgba=True, reset_camera=False)
+    if not show_legend:
+        return
 
     # Legend for the colour -> height-above-ground (m) mapping. The rotor itself is drawn with
     # raw RGBA (colour=height, opacity=intensity), which carries no scalar bar, so add a tiny

@@ -24,6 +24,7 @@ dependencies = [
   "python-dotenv>=1.0", # load project-root .env into config (paths, API keys)
   "py7zr>=1.1",      # read/extract IGN RGE ALTI .7z archives
   "tzdata>=2024.1",  # IANA tz database for zoneinfo (Europe/Paris hourly labels on Windows)
+  "psutil>=5.9",     # detect physical CPU cores -> auto-mode concurrency (one solve per core)
 ]
 
 [project.optional-dependencies]
@@ -40,6 +41,7 @@ gui = [
 [project.scripts]
 sillage-pass1 = "scripts.demo_pass1:main"
 sillage-gui = "scripts.sillage_gui:main"
+sillage-auto = "scripts.sillage_auto:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

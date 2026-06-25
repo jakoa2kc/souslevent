@@ -271,6 +271,7 @@ def run_momentum(
     iterations: int = 300,
     turbulence_output: bool = True,
     vegetation: str = "grass",
+    num_threads: int | None = None,
     dry_run: bool = False,
     on_progress=None,
     cancel=None,
@@ -312,7 +313,12 @@ def run_momentum(
         f"--vegetation={vegetation}",
         f"--output_path={wd}",
     ]
+    if num_threads is not None:
+        # Cap per-run threads so several momentum solves in parallel don't oversubscribe the CPU.
+        cmd.append(f"--{FLAG['num_threads']}={int(num_threads)}")
 
+    # NOTE: no tmp_dir isolation for momentum — redirecting OpenFOAM's temp env crashes it
+    # (Entry 38); parallel momentum relies on NinjaFOAM's PID-based case dirs instead.
     rc, out, err = _run(cmd, wd, dry_run, on_progress=on_progress, cancel=cancel)
     run = WindNinjaRun(command=cmd, working_dir=wd, returncode=rc, stdout=out, stderr=err)
     if not dry_run:

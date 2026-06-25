@@ -112,6 +112,21 @@ The "real software" surface. Built incrementally; adapt as results come in.
 - [x] Upstream wind sampling from the Pass-1 field for the Pass-2 BC. ✔ slice 5
 **Definition of done:** browse screening by hour, draw a Pass-2 rectangle, get the 3D rotor — one app.
 
+## M8 — Automatic full-resolution pipeline (`sillage.auto`, ADR-0022)
+A "one-click" mode parallel to the manual app: zone + window → solve the WHOLE zone at the finest
+topo scale, then a time-sliderable global 3D wake. See docs/10_auto_pipeline.md.
+- [x] Engine: relief-adaptive `partition_zone`, `ProgressTracker` (ETA), `local_wind_provider`,
+      `run_auto` orchestrator (reuses momentum + parallel_run_plan + retry), `populate_auto_scene`
+      aggregation. Tested (partition + progress). ✔
+- [x] 2-tab IHM skeleton (`auto.window`): MapTab + window slider → run_auto on a worker; 3D tab +
+      hour slider. Constructs headless. ✔
+- [x] **AROME 1.5 km local wind** via Open-Meteo `arome_france_hd` (height-AGL, highest level),
+      per sub-zone → valley-scale variation; keyless JSON (finer than the MF 2.5 km GRIB API).
+      The `.env` key still labels/gates the run + drives the slider window. ✔
+- [x] Parallel sub-zone solves (`momentum_workers`=2 default) + live progress (steps, %, ETA). ✔
+- [ ] Optional: the Météo-France **GRIB** path (eccodes) for >120 m AGL / pressure levels.
+- [ ] End-to-end tuning: `momentum_workers` vs CPU, global height legend, focal-point pan.
+
 ## Later / research
 - Humidity & latent effects; lee-wave structure; validation/hindcast against known flying
   days via ERA5; possible mobile/web consultation surface (Cesium/deck.gl) on top of the
