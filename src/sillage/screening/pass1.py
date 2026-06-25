@@ -10,7 +10,10 @@ See docs/05 (WindNinja CLI) and roadmap M1/M4 (hourly loop).
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 
@@ -20,6 +23,47 @@ from . import indicator as ind
 
 
 _FR_DAYS = ("lun.", "mar.", "mer.", "jeu.", "ven.", "sam.", "dim.")
+
+
+@dataclass(frozen=True)
+class HourlyIndicatorResult:
+    """One Pass-1 hourly result, kept in original time-window order."""
+
+    label: str
+    hazard: np.ndarray
+    speed_path: Path
+    direction_path: Path | None
+    winds: list[tuple[float, float, float, float]]
+    elapsed_s: float
+
+
+def parallel_run_plan(
+    count: int, max_workers: int | None = None, hard_cap: int = 4
+) -> tuple[int, int]:
+    """Return ``(workers, num_threads_per_windninja_run)`` for a batch of independent WindNinja
+    solves (parallel hourly Pass-1 *and* the spatial sub-zones — one shared policy).
+
+    Several mass solves run at once; each is capped to a small thread count to avoid CPU
+    oversubscription. The default deliberately caps workers at ``hard_cap`` (4): enough to cut a
+    batch sharply, still conservative for WindNinja/GDAL on Windows (the source of the
+    intermittent ``rc=-1`` under heavy concurrency). Pass ``max_workers`` to override the cap.
+    """
+    import os
+
+    count = max(0, int(count))
+    if count <= 0:
+        return 0, 0
+    cpu = os.cpu_count() or 4
+    if max_workers is None:
+        workers = min(count, cpu, hard_cap)
+    else:
+        workers = min(count, max(1, int(max_workers)))
+    per_run_threads = max(1, min(4, cpu // max(1, workers)))
+    return workers, per_run_threads
+
+
+# Backwards-compatible alias (the planner is no longer hourly-specific).
+hourly_worker_plan = parallel_run_plan
 
 
 def synthetic_series(
@@ -143,6 +187,7 @@ def hourly_indicator(
     vegetation: str = "grass",
     edge_buffer_m: float = 1500.0,
     force_run: bool = False,
+    num_threads: int | None = None,
     on_progress=None,
     cancel=None,
 ) -> tuple[np.ndarray, Path]:
@@ -164,6 +209,7 @@ def hourly_indicator(
             wind_from_deg=wind_from_deg,
             output_resolution_m=resolution_m,
             vegetation=vegetation,
+            num_threads=num_threads,
             tmp_dir=work_dir / "_tmp",
             on_progress=on_progress,
             cancel=cancel,
@@ -178,3 +224,103 @@ def hourly_indicator(
     hazard = ind.hazard_indicator(dem, wind_from_deg, speed_grid=speed_grid)
     hazard = mask_edge_buffer(hazard, dem.resolution_m, edge_buffer_m)
     return hazard, speed_path
+
+
+def hourly_indicator_stack(
+    *,
+    dem: Dem,
+    cli: str,
+    dem_path: str,
+    series: Sequence[tuple[str, float, float]],
+    work_dir_for: Callable[[int, str, float, float], Path],
+    resolution_m: float = 100.0,
+    vegetation: str = "grass",
+    edge_buffer_m: float = 1500.0,
+    force_run: bool = False,
+    max_workers: int | None = None,
+    on_progress=None,
+    cancel=None,
+) -> list[HourlyIndicatorResult]:
+    """Compute several independent Pass-1 hours concurrently.
+
+    ``series`` is ``[(label, speed_ms, from_deg), ...]``. The returned list preserves that order.
+    Each hour gets its own work directory and isolated WindNinja temp dir through
+    :func:`hourly_indicator`. Existing ``*_vel.asc`` files are reused unless ``force_run`` is
+    true, so a second launch remains cheap.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from threading import Lock
+
+    items = list(series)
+    n = len(items)
+    if n == 0:
+        return []
+    import os
+
+    workers, per_run_threads = parallel_run_plan(n, max_workers=max_workers)
+    cpu = os.cpu_count() or 4  # full threads for the lone sequential retries below
+    left, bottom, right, top = dem.bounds
+    cx, cy = (left + right) / 2.0, (bottom + top) / 2.0
+    progress = [0.0] * n
+    results: list[HourlyIndicatorResult | None] = [None] * n
+    lock = Lock()
+
+    def _emit(i: int, pct: float, msg: str) -> None:
+        if on_progress is None:
+            return
+        with lock:
+            progress[i] = max(progress[i], max(0.0, min(100.0, float(pct))))
+            agg = int(round(sum(progress) / n))
+        on_progress(agg, msg)
+
+    def _solve(i: int, threads: int) -> HourlyIndicatorResult:
+        if cancel is not None and cancel():
+            raise RuntimeError("cancelled")
+        label, spd, drc = items[i]
+        work = Path(work_dir_for(i, label, spd, drc))
+        start = perf_counter()
+
+        def hp(pct, msg):
+            _emit(i, pct, f"{i + 1}/{n} {label}: {msg}")
+
+        hazard, vel = hourly_indicator(
+            dem=dem, cli=cli, dem_path=dem_path, work_dir=work,
+            wind_speed_ms=spd, wind_from_deg=drc, resolution_m=resolution_m,
+            vegetation=vegetation, edge_buffer_m=edge_buffer_m, force_run=force_run,
+            num_threads=threads, on_progress=hp, cancel=cancel,
+        )
+        _emit(i, 100, f"{i + 1}/{n} {label}: terminé")
+        return HourlyIndicatorResult(
+            label=label,
+            hazard=hazard,
+            speed_path=vel,
+            direction_path=find_direction_grid(work),
+            winds=[(cx, cy, float(spd), float(drc))],
+            elapsed_s=perf_counter() - start,
+        )
+
+    if on_progress is not None:
+        on_progress(0, f"{n} heures en parallèle ×{workers} ({per_run_threads} threads/run)")
+
+    failed: list[int] = []
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(_solve, i, per_run_threads): i for i in range(n)}
+        for fut in as_completed(futs):
+            i = futs[fut]
+            try:
+                results[i] = fut.result()
+            except Exception:
+                if cancel is not None and cancel():
+                    for other in futs:
+                        other.cancel()
+                    raise RuntimeError("cancelled")
+                failed.append(i)  # retry alone after the pool drains (rules out contention)
+
+    for i in sorted(failed):  # sequential fallback: no concurrency -> no rc=-1 races
+        if cancel is not None and cancel():
+            raise RuntimeError("cancelled")
+        if on_progress is not None:
+            on_progress(int(round(sum(progress) / n)), f"reprise séquentielle de l'heure {i + 1}/{n}…")
+        results[i] = _solve(i, cpu)  # full threads, alone; raises only if it truly fails
+
+    return [r for r in results if r is not None]

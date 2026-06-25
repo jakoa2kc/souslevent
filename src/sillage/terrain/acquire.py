@@ -61,6 +61,34 @@ def _ign_bil(south, west, north, east, w, h, timeout=90):
     return np.frombuffer(r.content, dtype="<f4").astype("float32").reshape(h, w)
 
 
+def _fetch_ign_tiles(jobs, tile_w, tile_h, tx, ty, on_done=None, cancel=None, max_workers=6):
+    """Fetch IGN tiles CONCURRENTLY (independent network requests) and stitch them into one
+    array. ``jobs`` = ``[(j, i, south, west, north, east), ...]`` (row-block ``j``, column ``i``).
+    ``on_done(done_count, total)`` reports progress as tiles arrive. The big win for fine fetches
+    (a 5 m target pulls many ~1 m-native tiles)."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    n = len(jobs)
+    grid: dict[tuple[int, int], np.ndarray] = {}
+    done = 0
+    with ThreadPoolExecutor(max_workers=max(1, min(n, max_workers))) as ex:
+        futs = {ex.submit(_ign_bil, ts, tw, tn, te, tile_w, tile_h): (j, i)
+                for (j, i, ts, tw, tn, te) in jobs}
+        try:
+            for fut in as_completed(futs):
+                if cancel is not None and cancel():
+                    raise RuntimeError("cancelled")
+                grid[futs[fut]] = fut.result()  # raises on a failed tile
+                done += 1
+                if on_done is not None:
+                    on_done(done, n)
+        except BaseException:
+            for f in futs:
+                f.cancel()
+            raise
+    return np.vstack([np.hstack([grid[(j, i)] for i in range(tx)]) for j in range(ty)])
+
+
 def _block_average(arr: np.ndarray, factor: int) -> np.ndarray:
     """Mean-pool by an integer factor (NaN-aware), trimming any remainder."""
     if factor <= 1:
@@ -115,21 +143,18 @@ def prepare_dem_ign(bbox_latlon, out_path, target_res_m: float = 50.0,
     tile_h = min(nat_h, ty * max_px) // ty
 
     prog(8, f"Téléchargement IGN RGE ALTI ~{fetch_res:.1f} m ({tx}×{ty} tuiles)…")
-    n = tx * ty
-    rows = []
+    jobs = []
     for j in range(ty):
         tn = north - (north - south) * j / ty
         ts = north - (north - south) * (j + 1) / ty
-        cols = []
         for i in range(tx):
-            if cancel is not None and cancel():
-                raise RuntimeError("cancelled")
             tw = west + (east - west) * i / tx
             te = west + (east - west) * (i + 1) / tx
-            cols.append(_ign_bil(ts, tw, tn, te, tile_w, tile_h))
-            prog(8 + (j * tx + i + 1) / n * 50.0, f"IGN tuile {j * tx + i + 1}/{n}…")
-        rows.append(np.hstack(cols))
-    arr = np.vstack(rows)
+            jobs.append((j, i, ts, tw, tn, te))
+
+    arr = _fetch_ign_tiles(
+        jobs, tile_w, tile_h, tx, ty, cancel=cancel,
+        on_done=lambda d, total: prog(8 + d / total * 50.0, f"IGN tuile {d}/{total}…"))
     arr[(arr < -400.0) | (arr > 9000.0)] = np.nan  # mask nodata / out-of-range
     if not np.isfinite(arr).any():
         raise RuntimeError("zone hors couverture IGN RGE ALTI")

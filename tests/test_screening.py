@@ -14,9 +14,12 @@ from rasterio.transform import from_origin  # noqa: E402
 from rasterio.crs import CRS  # noqa: E402
 
 import sys  # noqa: E402
+import threading  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 from sillage.terrain.dem import Dem  # noqa: E402
 from sillage.screening import indicator as ind  # noqa: E402
+from sillage.screening import pass1 as p1  # noqa: E402
 from sillage.flow.windninja import run_mass, run_momentum, FLAG  # noqa: E402
 from sillage.flow import windninja as wn  # noqa: E402
 
@@ -116,6 +119,56 @@ def test_run_cancel_terminates(tmp_path):
     )
     assert state["n"] >= 1
     assert "[cancelled by user]" in err
+
+
+def test_hourly_worker_plan_is_conservative():
+    workers, threads = p1.hourly_worker_plan(8, max_workers=99)
+    assert workers == 8
+    assert 1 <= threads <= 4
+    assert p1.hourly_worker_plan(0) == (0, 0)
+
+
+def test_hourly_indicator_stack_runs_parallel_and_preserves_order(monkeypatch, tmp_path):
+    dem = _synthetic_ridge(n=20, res_m=50.0)
+    barrier = threading.Barrier(3, timeout=5)
+    ran: set[str] = set()
+    calls: list[dict] = []
+
+    def fake_run_mass(**kw):
+        calls.append(kw)
+        barrier.wait()
+        ran.add(str(kw["working_dir"]))
+        return wn.WindNinjaRun(command=["x"], working_dir=kw["working_dir"], returncode=0)
+
+    def fake_find_speed_grid(work):
+        return Path(work) / "x_vel.asc" if str(work) in ran else None
+
+    monkeypatch.setattr(p1, "run_mass", fake_run_mass)
+    monkeypatch.setattr(p1, "find_speed_grid", fake_find_speed_grid)
+    monkeypatch.setattr(p1, "find_direction_grid", lambda work: Path(work) / "x_ang.asc")
+    monkeypatch.setattr(p1, "load_speed_grid", lambda path: np.ones(dem.shape))
+
+    series = [(f"h{i}", 6.0 + i, 270.0 + i) for i in range(3)]
+    results = p1.hourly_indicator_stack(
+        dem=dem, cli="WindNinja_cli", dem_path="/tmp/dem.tif", series=series,
+        work_dir_for=lambda i, *_args: tmp_path / f"h{i}", force_run=True, max_workers=3,
+    )
+
+    assert [r.label for r in results] == ["h0", "h1", "h2"]
+    assert len(calls) == 3
+    assert all(call["num_threads"] >= 1 for call in calls)
+    assert all(str(call["tmp_dir"]).endswith("_tmp") for call in calls)
+
+
+def test_run_timings_summary():
+    from sillage.timing import RunTimings, format_seconds
+
+    timings = RunTimings()
+    timings.add("a", 0.05)
+    timings.add("b", 1.25)
+    assert "a 50ms" in timings.summary()
+    assert "b 1.2s" in timings.summary()
+    assert format_seconds(65) == "1m05s"
 
 
 

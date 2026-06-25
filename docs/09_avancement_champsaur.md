@@ -322,3 +322,30 @@ Verification avant commit:
 - `.\.venv\Scripts\python.exe -m pytest -q` -> `58 passed`
 - Probe binaire: `WindNinja_cli --help` expose `--num_threads` et pas
   `--number_of_threads`.
+
+### 2026-06-25 — Acceleration calculs: heures Pass-1 paralleles + timings (Codex)
+
+Idees consignees:
+- Parallele le moins risque: les **heures Pass-1** sont independantes. On peut lancer plusieurs
+  WindNinja mass en meme temps, avec un cap workers/threads pour ne pas saturer la machine.
+- Deja realise avant cette passe: les **sous-zones spatial refine** tournent en parallele
+  (`ThreadPoolExecutor`) avec temp/cache PROJ isoles et retry sequentiel en cas d'echec.
+- A ne pas faire tout de suite: decouper un **unique Pass-2 momentum** en tuiles. Trop risque
+  cote conditions limites; on garde le domaine bufferise + clip visuel.
+- Prochaines idees utiles: cache `.npz` des stacks horaires, cache meteo/GRIB, benchmark
+  `--workers 1/2/4`, et plus tard parallele sur plusieurs Pass-2 independants.
+
+Realise:
+- `src/sillage/timing.py`: `RunTimings` pour consigner des durees de phases.
+- `screening/pass1.py`: `hourly_indicator_stack(...)` calcule plusieurs heures en parallele,
+  preserve l'ordre du creneau et transmet `--num_threads` a chaque run WindNinja.
+- IHM `on_run_hourly`: le criblage temporel utilise maintenant la pile parallele
+  (auto: max 4 heures concurrentes, max 4 threads/run) et affiche un resume de timings.
+- `scripts/champsaur_pass1_hourly.py`: meme chemin parallele + option `--workers`.
+- Tests ajoutes: concurrence reelle via `threading.Barrier`, ordre conserve, cap threads,
+  resume de timings.
+
+Verification:
+- Tests cibles `tests/test_screening.py` -> `11 passed`.
+- Import `python -B ...` -> OK.
+- Suite complete `.\.venv\Scripts\python.exe -m pytest -q` -> `61 passed`.

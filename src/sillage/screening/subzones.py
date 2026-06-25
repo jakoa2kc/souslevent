@@ -22,7 +22,7 @@ import numpy as np
 
 from ..flow.windninja import format_run_failure, run_mass
 from ..terrain.dem import Dem, crop_dem, write_dem
-from .pass1 import find_speed_grid, load_speed_grid
+from .pass1 import find_speed_grid, load_speed_grid, parallel_run_plan
 
 
 def subzone_bboxes(
@@ -141,9 +141,8 @@ def subzone_speed_field(
     if n == 0:
         return assemble_mosaic(dem, [])
 
-    cpu = os.cpu_count() or 4
-    workers = max(1, min(n, cpu if max_workers is None else max_workers))
-    per_run_threads = max(1, cpu // workers)
+    cpu = os.cpu_count() or 4  # full-thread count for the lone sequential retries below
+    workers, per_run_threads = parallel_run_plan(n, max_workers=max_workers)
 
     def _solve(i, threads):
         if cancel is not None and cancel():

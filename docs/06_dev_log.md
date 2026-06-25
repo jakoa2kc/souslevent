@@ -683,6 +683,25 @@ streaming-progress assertion for the new phase emission).
 
 ---
 
+## Entry 43 — Code-review follow-ups on the parallel pass (shared planner, hourly retry, parallel IGN tiles)  (2026-06-25)
+
+Reviewed the ChatGPT pass (parallel hourly Pass-1 + `RunTimings` + `format_run_failure` DRY) —
+solid and tested. Follow-ups applied:
+- **`timing.py` was untracked** though imported by committed code (`main_window`, the script,
+  tests) → would break a fresh clone on commit. **`git add`ed.**
+- **Unified the worker policy:** `hourly_worker_plan` generalised to **`parallel_run_plan(count,
+  max_workers, hard_cap=4)`** (alias kept); `subzone_speed_field` now uses it too, so both Pass-1
+  loops share the conservative 4-worker cap that tamed the intermittent `rc=-1`.
+- **Sequential fallback in `hourly_indicator_stack`:** an hour that fails in the parallel pass is
+  now **retried alone** at the end (parity with the sub-zones), so one transient WindNinja
+  failure no longer aborts the whole criblage.
+- **Parallel IGN tile fetches** (`acquire._fetch_ign_tiles`): the per-tile WMS requests run
+  concurrently (small pool) — the real win for fine fetches (a 5 m target pulls many ~1 m-native
+  tiles; the de-stripe + edge buffer multiplied the tile count).
+
+**Result.** Tests: **63 passed** (+2: concurrent+ordered IGN tile assembly, cancel). Still TODO:
+the momentum Pass-2 is the remaining CPU bottleneck (single solve; keep the domain lean).
+
 ## Entry 42 — WindNinja error-box review: real `num_threads`, temp isolation, clearer failures  (2026-06-25)
 
 **What changed.**
@@ -913,9 +932,9 @@ app/subscription), **not an open/programmatic source** — so for Sillage the op
 **Result.** Tests: **46 passed** (+7 for the key checker, forged JWTs). Local keys validate
 end-to-end through `config` → `check_arome_key`.
 
-**Security note.** Raw key lives only in `.env` (gitignored); the committed doc holds the
-**procedure + login account**, not the secret. Signature is not verified (we only read claims
-to detect expiry/scope — the gateway enforces real auth).
+**Security note.** Raw key lives only in `.env` (gitignored); optional account hints stay local
+via `METEOFRANCE_ACCOUNT_LOGIN` / `METEOFRANCE_ACCOUNT_EMAIL`. Signature is not verified (we
+only read claims to detect expiry/scope — the gateway enforces real auth).
 
 **Open questions.** GRIB2 ingestion (cfgrib/eccodes) + crest-level selection still to wire
 (M4); only then does AROME actually feed the criblage.
@@ -949,6 +968,48 @@ WindNinja downscaling. Real AROME 1.3 km needs the Météo-France GRIB API (key)
 
 **Open questions.** Reloading a *previous* Pass-2 case without recomputing was dropped "pour le
 moment" — re-add a loader if reviewing cached results becomes useful.
+
+---
+
+## Entry 43 — Speed pass: parallel hourly Pass-1 + timing breadcrumbs (ADR-0022)  (2026-06-25)
+
+**Ideas logged before coding.**
+- Parallelize **independent hours** in Pass-1: low risk because each hour has its own wind and
+  work directory.
+- Keep **sub-zone parallelism** already done (ADR-0017), but do not push it blindly higher:
+  WindNinja/GDAL needs isolated temp/cache and too many processes can become slower.
+- Do **not** tile one Pass-2 momentum solve yet: boundary-condition artifacts are exactly what
+  the buffered-domain work fixed (ADR-0021). Later, parallelize only independent Pass-2 jobs
+  (different rectangles/hours).
+- Add timing breadcrumbs before deeper tuning: DEM load/fetch, wind prep, WindNinja phases,
+  render/3D. Cache improvements should be driven by those durations.
+
+**What changed.**
+- New `screening.pass1.hourly_indicator_stack(...)`: runs the per-hour WindNinja mass solves on
+  a `ThreadPoolExecutor`, preserves time order, and caps each process with `--num_threads`.
+  Default hourly plan: max 4 concurrent hours, max 4 threads/run.
+- `hourly_indicator(...)` now accepts `num_threads`; each hour still gets its isolated
+  `<hour workdir>/_tmp`.
+- IHM `on_run_hourly`: temporal criblage now uses the parallel stack and reports a timing
+  summary in the status bar.
+- `scripts/champsaur_pass1_hourly.py`: same helper, plus `--workers` to benchmark/force the
+  number of concurrent hourly runs.
+- New `timing.RunTimings`: lightweight, thread-safe wall-clock phase duration collector.
+  Per-hour durations remain on each `HourlyIndicatorResult` and are printed by the CLI.
+
+**Already realized / not redone.**
+- Spatial sub-zone refine was already parallelized and retried sequentially on transient
+  failure (Entries 34/37/42).
+- WindNinja temp/cache isolation and real `--num_threads` were already corrected (Entry 42).
+
+**Result.** Targeted tests added for hourly concurrency/order and timings. Verification:
+`.\.venv\Scripts\python.exe -m pytest -q` -> **61 passed**.
+
+**Next speed ideas.**
+- Persist computed hourly hazard stacks (`.npz`) so reopening a day does not even reload/reduce
+  all ASCII grids.
+- Cache forecast responses by bbox/day/source, then AROME GRIB slices when wired.
+- Add a small benchmark command comparing `--workers 1/2/4` on the same cached/un-cached AOI.
 
 ---
 

@@ -20,10 +20,13 @@ from ..flow.windninja import format_run_failure, run_momentum
 from ..screening import indicator as ind
 from ..screening.pass1 import (
     find_direction_grid,
+    hourly_indicator_stack,
+    hourly_worker_plan,
     hourly_indicator,
     synthetic_series,
     upstream_crest_wind,
 )
+from ..timing import RunTimings
 from ..terrain.dem import crop_dem, load_dem, write_dem
 from ..viz import map2d, volume3d
 from .jobs import SolveJob
@@ -70,6 +73,7 @@ FORECAST_CELL_KM = 11.0       # effective horizontal resolution of the Open-Mete
 MAX_SUBZONES = 4              # cap per side -> at most MAX_SUBZONES^2 WindNinja runs / hour
 REFINE_MESH_FLOOR_M = 25.0    # don't mesh finer than this (Pass-1 is screening; keep it fast)
 REFINE_MAX_MESH_PX = 600      # cap cells per tile side -> raises the mesh on big single tiles
+TEMPORAL_MAX_WORKERS = 4      # cap concurrent hourly WindNinja mass solves (stability > greed)
 
 # The screening masks a border to drop WindNinja crop-edge artifacts. To still cover the WHOLE
 # selected zone, the prepared DEM is grown by this buffer on every side, then the view is cropped
@@ -234,7 +238,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Warn (popup) if the AROME API key is configured but invalid/expired/expiring.
 
         A *missing* key is silent — AROME is optional (Open-Meteo is the default forecast).
-        The popup carries the renewal procedure + login (docs/support/meteofrance_arome.md).
+        The popup carries the renewal procedure (docs/support/meteofrance_arome.md).
         """
         from ..wind.meteofrance import check_arome_key, renewal_text
 
@@ -1133,44 +1137,51 @@ class MainWindow(QtWidgets.QMainWindow):
 
             from ..wind.profile import window_forecast_provider
 
-            dem = load_dem(dem_path, max_domain_km=max_km)
+            timings = RunTimings()
+            with timings.measure("MNT"):
+                dem = load_dem(dem_path, max_domain_km=max_km)
             left, bottom, right, top = dem.bounds
             cx, cy = (left + right) / 2.0, (bottom + top) / 2.0
-            crest = float(np.nanpercentile(dem.elevation, 80))
-            make = window_forecast_provider(dem, crest, n_hours=hi, source="open_meteo")
-            try:
-                make(lo)(cx, cy)  # probe: real crest forecast available?
-                src = "prévision"
-            except Exception:
-                make = None
-                src = "synthétique"
 
-            out = []
-            for i in range(count):
-                if cancel():
-                    raise RuntimeError("cancelled")
-                h = lo + i
-                if make is not None:
-                    spd, drc = make(h)(cx, cy)  # one domain-average wind per hour
-                else:
-                    _l, spd, drc = syn[i]
-                work = cache_dir / "aoi" / "creneau" / dem_tag / f"{day_tag}_h{h:02d}_t"
+            with timings.measure("vent"):
+                crest = float(np.nanpercentile(dem.elevation, 80))
+                make = window_forecast_provider(dem, crest, n_hours=hi, source="open_meteo")
+                try:
+                    make(lo)(cx, cy)  # probe: real crest forecast available?
+                    src = "prévision"
+                except Exception:
+                    make = None
+                    src = "synthétique"
 
-                def hp(pct, msg, i=i):
-                    on_progress(int((i + pct / 100.0) / count * 100),
-                                f"{src} {i + 1}/{count} : {msg}")
+                series = []
+                for i in range(count):
+                    if cancel():
+                        raise RuntimeError("cancelled")
+                    h = lo + i
+                    if make is not None:
+                        spd, drc = make(h)(cx, cy)  # one domain-average wind per hour
+                    else:
+                        _l, spd, drc = syn[i]
+                    series.append((labels[i], float(spd), float(drc)))
 
-                hazard, vel = hourly_indicator(
-                    dem=dem, cli=cli, dem_path=dem_path, work_dir=work,
-                    wind_speed_ms=spd, wind_from_deg=drc, resolution_m=200.0,
-                    force_run=False, on_progress=hp, cancel=cancel,
+            def work_dir_for(i, _label, _spd, _drc):
+                return cache_dir / "aoi" / "creneau" / dem_tag / f"{day_tag}_h{lo + i:02d}_t"
+
+            with timings.measure("Pass-1"):
+                results = hourly_indicator_stack(
+                    dem=dem, cli=cli, dem_path=dem_path, series=series,
+                    work_dir_for=work_dir_for, resolution_m=200.0, force_run=False,
+                    max_workers=TEMPORAL_MAX_WORKERS, on_progress=on_progress, cancel=cancel,
                 )
-                out.append((labels[i], hazard, vel, find_direction_grid(work),
-                            [(cx, cy, float(spd), float(drc))]))  # one domain wind / hour
-            return dem, src, out
+            out = [
+                (r.label, r.hazard, r.speed_path, r.direction_path, r.winds)
+                for r in results
+            ]
+            return dem, src, out, timings.summary()
 
         self._cancelling = False
-        self._set_running(True, f"Criblage temporel ({count} h)…")
+        workers, threads = hourly_worker_plan(count, max_workers=TEMPORAL_MAX_WORKERS)
+        self._set_running(True, f"Criblage temporel ({count} h, parallèle ×{workers}, {threads} thr/run)…")
         job = SolveJob(fn, self)
         job.progress.connect(self._on_job_progress)
         job.finished.connect(self._on_hourly_finished)
@@ -1179,7 +1190,7 @@ class MainWindow(QtWidgets.QMainWindow):
         job.start()
 
     def _on_hourly_finished(self, result) -> None:
-        dem, src, stack = result
+        dem, src, stack, timings = result
         self._dem = dem
         self._update_refine_info()
         self._hourly = stack
@@ -1190,7 +1201,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hour_slider.blockSignals(False)
         self._set_hour_ticks()
         self._show_hour(0)
-        self._finish_job(f"Criblage temporel ({src}) : {len(stack)} heures")
+        self._finish_job(f"Criblage temporel ({src}) : {len(stack)} heures — {timings}")
 
     def _refine_grid(self) -> tuple[int, int, int]:
         """(nx, ny, mesh_m) for the spatial refine. Wind sub-zones ~ AOI / forecast cell

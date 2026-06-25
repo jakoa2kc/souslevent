@@ -64,3 +64,35 @@ def test_winstral_shelter_responds_to_direction():
     n = dem.shape[1]
     east_point = (slice(None), slice(n // 2 + 3, n // 2 + 6))
     assert shelter_w[east_point].mean() > shelter_e[east_point].mean()
+
+
+def test_fetch_ign_tiles_runs_concurrent_and_assembles_in_order(monkeypatch):
+    import threading
+
+    from sillage.terrain import acquire
+
+    barrier = threading.Barrier(4, timeout=5)  # all 4 must be in flight at once
+
+    def fake_ign_bil(south, west, north, east, w, h):
+        barrier.wait()  # raises BrokenBarrierError if they did NOT run concurrently
+        code = round(west) * 100 + round(north)  # encode this tile's (col, row) position
+        return np.full((h, w), code, dtype="float32")
+
+    monkeypatch.setattr(acquire, "_ign_bil", fake_ign_bil)
+    tx = ty = 2
+    jobs = [(j, i, 0.0, float(i), float(10 - j), 0.0) for j in range(ty) for i in range(tx)]
+    arr = acquire._fetch_ign_tiles(jobs, tile_w=3, tile_h=3, tx=tx, ty=ty, max_workers=4)
+
+    assert arr.shape == (ty * 3, tx * 3)
+    assert arr[0, 0] == 10      # j=0,i=0 -> west 0, north 10
+    assert arr[0, 3] == 110     # j=0,i=1 -> west 1, north 10 (top-right block)
+    assert arr[3, 0] == 9       # j=1,i=0 -> west 0, north 9  (bottom-left block)
+
+
+def test_fetch_ign_tiles_cancel_raises(monkeypatch):
+    from sillage.terrain import acquire
+
+    monkeypatch.setattr(acquire, "_ign_bil", lambda *a: np.zeros((2, 2), dtype="float32"))
+    jobs = [(0, 0, 0.0, 0.0, 1.0, 1.0), (0, 1, 0.0, 1.0, 1.0, 2.0)]
+    with pytest.raises(RuntimeError):
+        acquire._fetch_ign_tiles(jobs, 2, 2, 2, 1, cancel=lambda: True)

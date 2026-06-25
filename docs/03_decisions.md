@@ -485,6 +485,12 @@ unchanged.
   gets an **isolated temp dir** (`<tile workdir>/_wn_tmp` via `TMP`/`TEMP`/`TMPDIR`/`CPL_TMPDIR`).
   Momentum/OpenFOAM keeps the normal system temp environment because project temp redirection can
   trigger access violations on this Windows build. Each tile also **retries once**.
+- **Generalized (2026-06-25):** the same policy now drives **hourly Pass-1** too (independent
+  hours run concurrently — `pass1.hourly_indicator_stack`). Both loops share one planner,
+  **`pass1.parallel_run_plan(count, max_workers, hard_cap=4)`** (the 4-worker cap is the stability
+  knob), and both do **parallel-then-sequential-retry** on failures. Separately, the IGN DEM
+  **tile fetches** run concurrently (`acquire._fetch_ign_tiles`) — pure network I/O, the main win
+  for fine 5 m fetches that pull many ~1 m-native tiles.
 
 ---
 
@@ -586,6 +592,37 @@ lateral-margin frame.
   spread over more area); fine for the small Pass-2 windows.
 - The terrain still shows the buffered context; only the rotor is clipped to the zone.
 - A genuinely taller/wider need (very large lee) would still want a larger drawn zone.
+
+---
+
+## ADR-0022 — Parallelize independent hourly Pass-1 mass solves, with timing breadcrumbs
+
+**Status:** accepted
+
+**Context.** The temporal criblage runs one WindNinja **mass** solve per hour. Those hours are
+independent (same DEM, different domain-average wind, distinct work dirs), so running them
+sequentially makes a 6 h window feel unnecessarily long. Sub-zone refine is already parallel
+(ADR-0017); hourly Pass-1 can use the same idea, with its own stability cap.
+
+**Decision.** Add `screening.pass1.hourly_indicator_stack(...)`: it runs independent hours on a
+`ThreadPoolExecutor`, preserves the original time order in the returned stack, and caps each
+WindNinja process with `run_mass(num_threads=...)` / `--num_threads`. The default plan is
+conservative: at most **4 concurrent hourly runs**, with at most **4 WindNinja threads per run**.
+Each hour keeps its own work dir and isolated temp dir (`<hour workdir>/_tmp`) through
+`hourly_indicator(...)`.
+
+The IHM `on_run_hourly` and `scripts/champsaur_pass1_hourly.py` now use this shared helper.
+The script exposes `--workers` for manual benchmarking. A small `timing.RunTimings` helper
+records coarse phase durations (DEM, wind preparation, Pass-1, per-hour timings) so future
+optimizations are guided by real wall-clock evidence.
+
+**Consequences.**
+- Best first acceleration: 4 h/6 h windows should finish in waves instead of one long queue,
+  bounded by CPU, disk and WindNinja startup overhead.
+- Pass-2 momentum is **not** tiled/parallelized inside one solve because boundary conditions can
+  create artifacts; only independent Pass-2 jobs should be parallelized later.
+- The next worthwhile speedups are cache-oriented: persisted hazard stacks, forecast JSON/GRIB
+  cache, and optional Pass-2 case reuse.
 
 ---
 
