@@ -683,6 +683,39 @@ streaming-progress assertion for the new phase emission).
 
 ---
 
+## Entry 49 — Auto: select a flight ROUTE (corridor) instead of a rectangle (ADR-0024)  (2026-06-26)
+
+A paraglider flies a route, not a rectangle. The auto map is now in **route mode**
+(`MapTab(mode="route")`): left-click adds a waypoint, right-click removes the last, double-click
+finishes → `routeSelected([(lat,lon),…])`. `run_auto` takes `route_latlon` + `corridor_margin_km`:
+screens the **route bbox + margin** (`bbox_from_route`), then **masks the hazard to a corridor**
+around the polyline (`partition.corridor_mask`) before feature placement → the expensive Pass-2
+runs only on the **reliefs along the route**. A « Marge corridor » spinbox (default 2 km) tunes it.
+`MapTab` now supports both modes (rectangle for the manual app, route for auto) via a token-injected
+JS block (no `.format` brace escaping). The corridor is **drawn live** (turf.js buffer, updates on
+each point + on the margin spinbox via `MapTab.set_margin_km`), and the route is sent to Python **on
+every change** so **« Valider » uses the current route** (no double-click needed; double-click just
+tidies the last point).
+
+**Result.** Tests: **73 passed** (+ corridor mask band, route bbox). Manual app keeps the rectangle.
+
+## Entry 48 — Auto: feature-based momentum domains instead of a grid (fix seam artifacts, ADR-0023)  (2026-06-26)
+
+The grid decomposition gave bad results: independent RANS solves don't share boundary conditions,
+so the flow "climbed" (`remonte vers le haut`) at **every internal seam**, and clipping cut rotors
+that span a seam. No stitching fixes independent solves (would need solver coupling WindNinja
+doesn't expose).
+
+**Pivot (ADR-0023):** don't tile. `run_auto` now screens the whole zone once with the continuous
+Pass-1 **mass** solver → hazard → `find_candidates` → **`auto.partition.feature_domains`** places
+**one momentum domain per feature**, half-sized to ~`lee_factor × local relief / 2` so it contains
+the feature's full lee in any wind direction. Features are separated → no seams, no cut rotors;
+flat areas get no rotor (correct). Each (feature × hour) keeps the local AROME wind + the
+clip-to-domain (ADR-0021). `partition_zone` (grid) stays but is unused by `run_auto`.
+
+**Result.** Tests: **71 passed** (+ `feature_domains`: two peaks → two square lee-sized domains).
+This is the original two-pass design (ADR-0003), automated: Pass-1 placement → per-feature Pass-2.
+
 ## Entry 47 — Auto concurrency = CPU cores (psutil physical, fallback 14) + momentum thread cap  (2026-06-25)
 
 `AutoConfig.momentum_workers` now defaults to **`pipeline.detect_cores()`** — physical cores via
@@ -1040,7 +1073,7 @@ moment" — re-add a loader if reviewing cached results becomes useful.
 
 ---
 
-## Entry 43 — Speed pass: parallel hourly Pass-1 + timing breadcrumbs (ADR-0022)  (2026-06-25)
+## Entry 43 — Speed pass: parallel hourly Pass-1 + timing breadcrumbs (ADR-0017b)  (2026-06-25)
 
 **Ideas logged before coding.**
 - Parallelize **independent hours** in Pass-1: low risk because each hour has its own wind and
@@ -1079,6 +1112,200 @@ moment" — re-add a loader if reviewing cached results becomes useful.
   all ASCII grids.
 - Cache forecast responses by bbox/day/source, then AROME GRIB slices when wired.
 - Add a small benchmark command comparing `--workers 1/2/4` on the same cached/un-cached AOI.
+
+---
+
+## Entry 44 — Disk fix: compact + delete momentum cases; tighter/finer auto domains; boundary clip (ADR-0025/0026)  (2026-06-26)
+
+**Trigger.** Two user reports in one session. First, *"un truc me remplit le disque dur !!"* — the
+compute cache had grown to **24.6 GB**, of which **22.9 GB in 107 `NINJAFOAM_*` OpenFOAM cases** that
+the auto pipeline created (one per feature×hour) and **never deleted**; the C: drive was down to **7 GB
+free**. Second, after that: the route mode *"fait les calculs sur un rectangle qui englobe toute la zone
+avec un mesh très grossier"* (not small fine per-feature domains) and *"les rotors remontent au bord du
+domaine… comme un v=0 au lieu de laisser passer le flux"*.
+
+**Disk (ADR-0025).** Confirmed the source (no other writer), freed **23 GB** by deleting the
+`NINJAFOAM_*` dirs (kept the DEMs). Then fixed at the root: each solved case is **compacted** — extract
+just the clipped rotor mesh (`auto.scene.extract_rotor` → `along_flow`) to a small `.vtu`, then **delete
+the OpenFOAM case + run dir + crop** (`pipeline._compact_case`, run in the main thread as futures
+complete). Plus `_clean_stale` (wipe the previous run's leftovers, keep DEM/screening), a `MIN_FREE_GB`
+**disk guard** that stops launching solves and keeps what's done, and `locate_openfoam_case(dem_stem=…)`
+so parallel solves can't grab each other's case. The scene reads the `.vtu` (falls back to the case).
+
+**Domains + boundary (ADR-0026).** Diagnosed both symptoms to a shared cause — domains were sized up to
+**7 km half** and meshed at only **150 k** cells (coarse, near zone-blanketing), with a thin **700 m**
+buffer. The "climb" is a real CFD artifact: NinjaFOAM's lateral/outlet faces are **inlet/outlet**, and
+`inletOutlet` clamps reverse flow at the boundary to the free-stream → recirculation deflects up the
+edge. We can't set that BC (WindNinja owns it); the cure is domain sizing. Changes: domains tighter
+(`lee_factor 6→5`, `min_half 1200→1000`, `max_half 3500→2500`), mesh `150 k→300 k` (affordable now cases
+are compacted), buffer `700→1200`, and `_clip_domain_boundary` now **always drops a boundary band**
+(inside the drawn zone AND off the solver edge). Added `scene._add_domain_box` to outline each analysed
+sub-domain on the 3D terrain so the per-feature structure is visible.
+
+**Result.** `pytest -q` → **77 passed** (added: parallel case-stem disambiguation, `_clean_stale`,
+`_compact_case` fallback, `_free_gb`). Awaiting a live re-run to confirm the rotor no longer climbs and
+the per-feature boxes read as fine/tight. Open levers: per-crop IGN 5 m topo, a UI precision (mesh) slider.
+
+**Update.** Superseded by Entry 51 for the default disk policy: normal UI runs keep full cases until
+window close; compaction remains optional, not the main cleanup path.
+
+---
+
+## Entry 45 — AROME wind arrows along the route: 2D map (active handle) + 3D (render hour)  (2026-06-26)
+
+**Goal.** Show the upstream wind actually feeding Pass-2 — the AROME 1.5 km cells crossed by the
+route, at the highest available AGL — as arrows, on the **2D selection map** (tracking the créneau
+handle being dragged, min *or* max) and on the **3D result** (tracking the visualisation hour).
+
+**What changed.**
+- `auto.wind` already exposed `route_wind_series(route, n_hours)` (one Open-Meteo AROME-HD call for
+  all ~1.5 km cells along the route → per-cell hourly series) and `arrows_at_hour(cells, hour)`.
+- `app.map_tab.MapTab.show_wind(arrows)` + a `window.showWind` JS layer draw rotated SVG arrows
+  (coloured by speed, pointing where the wind blows **to** = `(from+180)%360`, with a speed label).
+- `auto.scene.populate_auto_scene(…, route_winds=…)` draws the same winds in 3D via
+  `volume3d._add_wind_arrows_3d` (winds passed in the DEM CRS).
+- `auto.window` wiring: a **debounced** (600 ms) fetch on route change runs `route_wind_series` on a
+  worker thread over the **whole** forecast window, so slider scrubbing is then instant. 2D arrows
+  redraw on `window_slider.valueChanged` keyed to the **handle being moved** (`_active_window_hour`
+  diffs against the previous (lo, hi)); 3D arrows redraw on hour-scrub (`_route_winds_utm` warps the
+  cells to the DEM CRS). A fetch is also kicked at « Valider » so the 3D has winds even if drawn fast.
+
+**Why these choices.** One fetch per route (not per slider tick) keeps the UI responsive and the API
+calls minimal; keying the 2D arrows to the moving handle matches "le curseur en cours de modification
+(min ou max)"; the 3D follows the rendered hour. Highest-AGL AROME HD ≈ the near-free-stream that the
+momentum BC uses, so the arrows are the *same* wind Pass-2 is initialised with.
+
+**Result.** `pytest -q` → **79 passed** (added `_sample_route` densify/endpoints + `arrows_at_hour`
+index/clamp). GUI module imports clean (offscreen). Not yet committed.
+
+---
+
+## Entry 50 — Codex review/consolidation before big auto tests  (2026-06-26)
+
+**Findings fixed.**
+- **High risk: stale Pass-1 cache in auto.** `run_auto` reused one fixed `auto/screening` folder.
+  A new route/wind/DEM could silently reuse an old `*_vel.asc`, then place Pass-2 features in the
+  wrong terrain. Added `_screening_work_dir(...)`, keyed by DEM stem + representative wind + res.
+- **Too aggressive default parallelism.** Claude's auto mode defaulted to all physical cores
+  (14 here). Before benchmarking NinjaFOAM/OpenFOAM, default is now conservative:
+  `default_momentum_workers() = min(4, detected cores)`, while the UI slider can still go higher.
+- **Disk leak on "no rotor" cases.** `_compact_case` kept full OpenFOAM cases when extraction
+  produced an empty rotor mesh. It now deletes case/run/crop and records `case_dir=""`.
+- **Boundary-only rotor artifact.** The manual 3D clip keeps the original mesh if clipping would
+  blank the view, but auto compaction now passes `keep_if_empty=False` so a rotor made only of
+  boundary artifacts is persisted as empty, not resurrected.
+- **Disk guard propagation.** `disk_abort` now reaches running `run_momentum(...)` through a combined
+  cancel callback, so a low-disk stop is not limited to queued tasks.
+- **Route wind race.** Route AROME arrows are cleared on route change and fetched payloads are
+  discarded if they belong to an older route, avoiding stale arrows while drawing.
+- **Doc consistency.** The duplicate ADR number was corrected: hourly Pass-1 parallelism is
+  `ADR-0017b`; the auto pipeline remains `ADR-0022`.
+
+**Also hardened.** Empty routes now raise a clear `ValueError`; `arrows_at_hour` clamps negative
+indices to hour 0; docstrings now say feature domains rather than sub-zone grid where applicable.
+
+**Verification.** Targeted auto/pass2 tests first: `48 passed`. Full suite after consolidation:
+`.\.venv\Scripts\python.exe -m pytest -q` -> **82 passed**.
+
+---
+
+## Entry 51 — Disk policy corrected: cleanup on auto-window close, not mid-run compaction  (2026-06-26)
+
+**Trigger.** User clarification: the disk problem is not capacity *during* a run, but stale results
+accumulating after the program closes. So chasing megabytes during calculation is the wrong trade-off
+if it can make WindNinja/OpenFOAM or VTK rendering more fragile.
+
+**What changed.**
+- `run_auto` now keeps full OpenFOAM cases during normal UI runs. `_compact_case` is retained only
+  behind `AutoConfig.compact_cases_during_run=True` for a future low-disk mode.
+- New `cleanup_auto_artifacts(cache_dir)` removes `<cache>/auto` transient artifacts:
+  `NINJAFOAM_*`, `z*_run`, `z*.tif`, `z*_rotor.vtu`; it keeps reusable `dem_*.tif` and `screening/`.
+- `AutoWindow.closeEvent` cleans the auto artifacts on close. If a solve is still running, it asks
+  cancellation and refuses to delete under OpenFOAM's feet; if a route-wind fetch is still running,
+  it waits briefly before closing.
+- The cleanup still runs at the start of the next auto run, so a crash/forced kill is repaired on
+  the next launch.
+- ADR-0025 and docs/10 updated: session cleanup is now the normal disk strategy; compaction is optional.
+
+**Verification.** Targeted auto/pass2: `48 passed`. Full suite:
+`.\.venv\Scripts\python.exe -m pytest -q` -> **82 passed**.
+
+---
+
+## Entry 52 — Auto UI: CPU integer-division plan beside concurrent-solve slider  (2026-06-26)
+
+**Why.** The "Calculs simultanés" slider controls the number of concurrent NinjaFOAM solves, while
+each solve receives `--num_threads = cores // workers`. On a 14-core box, `4` workers means
+`4 × 3 = 12` cores used and 2 idle; values that divide the CPU exactly (`1, 2, 7, 14`) are more
+predictable. The user needs that information before launching, while selecting route + créneau.
+
+**What changed.**
+- Added `momentum_parallel_plan(...)`: pure helper returning requested/actual workers,
+  threads per worker, used/idle cores, and perfect worker divisors.
+- `run_auto` now uses the same helper for its exact launch message.
+- `AutoWindow` now shows a live **Plan CPU** line below the slider:
+  `N calculs en parallèle × T threads = U/C cœurs`, idle cores, perfect divisors, and a useful cap
+  based on selected hours × `DEFAULT_MAX_FEATURES` (the exact feature count remains known only after
+  Pass-1 criblage).
+
+**Verification.** Import without `.pyc` OK. Targeted auto/pass2: `49 passed`. Full suite:
+`.\.venv\Scripts\python.exe -m pytest -q` -> **83 passed**.
+
+---
+
+## Entry 53 — 3D basemap alignment + horizontal scale  (2026-06-26)
+
+**Trigger.** User observed the 3D basemap shifted south by a few hundred metres relative to the
+reconstructed terrain. Separate observation: Pass-2 wakes can look different from Pass-1 because
+Pass-1 auto uses one representative screening wind, while each Pass-2 feature/hour uses local wind.
+
+**What changed.**
+- `viz.volume3d._drape_basemap`: web tiles are fetched in WebMercator, then explicitly reprojected
+  to the DEM/terrain CRS before being converted to a PyVista texture. Directly stretching the
+  WebMercator mosaic on the UTM terrain was the likely visible south/north offset.
+- `viz.volume3d._terrain_mesh`: DEM samples are placed at pixel centres, not on outer raster bounds,
+  removing a smaller but real half-pixel stretch/shift between elevation points and rasters.
+- Added a floating horizontal scale bar to Pass-1 3D, manual Pass-2 3D and auto Pass-2 aggregate
+  scenes, alongside the north/flow indicators.
+- `auto.pipeline.run_auto`: progress now logs the representative wind used by Pass-1 screening, so
+  it is easier to compare it with the per-feature/per-hour Pass-2 winds.
+- ADR-0027 documents the 3D georeferencing rule.
+
+**Verification.** Targeted pass2/3D: `33 passed`. Full suite:
+`.\.venv\Scripts\python.exe -m pytest -q` -> **86 passed**. `git diff --check` clean
+(Windows LF/CRLF warnings only).
+
+---
+
+## Entry 54 — Parallelism-aware progress/ETA + right-drag 3D pan (ADR-0028)  (2026-06-26)
+
+**Progress/ETA was nonsense (user report).** A 5-feature × 1-hour run on 5 workers logged
+"1/5 · 20% · reste ~122m" then finished ~2 min later. Root cause in `auto.progress`: ETA was
+``mean(task time) × remaining_tasks`` — but the 5 solves ran as **one parallel wave**, so the first
+completion (≈30 min wall, inflated by CPU contention) × 4 remaining ≈ 120 min, while the other four
+were essentially done. Fix (ADR-0028): model **waves** = ``ceil(total/workers)``. Total wall
+estimate = ``mean solve × waves``; ``eta = estimate − elapsed`` (wall-clock anchored, injectable clock
+for tests); the headline percent is the elapsed fraction of the estimate, floored by the real
+completed fraction. `run_auto` builds `ProgressTracker(total, workers=plan.workers)`, calls `start()`
+at the first solve, and emits `display_percent`. The window ETA label now ticks the last worker ETA
+**down** between updates (it was recomputed from a frozen percent, so it drifted up). Known limit:
+momentum emits no in-solve %, so a single wave (workers ≥ tasks) stays indeterminate until the first
+completion — choosing fewer workers ⇒ more progress feedback (more waves).
+
+**3D pan.** Terrain style locks rotation but only pans with middle-drag / Shift+left (undiscoverable).
+Added `viz.volume3d.enable_right_drag_pan(plotter)`: observes the VTK interactor directly, **right-drag
+= grab-and-pan** (`_pan_camera` shifts camera+focal in the view plane via the focal-distance × FOV
+pixel scale), aborts the right-button events so the style's right-zoom doesn't fight it, and leaves
+left-drag rotation untouched. Wired into both 3D viewports (auto window + manual créneau plotter).
+
+**Review of the parallel ChatGPT pass.** Solid and kept: `momentum_parallel_plan`, keyed
+`_screening_work_dir`, `closeEvent` cancel+clean, WebMercator→UTM basemap reprojection, pixel-centre
+`_terrain_mesh`, `_clip_domain_boundary(keep_if_empty=…)`. Flagged (not changed): `compact_cases_during_run`
+defaults False, so a *large* single run keeps every OpenFOAM case and can still hit the `MIN_FREE_GB`
+abort mid-run — fine for small runs, worth defaulting ON or capping retained cases before big batches.
+
+**Result.** `pytest -q` → **87 passed** (added wave-ETA + parallel-collapse progress tests). GUI
+modules import (offscreen). Not committed.
 
 ---
 

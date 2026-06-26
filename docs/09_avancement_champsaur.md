@@ -349,3 +349,98 @@ Verification:
 - Tests cibles `tests/test_screening.py` -> `11 passed`.
 - Import `python -B ...` -> OK.
 - Suite complete `.\.venv\Scripts\python.exe -m pytest -q` -> `61 passed`.
+
+### 2026-06-26 — Revue/consolidation mode auto avant gros tests (Codex)
+
+Contexte:
+- Demande: revue des nouveautes faites avec Claude en mode auto, consolidation avant gros
+  tests terrain/WindNinja.
+
+Risques corriges:
+- Cache Pass-1 auto trop large: `run_auto` reutilisait un dossier `auto/screening` fixe.
+  Le cache est maintenant cle par DEM + vent representatif + resolution pour eviter qu'une
+  nouvelle route relise une ancienne grille vitesse.
+- Parallele momentum par defaut trop agressif: retour a un defaut prudent
+  `min(4, coeurs detectes)`, avec slider UI jusqu'a tous les coeurs pour benchmarks.
+- Compactage disque: les cases sans rotor clippe sont maintenant supprimees comme les autres
+  (pas de conservation d'un OpenFOAM complet pour afficher "rien").
+- Artefact de bord: le clip 3D manuel garde son comportement protecteur, mais le mode auto
+  peut maintenant obtenir un rotor vide quand tout le volume etait hors domaine utile.
+- Stop disque: l'alerte espace disque se propage aussi aux solves momentum deja en cours.
+- Vent AROME route: les fleches sont videes au changement de route et les resultats d'une
+  ancienne route sont ignores.
+- Docs: `ADR-0017b` pour le parallele horaire Pass-1; `ADR-0022` conserve le mode auto.
+
+Verification:
+- Tests cibles auto/pass2: `48 passed`.
+- Suite complete: `.\.venv\Scripts\python.exe -m pytest -q` -> `82 passed`.
+
+### 2026-06-26 — Info CPU/parallele dans la selection auto (Codex)
+
+Demande:
+- Afficher pendant la selection trajet/creneau combien de calculs peuvent tourner en
+  parallele et comment les coeurs sont repartis par division entiere.
+
+Realise:
+- Ajout de `momentum_parallel_plan(...)`: calcule `workers`, `threads/worker`,
+  coeurs utilises, coeurs au repos et les valeurs qui divisent parfaitement le CPU.
+- La fenetre auto affiche maintenant une ligne **Plan CPU** sous le slider:
+  `N calculs en parallele x T threads = U/C coeurs`, plus les divisions parfaites
+  (ex: `1, 2, 7, 14`) et le plafond utile estime depuis le creneau.
+- `run_auto` utilise le meme helper pour que le message de lancement corresponde a l'IHM.
+
+Verification:
+- Import sans ecriture `.pyc` OK.
+- Tests cibles auto/pass2: `49 passed`.
+- Suite complete: `.\.venv\Scripts\python.exe -m pytest -q` -> `83 passed`.
+
+### 2026-06-26 — Correction strategie disque auto: nettoyage fermeture (Codex)
+
+Clarification utilisateur:
+- Le probleme disque vient surtout de l'accumulation des resultats apres fermeture du
+  programme, pas d'un manque de place pendant le run. Donc le compactage agressif en cours
+  de calcul n'est pas le bon defaut s'il peut fragiliser le calcul ou le rendu.
+
+Realise:
+- `run_auto` garde maintenant les cases OpenFOAM completes pendant une session IHM normale.
+- `_compact_case` reste disponible uniquement en mode optionnel
+  `compact_cases_during_run=True`, pas active par defaut.
+- Ajout de `cleanup_auto_artifacts(cache_dir)`: supprime les artefacts temporaires auto
+  (`NINJAFOAM_*`, `z*_run`, `z*.tif`, `z*_rotor.vtu`) sous `<cache>/auto`, en gardant les
+  DEM reutilisables et le cache Pass-1 `screening/`.
+- `AutoWindow.closeEvent`: nettoyage a la fermeture; si un calcul est en cours, demande
+  d'abord l'annulation et ne supprime pas sous les pieds d'OpenFOAM.
+- Le meme nettoyage reste appele au demarrage du prochain run auto pour reparer les
+  fermetures forcees/crashs.
+
+Verification:
+- Tests cibles auto/pass2: `48 passed`.
+- Suite complete: `.\.venv\Scripts\python.exe -m pytest -q` -> `82 passed`.
+
+### 2026-06-26 — Alignement fond de carte 3D + lecture Pass1/Pass2 (Codex)
+
+Constat utilisateur:
+- Le fond de carte 3D est visiblement decale vers le sud de quelques centaines de metres.
+- Les resultats sous le vent ne sont pas forcement faux: le vent Pass2 peut etre tres different
+  du vent Pass1 utilise pour le criblage, ce qui change fortement l'orientation du rotor.
+
+Diagnostic:
+- Bug probable cote rendu 3D: les tuiles de fond arrivent en WebMercator, puis etaient plaquees
+  directement sur le terrain UTM. En 2D contextily reprojette, mais en 3D c'est a nous de le faire.
+- Petit ecart additionnel possible: le relief 3D etait place sur les bords externes du raster,
+  alors que les valeurs MNT sont des echantillons au centre des pixels.
+- Cote calcul: `run_auto` utilise un vent representatif pour detecter les features en Pass1, puis
+  un vent local par feature et par heure pour les solves Pass2; une divergence visuelle peut donc
+  venir de la meteo et pas du georeferencement.
+
+Realise:
+- `_drape_basemap` reprojette maintenant le raster WebMercator en CRS terrain avant texture PyVista.
+- `_terrain_mesh` place les points du relief aux centres de pixels du MNT.
+- Ajout d'une echelle horizontale dans les scenes 3D Pass1, Pass2 manuel et Pass2 auto.
+- Le log auto affiche le vent representatif du criblage Pass1 pour comparaison avec les vents Pass2.
+- ADR-0027 ajoute la regle de georeferencement 3D.
+
+Verification:
+- Tests cibles `tests/test_pass2.py` -> `33 passed`.
+- Suite complete `.\.venv\Scripts\python.exe -m pytest -q` -> `86 passed`.
+- `git diff --check` OK (warnings LF/CRLF Windows seulement).

@@ -595,7 +595,7 @@ lateral-margin frame.
 
 ---
 
-## ADR-0022 — Parallelize independent hourly Pass-1 mass solves, with timing breadcrumbs
+## ADR-0017b — Parallelize independent hourly Pass-1 mass solves, with timing breadcrumbs
 
 **Status:** accepted
 
@@ -628,7 +628,7 @@ optimizations are guided by real wall-clock evidence.
 
 ## ADR-0022 — Automatic full-resolution pipeline as an additive package (`sillage.auto`)
 
-**Status:** accepted (architecture in place; AROME wind + UI are follow-ups)
+**Status:** accepted (active auto route/feature pipeline; tuning ongoing)
 
 **Context.** The manual app picks ONE feature per Pass-2. We also want a **"one-click" mode**:
 zone + window → solve the *whole* zone at the finest topo scale, automatically, then browse a
@@ -637,13 +637,15 @@ existing lower layer (DEM, partition, momentum, wind, 3D).
 
 **Decision.** Add a **separate package `sillage.auto`** rather than fork the app — the manual
 two-pass tool stays untouched. The auto pipeline:
-- **Subdivides** the zone with a **relief-adaptive quadtree** (`auto.partition`): split while the
-  estimated mesh exceeds a cell budget *or* the relief span exceeds a cap (so one upstream-constant
-  wind stays a sound Pass-2 BC — ADR-0003). Fine tiling where busy, coarse where flat.
-- **Solves** Pass-2 momentum over each **(sub-zone × hour)** on a buffered crop (`run_auto`),
-  reusing `flow.windninja.run_momentum`, the `parallel_run_plan` policy, and the
-  parallel-then-sequential-retry. Momentum is CPU-bound (ADR-0006) and its temp env can't be
-  redirected (Entry 38), so the default is **sequential** (`momentum_workers=1`).
+- **Screens** the zone/corridor once with Pass-1, then places one bounded momentum domain per
+  high-hazard feature (`auto.partition.feature_domains`, ADR-0023). The older relief-adaptive
+  quadtree helper remains available but is not the active auto strategy.
+- **Solves** Pass-2 momentum over each **(feature × hour)** on a buffered crop (`run_auto`),
+  reusing `flow.windninja.run_momentum` and the parallel-then-sequential-retry pattern. Momentum
+  is CPU-bound (ADR-0006) and its temp env can't be redirected (Entry 38). The default requested
+  concurrency is **all detected cores** (`momentum_workers=detect_cores()`), then the effective
+  workers are capped by the number of available `(feature × hour)` tasks; each solve receives
+  `cores // effective_workers` threads.
 - **Aggregates** each hour's cases into one scene (`auto.scene`), reusing `viz.volume3d` and
   clipping each rotor to its zone (ADR-0021); a `ProgressTracker` gives percent + **ETA**.
 
@@ -651,13 +653,169 @@ two-pass tool stays untouched. The auto pipeline:
 - Maximal reuse, zero risk to the existing app; the two share all physics/IO/viz code.
 - **AROME wind wired (2026-06-25):** `auto.wind` reads **AROME France HD (1.5 km)** height-AGL
   wind from **Open-Meteo's `arome_france_hd`** model (keyless JSON), taking the highest available
-  height (~120 m AGL) per hour, per sub-zone centre → real valley-scale spatial variation. This is
+  height (~120 m AGL) per hour, per feature centre → real valley-scale spatial variation. This is
   *finer* than the Météo-France GRIB API (which exposes only 2.5 km wind at 10–100 m, GRIB-only —
   it would need an `eccodes` dependency), so the GRIB path is deferred. The `.env` AROME key
   (ADR-0016) still gates/labels the run + drives the slider's available window (`auto.arome`).
   Per-point fallback to the Open-Meteo crest blend if HD is unavailable.
-- Runs are long (`zones × hours` solves); the ETA + caching manage that. The UI (2-tab select →
-  run → time-slider 3D) is the remaining integration layer (`auto.window`).
+- Runs are long (`features × hours` solves); the ETA + caching manage that. The UI (2-tab route →
+  run → time-slider 3D) is wired; current work is tuning, robustness and live validation.
+
+---
+
+## ADR-0023 — Auto Pass-2 domains placed on FEATURES, not a grid (seam continuity)
+
+**Status:** accepted (supersedes the grid-quadtree decomposition of ADR-0022)
+
+**Context.** The auto pipeline first tiled the zone into a relief-adaptive **grid** of momentum
+sub-domains (ADR-0022). In testing this produced **bad results at every internal seam**: each
+sub-zone is an *independent* RANS solve, so the field near a tile's downwind/lateral boundary is
+set by that tile's outlet BC (mass conservation deflects the flow **up** — "le flux remonte"),
+**not** by the neighbour. Clipping to the tile interior removes the artifact strip but **cuts any
+rotor that spans a seam**, and no post-hoc stitching makes independent solves continuous. True
+continuity would need solver **coupling** (halo exchange / Schwarz iteration), which WindNinja's
+standalone CLI doesn't expose.
+
+**Decision.** **Don't tile.** Screen the whole zone once with the continuous Pass-1 **mass** solver
+→ a hazard map → **`find_candidates`** → place **one momentum domain per feature**
+(`auto.partition.feature_domains`), each centred on a candidate and **half-sized to ~`lee_factor ×
+local relief / 2`** (clamped) so it contains that feature's full lee in any wind direction. Features
+are **spatially separated** (min-separation), so the domains don't pave the plane — **no internal
+seams to reconcile**, no cut rotors. Flat areas between features get no rotor (physically correct).
+Each (feature × hour) runs momentum with the local AROME wind; the 3D scene overlays the separated
+rotors, each clipped to its own domain (ADR-0021).
+
+**Consequences.**
+- Physically sound: each rotor is resolved in one valid domain; no seam discontinuities.
+- Reuses the original two-pass design (ADR-0003), automated: Pass-1 screening drives Pass-2
+  placement. `partition_zone` (the grid) is kept but no longer used by `run_auto`.
+- Coverage = the significant features, not a blanket grid — matches where rotors actually form.
+- Cost scales with the **number of features × hours**, not the zone area; domain size tracks the
+  feature's relief (the resolution-vs-coverage trade-off lives in `mesh_count`).
+
+---
+
+## ADR-0024 — Auto mode selects a flight ROUTE (corridor), not a rectangle
+
+**Status:** accepted
+
+**Context.** A paraglider flies a **route**, not a rectangle — a bbox AOI wastes most of its area
+(and compute) on terrain that's never overflown. The auto mode should focus on the planned track.
+
+**Decision.** The auto app's map is in **route mode** (`MapTab(mode="route")`): **left-click adds a
+waypoint, right-click removes the last**; the route is emitted to Python **on every change** (so
+**« Valider » uses the current route** — no double-click required) and a **corridor of the current
+margin is drawn live** (turf.js buffer, updated via `MapTab.set_margin_km`).
+`run_auto` takes `route_latlon` + `corridor_margin_km`: it fetches/screens the **route bbox + margin**
+(`bbox_from_route`), then **restricts feature detection to a corridor** of that margin around the
+polyline (`partition.corridor_mask` × the hazard) before placing the per-feature Pass-2 domains
+(ADR-0023). So Pass-1 covers the corridor and the expensive Pass-2 runs **only on the candidate
+reliefs along the route**. The **manual app keeps the rectangle** (`MapTab` default) — `MapTab`
+supports both modes; the polyline JS is injected via a token (no `.format` brace escaping).
+
+**Consequences.**
+- Compute focused on the flown corridor, not a blanket bbox; a margin spinbox tunes the band.
+- One shared `MapTab` serves both apps (rectangle for manual, route for auto).
+- The DEM is still a rectangle (WindNinja needs one) = the route bbox + margin; only candidate
+  detection is corridor-masked, so the cheap Pass-1 covers it but Pass-2 stays on-route.
+
+---
+
+## ADR-0025 — Auto momentum artifacts are session-scoped and cleaned on close (disk)
+
+**Status.** Accepted (2026-06-26).
+
+**Context.** Each momentum solve writes a full OpenFOAM case (`NINJAFOAM_*`, ~100–400 MB). The
+auto pipeline runs one per (feature × hour) and **never deleted them**, so the compute cache grew
+across runs until it filled the disk (observed: 107 cases ≈ 23 GB, machine down to 7 GB free).
+
+**Decision.** Treat auto outputs as **temporary session artifacts**. During a normal UI run, keep the
+full OpenFOAM cases, run dirs and crop DEMs so the 3D view can render/debug directly and no extra
+VTK extraction step can destabilize the run. On **window close**, `cleanup_auto_artifacts(...)`
+deletes `NINJAFOAM_*`, `z*_run`, `z*.tif` and `z*_rotor.vtu` under `<cache>/auto`; the same cleanup
+runs at the start of the next auto run. Reusable DEMs (`dem_*.tif`) and the keyed Pass-1 `screening/`
+cache are kept.
+
+The previous compact-to-`.vtu` path remains available as `compact_cases_during_run=True` for a future
+low-disk mode, but it is **not the default**. The disk guard remains only as a last-resort protection
+if the volume is already dangerously low. `locate_openfoam_case` still matches cases by crop DEM
+**stem** so parallel solves don't grab each other's case.
+
+**Consequences.** The program no longer accumulates stale auto cases across sessions, while live runs
+stay simple and inspectable. A completed result is kept only while the app is open; closing the window
+means recompute later if the session artifacts were cleaned.
+
+---
+
+## ADR-0026 — Auto domains tighter + finer mesh + a real outflow buffer (refines ADR-0021/0023)
+
+**Status.** Accepted (2026-06-26).
+
+**Context.** Testing the route mode showed (1) the solve looked like **one coarse rectangle**, not
+small high-resolution per-feature domains, and (2) the rotor still **"climbed" the domain edge** as if
+a wall (`v=0`) blocked the flow. Root cause for (1): feature domains were sized up to **7 km half**
+(`max_half_m=3500`, `lee_factor=6`) and meshed at only **150 k** cells → coarse, near zone-blanketing.
+For (2): WindNinja/NinjaFOAM owns the BCs — the lateral/downwind faces are **inlet/outlet**, not `v=0`,
+but `inletOutlet` clamps **reverse flow at the boundary** to the free-stream, deflecting recirculation
+up along the edge. It is a domain-sizing artifact (the outlet sits inside the wake), not a settable BC.
+The `AUTO_EDGE_BUFFER_M=700` margin was too thin and the clip kept cells up to the (large) zone edge.
+
+**Decision.** (a) **Tighter domains**: `lee_factor 6→5`, `min_half_m 1200→1000`, `max_half_m 3500→2500`.
+(b) **Finer mesh**: `mesh_count 150 k→300 k` (tighter domains, with session cleanup preventing stale
+accumulation; ADR-0025). (c) **Bigger
+outflow buffer**: `AUTO_EDGE_BUFFER_M 700→1200` so the boundary sits well off the lee. (d) **Clip always
+drops a boundary band**: `_clip_domain_boundary` keeps cells inside the drawn zone **AND** off the solver
+boundary (tighter of the two), so an edge feature can't show the climb. (e) **Draw each analysed domain**
+as an outline on the 3D terrain (`scene._add_domain_box`) so the per-feature sub-rectangles are visible.
+
+**Consequences.** Per-feature solves are smaller + finer (genuine precision) and the boundary artifact
+is pushed outside the displayed zone and clipped. More CPU per solve (finer mesh, parallelised across
+workers). `mesh_count`/half-sizes stay tunable; finest topo (IGN 5 m per crop) remains a future lever.
+
+---
+
+## ADR-0027 — 3D scenes reproject basemaps to the DEM CRS and place terrain on pixel centres
+
+**Status.** Accepted (2026-06-26).
+
+**Context.** In the 3D views, the web-tile basemap appeared shifted south by a few hundred metres
+relative to the reconstructed relief. The 2D map path lets contextily reproject tiles to the axes CRS,
+but the 3D path fetches a tile mosaic and turns it into a PyVista texture manually. Web tiles are in
+EPSG:3857; stretching that mosaic directly on an UTM terrain plane is only an approximation and becomes
+visible at valley scale. A smaller offset also came from placing DEM sample values on the outer raster
+bounds instead of on pixel centres.
+
+**Decision.** `viz.volume3d._drape_basemap` must treat the tile mosaic as EPSG:3857, reproject its RGB
+bands into the DEM/terrain CRS, then texture-map the already-reprojected raster onto the terrain.
+`_terrain_mesh` places DEM vertices at pixel centres. 3D views include a horizontal scale bar so future
+alignment checks can be estimated visually.
+
+**Consequences.** The basemap, hazard overlays, rotor volumes and terrain share the same projected
+metric frame in 3D. A visual difference between Pass-1 and Pass-2 wakes may still be valid when the
+Pass-2 local/hourly wind differs from the representative Pass-1 screening wind; it is no longer evidence
+by itself of a basemap offset.
+
+---
+
+## ADR-0028 — Auto progress/ETA is wave-based (parallelism-aware), not tasks×mean
+
+**Status.** Accepted (2026-06-26).
+
+**Context.** The auto run's ETA was ``mean(observed solve time) × remaining_tasks``. With momentum
+solves running ``workers`` at a time, that over-estimates by ~the worker count: a 5-solve / 5-worker
+run logged "1/5 · 20% · reste ~122 min" then finished ~2 min later — the first completion was treated
+as if four more solve-times remained, when the other four were nearly done (one parallel **wave**).
+
+**Decision.** Model waves: ``waves = ceil(total / workers)``. Total wall estimate = ``mean solve ×
+waves``; ``eta = max(0, estimate − elapsed)`` anchored to a wall clock (`ProgressTracker.start()`,
+injectable clock for tests). The displayed percent is ``elapsed / estimate`` clamped to
+``[done/total, 0.99]`` (smooth, but never below the genuinely completed fraction). The pipeline emits
+`display_percent`; the window's ETA label ticks the last value **down** between updates.
+
+**Consequences.** ETA/percent now track reality for multi-wave runs. Limitation: WindNinja momentum
+emits no in-solve progress, so a single wave (workers ≥ tasks) shows indeterminate until the first
+completion — fewer workers gives more feedback (more waves). A future lever is parsing NinjaFOAM phase
+lines for coarse in-solve progress. (Right-drag 3D pan shipped in the same pass — see Entry 54.)
 
 ---
 

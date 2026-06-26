@@ -91,19 +91,208 @@ def test_forecast_window_fallback_and_absolute_labels():
     assert fc.at(fc.start_offset_h).hour == 14
 
 
-def test_progress_tracker_eta_and_summary():
-    t = ProgressTracker(total=4)
+def test_feature_domains_places_one_domain_per_feature():
+    from sillage.auto.partition import feature_domains
+
+    n, res = 80, 50.0
+    yy, xx = np.mgrid[0:n, 0:n]
+
+    def cone(r0, c0, h, w):
+        return np.clip(h * (1.0 - np.hypot(yy - r0, xx - c0) / w), 0.0, None)
+
+    elev = 1000.0 + cone(20, 20, 500.0, 18) + cone(60, 60, 420.0, 18)  # two relief features
+    dem = _dem(elev, res_m=res)
+    hazard = np.clip(cone(20, 20, 1.0, 10) + cone(60, 60, 0.85, 10), 0.0, 1.0)  # two hazard peaks
+
+    zones = feature_domains(dem, hazard, max_features=5, min_separation_m=800.0,
+                            target_res_m=res, min_half_m=600.0)
+    assert 2 <= len(zones) <= 5
+    centres = {(round(z.center[0], -2), round(z.center[1], -2)) for z in zones}
+    assert len(centres) >= 2  # the two distinct features
+    for z in zones:                                  # square domains, sized to >= 2*min_half
+        width = z.bbox[2] - z.bbox[0]
+        assert width >= 2 * 600.0 - 1
+        assert abs((z.bbox[3] - z.bbox[1]) - width) < 1.0
+
+
+def test_corridor_mask_keeps_band_around_route():
+    from sillage.auto.partition import corridor_mask
+
+    dem = _dem(np.zeros((100, 100)), res_m=50.0)  # 5 x 5 km
+    left, _b, right, top = dem.bounds
+    xmid = (left + right) / 2.0
+    route_xy = [(xmid, top - 1000.0), (xmid, top - 4000.0)]  # vertical segment, mid-domain
+    mask = corridor_mask(dem, route_xy, margin_m=300.0)
+
+    def px(x, y):
+        return int(round((top - y) / 50.0)), int(round((x - left) / 50.0))
+
+    on = px(xmid, top - 2500.0)
+    far = px(xmid + 1000.0, top - 2500.0)
+    assert mask[on] and not mask[far]          # within 300 m kept, 1 km away dropped
+    assert 0 < mask.sum() < mask.size
+
+
+def test_bbox_from_route():
+    from sillage.auto.pipeline import bbox_from_route
+
+    s, w, n, e = bbox_from_route([(44.6, 6.1), (44.7, 6.3)], margin_km=2.0)
+    assert s < 44.6 and n > 44.7 and w < 6.1 and e > 6.3
+    assert (44.6 - s) == pytest.approx(2.0 / 111.0, rel=1e-3)
+    with pytest.raises(ValueError, match="route vide"):
+        bbox_from_route([], margin_km=2.0)
+
+
+def test_sample_route_keeps_endpoints_and_densifies():
+    from sillage.auto.wind import _sample_route
+
+    assert _sample_route([], spacing_km=1.5) == []
+    start, end = (44.0, 6.0), (44.05, 6.0)  # ~5.5 km north along a meridian
+    pts = _sample_route([start, end], spacing_km=1.5)
+    assert pts[0] == start and pts[-1] == end          # endpoints preserved
+    assert all(abs(p[1] - 6.0) < 1e-9 for p in pts)    # all on the meridian
+    assert [p[0] for p in pts] == sorted(p[0] for p in pts)  # ordered along the route
+    assert len(_sample_route([start, end], spacing_km=0.5)) > len(pts)  # finer -> more samples
+
+
+def test_arrows_at_hour_indexes_and_clamps():
+    from sillage.auto.wind import arrows_at_hour
+
+    cells = [(44.0, 6.0, [("t0", 3.0, 90.0), ("t1", 5.0, 100.0)]),
+             (44.1, 6.1, [])]                       # empty series -> skipped
+    assert arrows_at_hour(cells, -5) == [(44.0, 6.0, 3.0, 90.0)]  # clamps to the first hour
+    assert arrows_at_hour(cells, 1) == [(44.0, 6.0, 5.0, 100.0)]
+    assert arrows_at_hour(cells, 9) == [(44.0, 6.0, 5.0, 100.0)]  # clamps to the last hour
+
+
+def test_cleanup_auto_artifacts_drops_cases_keeps_dem_and_screening(tmp_path):
+    from sillage.auto.pipeline import cleanup_auto_artifacts
+
+    work = tmp_path / "cache" / "auto"
+    (work / "NINJAFOAM_z00_h09_1_0" / "system").mkdir(parents=True)
+    (work / "z00_h09_run").mkdir()
+    (work / "z00_h09.tif").write_bytes(b"crop")
+    (work / "z00_h09_rotor.vtu").write_bytes(b"rotor")
+    (work / "dem_keep.tif").write_bytes(b"dem")      # the reusable fine DEM
+    (work / "screening").mkdir()                      # the reusable Pass-1 cache
+
+    cleanup_auto_artifacts(tmp_path / "cache")
+
+    assert not (work / "NINJAFOAM_z00_h09_1_0").exists()
+    assert not (work / "z00_h09_run").exists()
+    assert not (work / "z00_h09.tif").exists()
+    assert not (work / "z00_h09_rotor.vtu").exists()
+    assert (work / "dem_keep.tif").exists()           # kept (expensive to refetch)
+    assert (work / "screening").exists()
+
+
+def test_screening_work_dir_is_keyed_by_dem_and_wind(tmp_path):
+    from sillage.auto.pipeline import _screening_work_dir
+
+    a = _screening_work_dir(tmp_path, tmp_path / "dem_a.tif", 8.0, 270.0, 150.0)
+    b = _screening_work_dir(tmp_path, tmp_path / "dem_b.tif", 8.0, 270.0, 150.0)
+    c = _screening_work_dir(tmp_path, tmp_path / "dem_a.tif", 10.0, 300.0, 150.0)
+    assert a != b != c
+    assert "dem_a" in str(a) and "270_8_150m" in str(a)
+
+
+def test_compact_case_keeps_case_when_unreadable(tmp_path):
+    # If the OpenFOAM case can't be read, _compact_case must NOT delete it or lose the result.
+    from sillage.auto.pipeline import CaseResult, _compact_case
+
+    case = CaseResult(zone_index=0, hour=9, case_dir=str(tmp_path / "nope"),
+                      wind_speed_ms=8.0, wind_from_deg=270.0, crs=None,
+                      aoi_bounds=(0.0, 1.0, 0.0, 1.0), elapsed_s=1.0)
+    out = _compact_case(case, tmp_path)
+    assert out.case_dir == case.case_dir and out.rotor_path == ""
+
+
+def test_compact_case_deletes_empty_rotor_case(monkeypatch, tmp_path):
+    from sillage.auto import scene
+    from sillage.auto.pipeline import CaseResult, _compact_case
+
+    class EmptyRotor:
+        n_cells = 0
+
+    monkeypatch.setattr(scene, "extract_rotor", lambda *a, **k: EmptyRotor())
+    case_dir = tmp_path / "NINJAFOAM_z00_h09"
+    run_dir = tmp_path / "z00_h09_run"
+    crop = tmp_path / "z00_h09.tif"
+    (case_dir / "system").mkdir(parents=True)
+    run_dir.mkdir()
+    crop.write_bytes(b"crop")
+
+    case = CaseResult(zone_index=0, hour=9, case_dir=str(case_dir),
+                      wind_speed_ms=8.0, wind_from_deg=270.0, crs=None,
+                      aoi_bounds=(0.0, 1.0, 0.0, 1.0), elapsed_s=1.0)
+    out = _compact_case(case, tmp_path)
+    assert out.case_dir == "" and out.rotor_path == ""
+    assert not case_dir.exists() and not run_dir.exists() and not crop.exists()
+
+
+def test_free_gb_reads_volume(tmp_path):
+    from sillage.auto.pipeline import _free_gb
+
+    assert _free_gb(tmp_path) > 0.0                    # a real volume reports positive free space
+    assert _free_gb("\x00 not a path") == float("inf") # unreadable -> never blocks the run
+
+
+def test_default_momentum_workers_uses_all_detected_cores(monkeypatch):
+    from sillage.auto import pipeline
+
+    monkeypatch.setattr(pipeline, "detect_cores", lambda: 14)
+    assert pipeline.default_momentum_workers() == 14
+    monkeypatch.setattr(pipeline, "detect_cores", lambda: 2)
+    assert pipeline.default_momentum_workers() == 2
+
+
+def test_momentum_parallel_plan_integer_division():
+    from sillage.auto.pipeline import momentum_parallel_plan
+
+    plan = momentum_parallel_plan(4, cores=14)
+    assert plan.workers == 4
+    assert plan.threads_per_worker == 3
+    assert plan.used_cores == 12
+    assert plan.idle_cores == 2
+    assert plan.perfect_workers == (1, 2, 7, 14)
+
+    capped = momentum_parallel_plan(14, cores=14, task_count=6)
+    assert capped.workers == 6
+    assert capped.threads_per_worker == 2
+    assert capped.used_cores == 12
+    assert capped.idle_cores == 2
+
+
+def test_progress_tracker_wave_eta_and_summary():
+    clk = {"t": 0.0}
+    t = ProgressTracker(total=4, workers=2, clock=lambda: clk["t"])
     assert t.eta_seconds is None          # nothing done yet
     assert t.fraction == 0.0
+    t.start()
 
-    t.record(2.0)
-    t.record(2.0)
+    clk["t"] = 10.0                       # wave 1 (2 parallel solves) finishes at t=10 s
+    t.record(10.0)
+    t.record(10.0)
     assert t.done == 2 and abs(t.fraction - 0.5) < 1e-9
-    assert abs(t.eta_seconds - 4.0) < 1e-9  # mean 2.0 s × 2 remaining
+    # total estimate = mean 10 s × ceil(4/2)=2 waves = 20 s; elapsed 10 → reste ~10 s
+    assert abs(t.eta_seconds - 10.0) < 1e-9
     s = t.summary("Pass-2 auto")
     assert "2/4" in s and "50%" in s and "reste" in s
 
-    t.record(2.0)
-    t.record(2.0)
+    clk["t"] = 20.0
+    t.record(10.0)
+    t.record(10.0)
     assert t.eta_seconds == 0.0
     assert "100%" in t.summary()
+
+
+def test_progress_tracker_eta_collapses_with_parallel_workers():
+    # The reported bug: 5 solves on 5 workers = ONE wave. When the first completes near the end,
+    # the ETA must be ~0 (not mean × 4 remaining = the old worker-count over-estimate).
+    clk = {"t": 0.0}
+    t = ProgressTracker(total=5, workers=5, clock=lambda: clk["t"])
+    t.start()
+    clk["t"] = 300.0
+    t.record(300.0)                       # 1/5 done, but the single wave is essentially finished
+    assert t.eta_seconds is not None and t.eta_seconds < 1.0   # NOT ~1200 s
+    assert t.display_percent >= 99        # reflects reality: ~done, not 20%

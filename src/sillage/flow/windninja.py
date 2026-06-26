@@ -323,7 +323,7 @@ def run_momentum(
     run = WindNinjaRun(command=cmd, working_dir=wd, returncode=rc, stdout=out, stderr=err)
     if not dry_run:
         run.openfoam_case_dir = locate_openfoam_case(
-            wd, out, extra_roots=[Path(dem_path).parent]
+            wd, out, extra_roots=[Path(dem_path).parent], dem_stem=Path(dem_path).stem
         )
     return run
 
@@ -333,7 +333,7 @@ def _is_openfoam_case(path: Path) -> bool:
 
 
 def locate_openfoam_case(
-    working_dir: Path, stdout: str = "", extra_roots=None
+    working_dir: Path, stdout: str = "", extra_roots=None, dem_stem: str | None = None
 ) -> Path | None:
     """Best-effort discovery of the OpenFOAM case directory for a momentum run.
 
@@ -342,6 +342,11 @@ def locate_openfoam_case(
     run working dir, which only gets the kmz/sampled outputs). We therefore search both
     the working dir and any ``extra_roots`` (pass the DEM's parent), preferring explicit
     ``NINJAFOAM_*`` dirs, then any dir carrying constant/ + system/, newest first.
+
+    ``dem_stem`` (the crop DEM filename without extension) disambiguates **parallel** solves:
+    several momentum runs drop NINJAFOAM_* dirs in the same root at once, so "newest by mtime"
+    alone could return a sibling task's case. The case name embeds the DEM stem, so when given we
+    keep only matching dirs (falling back to all if none match).
     See docs/05_windninja_integration.md, roadmap M2/T8.
     """
     roots = [Path(working_dir)]
@@ -367,6 +372,10 @@ def locate_openfoam_case(
             _add(p.parent)
 
     if candidates:
+        if dem_stem:
+            named = [c for c in candidates if dem_stem in c.name]
+            if named:
+                candidates = named
         return max(candidates, key=lambda c: c.stat().st_mtime)
     # TODO: parse `stdout` for the temp dir path printed by WindNinja/OpenFOAM.
     return None

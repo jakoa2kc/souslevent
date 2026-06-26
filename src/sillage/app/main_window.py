@@ -739,6 +739,8 @@ class MainWindow(QtWidgets.QMainWindow):
         relief stays upright — no roll/tilt. Keeps wheel-zoom and shift-pan."""
         try:
             plotter.enable_terrain_style(mouse_wheel_zooms=True, shift_pans=True)
+            from ..viz.volume3d import enable_right_drag_pan
+            enable_right_drag_pan(plotter)  # right-drag = pan (translate)
         except Exception:
             pass
 

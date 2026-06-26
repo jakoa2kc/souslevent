@@ -69,6 +69,14 @@ class SolveJob(QtCore.QObject):
     def cancel(self) -> None:
         self._worker.cancel()
 
+    def is_running(self) -> bool:
+        return self._thread.isRunning()
+
+    def wait(self, msecs: int | None = None) -> bool:
+        if msecs is None:
+            return self._thread.wait()
+        return self._thread.wait(msecs)
+
     @QtCore.Slot(object)
     def _on_finished(self, result) -> None:
         self._teardown()

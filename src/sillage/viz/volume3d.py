@@ -61,14 +61,18 @@ def _seed_streamlines(mesh, mean_flow_dir: np.ndarray, n_points: int = 200):
 def _drape_basemap(plotter, terrain, crs, source: str) -> bool:
     """Texture-drape a web-tile basemap (top-down) onto the terrain surface. Returns success.
 
-    Needs the terrain CRS (UTM) to fetch the basemap for the right lon/lat area. Over a few
-    km, web-mercator ≈ UTM, so a planar drape is fine.
+    Needs the terrain CRS (UTM) to fetch the basemap for the right lon/lat area. Tiles arrive in
+    WebMercator, so reproject the RGB raster to the terrain CRS before texturing; directly
+    stretching WebMercator pixels onto UTM can show as a north/south offset on larger AOIs.
     """
     try:
         import contextily as cx
         import pyvista as pv
         from rasterio.crs import CRS as RCRS
+        from rasterio.enums import Resampling
+        from rasterio.transform import from_bounds
         from rasterio.warp import transform as warp_xy
+        from rasterio.warp import reproject
 
         from .map2d import BASEMAP_SOURCES
 
@@ -76,19 +80,33 @@ def _drape_basemap(plotter, terrain, crs, source: str) -> bool:
             return False
         b = terrain.bounds
         xmin, xmax, ymin, ymax = b[0], b[1], b[2], b[3]
-        lons, lats = warp_xy(crs, RCRS.from_epsg(4326), [xmin, xmax], [ymin, ymax])
+        dst_crs = RCRS.from_user_input(crs)
+        xs = [xmin, xmin, xmax, xmax]
+        ys = [ymin, ymax, ymin, ymax]
+        lons, lats = warp_xy(dst_crs, RCRS.from_epsg(4326), xs, ys)
         w, e = min(lons), max(lons)
         s, n = min(lats), max(lats)
         family, layer = BASEMAP_SOURCES[source]
         prov = getattr(cx.providers, family)
         if layer is not None:
             prov = prov[layer]
-        img, _ext = cx.bounds2img(w, s, e, n, source=prov, ll=True)
+        img, ext3857 = cx.bounds2img(w, s, e, n, source=prov, ll=True)
         # Keep the tile mosaic north-up (row 0 = north): with texture_map_to_plane below,
         # VTK maps array row 0 to the north (point_v) edge, so NO vertical flip — flipping
         # renders the basemap (and its text) upside down. Verified by a top-down drape test.
         img = np.ascontiguousarray(img[:, :, :3])
-        tex = pv.numpy_to_texture(img)
+        h, ww = img.shape[:2]
+        src_transform = from_bounds(ext3857[0], ext3857[2], ext3857[1], ext3857[3], ww, h)
+        dst_transform = from_bounds(xmin, ymin, xmax, ymax, ww, h)
+        warped = np.zeros((h, ww, 3), dtype=np.uint8)
+        for band in range(3):
+            reproject(
+                img[:, :, band], warped[:, :, band],
+                src_transform=src_transform, src_crs=RCRS.from_epsg(3857),
+                dst_transform=dst_transform, dst_crs=dst_crs,
+                resampling=Resampling.bilinear,
+            )
+        tex = pv.numpy_to_texture(np.ascontiguousarray(warped))
         terrain.texture_map_to_plane(
             origin=(xmin, ymin, 0.0), point_u=(xmax, ymin, 0.0), point_v=(xmin, ymax, 0.0),
             inplace=True)
@@ -99,7 +117,11 @@ def _drape_basemap(plotter, terrain, crs, source: str) -> bool:
 
 
 def _terrain_mesh(dem, lift: float = 0.0):
-    """A PyVista StructuredGrid from a north-up DEM (row 0 = north), optionally lifted in Z."""
+    """A PyVista StructuredGrid from a north-up DEM (row 0 = north), optionally lifted in Z.
+
+    DEM samples are cell-centre elevations. Put the 3D points at pixel centres, not at the outer
+    raster bounds, otherwise the relief is slightly stretched and shifted against rasters/textures.
+    """
     import pyvista as pv
 
     z = np.array(dem.elevation, dtype="float64")
@@ -108,10 +130,124 @@ def _terrain_mesh(dem, lift: float = 0.0):
         z = np.where(np.isfinite(z), z, fill)
     left, bottom, right, top = dem.bounds
     ny, nx = z.shape
-    xs = np.linspace(left, right, nx)
-    ys = np.linspace(top, bottom, ny)  # row 0 -> north (top)
+    res_x = (right - left) / max(nx, 1)
+    res_y = (top - bottom) / max(ny, 1)
+    xs = left + (np.arange(nx) + 0.5) * res_x
+    ys = top - (np.arange(ny) + 0.5) * res_y  # row 0 -> north (top)
     xx, yy = np.meshgrid(xs, ys)
     return pv.StructuredGrid(xx, yy, z + lift)
+
+
+def _nice_scale_length(span_m: float) -> float:
+    """A readable 1/2/5×10^n scale length, around one fifth of the scene width."""
+    target = max(1.0, span_m * 0.20)
+    decade = 10.0 ** np.floor(np.log10(target))
+    for mult in (1.0, 2.0, 5.0, 10.0):
+        val = mult * decade
+        if val >= target:
+            return float(val)
+    return float(10.0 * decade)
+
+
+def _scale_label(length_m: float) -> str:
+    return f"{length_m / 1000.0:g} km" if length_m >= 1000 else f"{length_m:g} m"
+
+
+def _add_horizontal_scale_bar(plotter, terrain) -> None:
+    """Floating horizontal scale bar in terrain CRS units (meters)."""
+    import pyvista as pv
+
+    b = terrain.bounds
+    dx, dy, dz = b[1] - b[0], b[3] - b[2], b[5] - b[4]
+    length = min(_nice_scale_length(min(dx, dy)), dx * 0.35)
+    x0 = b[0] + 0.10 * dx
+    y0 = b[2] + 0.08 * dy
+    z = b[5] + 0.12 * max(dz, length * 0.12) + 20.0
+    pts = np.array([[x0, y0, z], [x0 + length, y0, z]])
+    plotter.add_mesh(pv.lines_from_points(pts), color="black", line_width=5, reset_camera=False)
+    tick = max(length * 0.035, 20.0)
+    for x in (x0, x0 + length):
+        tpts = np.array([[x, y0 - tick, z], [x, y0 + tick, z]])
+        plotter.add_mesh(pv.lines_from_points(tpts), color="black", line_width=5,
+                         reset_camera=False)
+    plotter.add_point_labels(
+        [(x0 + length / 2.0, y0 + tick * 2.0, z)],
+        [_scale_label(length)],
+        font_size=11, text_color="black", shape_color="white", shape_opacity=0.65,
+        always_visible=True,
+    )
+
+
+def _pan_camera(plotter, dx_px: float, dy_px: float) -> None:
+    """Translate the camera (and its focal point) in the view plane by a pixel drag — a "grab and
+    drag" pan. Pixel→world scale uses the focal-plane distance and the vertical field of view."""
+    cam = plotter.camera
+    pos = np.asarray(cam.position, dtype="float64")
+    fp = np.asarray(cam.focal_point, dtype="float64")
+    up = np.asarray(cam.up, dtype="float64")
+    fwd = fp - pos
+    dist = float(np.linalg.norm(fwd)) or 1.0
+    fwd /= dist
+    right = np.cross(fwd, up)
+    rn = float(np.linalg.norm(right))
+    right = right / rn if rn else np.array([1.0, 0.0, 0.0])
+    true_up = np.cross(right, fwd)
+    h_px = max(1, int(plotter.window_size[1]))
+    world_per_px = 2.0 * dist * np.tan(np.radians(float(cam.view_angle)) / 2.0) / h_px
+    shift = (-dx_px * world_per_px) * right + (-dy_px * world_per_px) * true_up
+    cam.position = tuple(pos + shift)
+    cam.focal_point = tuple(fp + shift)
+
+
+def enable_right_drag_pan(plotter):
+    """Add RIGHT-button drag panning (translation) on top of the terrain-style left-drag rotation.
+
+    Terrain style locks rotation to azimuth/elevation but only pans with middle-drag / Shift+left;
+    pilots expect a plain right-drag "grab". We observe the interactor directly (so this works under
+    any interactor style) and abort the right-button events so the style's own right binding (zoom)
+    doesn't fight the pan. Left-drag rotation is untouched (we only abort MouseMove while panning).
+    Returns the observer state (kept alive by the caller) or None if the interactor is unavailable.
+    """
+    try:
+        interactor = plotter.iren.interactor  # the raw vtkRenderWindowInteractor
+    except Exception:
+        return None
+    st: dict = {"on": False, "last": None, "ids": {}}
+
+    def _abort(caller, key):
+        cid = st["ids"].get(key)
+        cmd = caller.GetCommand(cid) if cid is not None else None
+        if cmd is not None:
+            cmd.SetAbortFlag(1)
+
+    def _press(caller, _ev):
+        st["on"] = True
+        st["last"] = interactor.GetEventPosition()
+        _abort(caller, "press")
+
+    def _release(caller, _ev):
+        st["on"] = False
+        st["last"] = None
+        _abort(caller, "release")
+
+    def _move(caller, _ev):
+        if not st["on"] or st["last"] is None:
+            return  # not panning -> let the style handle the move (left-drag rotation)
+        x, y = interactor.GetEventPosition()
+        lx, ly = st["last"]
+        st["last"] = (x, y)
+        try:
+            _pan_camera(plotter, x - lx, y - ly)
+            plotter.render()
+        except Exception:
+            pass
+        _abort(caller, "move")
+
+    st["ids"]["press"] = interactor.AddObserver("RightButtonPressEvent", _press, 10.0)
+    st["ids"]["release"] = interactor.AddObserver("RightButtonReleaseEvent", _release, 10.0)
+    st["ids"]["move"] = interactor.AddObserver("MouseMoveEvent", _move, 10.0)
+    plotter._right_drag_pan = st  # keep the closures alive for the plotter's lifetime
+    return st
 
 
 def _hazard_texture_image(hazard):
@@ -198,6 +334,7 @@ def populate_pass1_3d(plotter, dem, hazard=None, winds=None, crs=None,
     if winds:
         _add_wind_arrows_3d(plotter, terrain, winds)
     _add_north_arrow(plotter, terrain)
+    _add_horizontal_scale_bar(plotter, terrain)
 
     plotter.add_text("Pass 1 — zones candidates (drapé 3D)", font_size=9)
     plotter.add_text(DISCLAIMER, position="lower_left", font_size=8)
@@ -209,7 +346,7 @@ def _add_rotor(plotter, rev, terrain, show_legend: bool = True, clim=None) -> No
     """Add the reversed-flow (rotor) volume coloured by HEIGHT ABOVE GROUND (yellow near the
     ground -> red -> purple high up) with OPACITY proportional to rotor intensity.
 
-    ``clim=(lo, hi)`` forces the height scale (so an aggregate of many sub-zone rotors shares one
+    ``clim=(lo, hi)`` forces the height scale (so an aggregate of many feature rotors shares one
     consistent scale + legend); ``show_legend=False`` skips the per-rotor scalar bar (the
     aggregate adds a single legend itself)."""
     from matplotlib.colors import LinearSegmentedColormap, Normalize
@@ -251,7 +388,7 @@ def _add_rotor(plotter, rev, terrain, show_legend: bool = True, clim=None) -> No
 
 
 def _clip_domain_boundary(rev, mesh, aoi_bounds=None, lateral_frac: float = 0.08,
-                          lid_frac: float = 0.12):
+                          lid_frac: float = 0.12, keep_if_empty: bool = True):
     """Drop reversed-flow cells hugging the momentum domain's boundaries.
 
     The solver's boundaries induce spurious reversed/stagnant flow: chiefly at the **lateral
@@ -260,23 +397,34 @@ def _clip_domain_boundary(rev, mesh, aoi_bounds=None, lateral_frac: float = 0.08
     When ``aoi_bounds`` = (xmin, xmax, ymin, ymax) is given (the drawn zone, which the momentum
     domain was buffered around), keep only cells **inside the drawn zone** — the boundary
     artifacts live in the buffer outside it. Otherwise fall back to a fixed ``lateral_frac``
-    margin. Always drops the top ``lid_frac``. Returns the input unchanged if clipping empties
-    it (don't blank the view)."""
+    margin. Always drops the top ``lid_frac``. By default returns the input unchanged if clipping
+    empties it (don't blank the manual view). Auto compaction passes ``keep_if_empty=False`` so a
+    rotor made only of boundary artifacts is stored as empty instead of resurrected."""
     if not rev.n_cells:
         return rev
     b = mesh.bounds  # xmin, xmax, ymin, ymax, zmin, zmax
+    mx, my = lateral_frac * (b[1] - b[0]), lateral_frac * (b[3] - b[2])
+    ix0, ix1, iy0, iy1 = b[0] + mx, b[1] - mx, b[2] + my, b[3] - my  # always drop a boundary band
     if aoi_bounds is not None:
-        x0, x1, y0, y1 = aoi_bounds
+        ax0, ax1, ay0, ay1 = aoi_bounds
+        # keep cells inside the drawn zone AND off the solver boundary (the tighter of the two on
+        # each side): a lee reaching the buffer edge can't "climb" the outlet/lateral boundary, yet
+        # an edge feature whose zone hugs the boundary still gets its boundary band cut.
+        x0, x1 = max(ax0, ix0), min(ax1, ix1)
+        y0, y1 = max(ay0, iy0), min(ay1, iy1)
     else:
-        mx, my = lateral_frac * (b[1] - b[0]), lateral_frac * (b[3] - b[2])
-        x0, x1, y0, y1 = b[0] + mx, b[1] - mx, b[2] + my, b[3] - my
+        x0, x1, y0, y1 = ix0, ix1, iy0, iy1
     lid = b[5] - lid_frac * (b[5] - b[4])
     c = rev.cell_centers().points
     keep = ((c[:, 0] > x0) & (c[:, 0] < x1) & (c[:, 1] > y0) & (c[:, 1] < y1) & (c[:, 2] < lid))
     if not keep.any():
+        if not keep_if_empty:
+            return rev.extract_cells(np.asarray([], dtype=np.int64))
         return rev
     out = rev.extract_cells(np.nonzero(keep)[0])
-    return out if out.n_cells else rev
+    if out.n_cells or not keep_if_empty:
+        return out
+    return rev
 
 
 def _add_compass(plotter, terrain, mean_flow_dir, wind_speed_ms=None, wind_from_deg=None):
@@ -345,6 +493,7 @@ def populate_plotter(
             plotter.add_mesh(terrain, scalars="elevation_m", cmap="gist_earth",
                              show_scalar_bar=False)
         _add_compass(plotter, terrain, mean_flow_dir, wind_speed_ms, wind_from_deg)
+        _add_horizontal_scale_bar(plotter, terrain)
 
     if show_streamlines:
         lines = _seed_streamlines(mesh, mean_flow_dir)

@@ -66,6 +66,22 @@ def test_locate_openfoam_case_none_when_absent(tmp_path):
     assert locate_openfoam_case(tmp_path, "", extra_roots=[tmp_path]) is None
 
 
+def test_locate_openfoam_case_dem_stem_disambiguates_parallel(tmp_path):
+    # Parallel auto solves drop several NINJAFOAM_* in the same root; the dem stem must select
+    # this task's case even if a sibling's case was written more recently (higher mtime).
+    root = tmp_path / "auto"
+    mine = root / "NINJAFOAM_z01_h09_111_0"
+    other = root / "NINJAFOAM_z02_h09_222_0"
+    for case in (mine, other):
+        (case / "system").mkdir(parents=True)
+        (case / "constant").mkdir()
+    import os
+
+    os.utime(other, (other.stat().st_atime, mine.stat().st_mtime + 100))  # other is "newer"
+    found = locate_openfoam_case(root, "", extra_roots=[root], dem_stem="z01_h09")
+    assert found.resolve() == mine.resolve()  # picked by stem, not by newest mtime
+
+
 def test_momentum_turbulence_requires_goog_output():
     on = run_momentum(cli="WindNinja_cli", dem_path="/tmp/c.tif", working_dir="/tmp/m",
                       wind_speed_ms=8.0, wind_from_deg=320.0, turbulence_output=True,
@@ -123,6 +139,92 @@ def test_volume3d_public_api():
     from sillage.viz import volume3d  # refactor keeps both entry points
 
     assert hasattr(volume3d, "populate_plotter") and hasattr(volume3d, "build_scene")
+
+
+def test_terrain_mesh_uses_pixel_centres():
+    pytest.importorskip("pyvista")
+    from sillage.viz import volume3d as v3
+
+    dem = Dem(elevation=np.zeros((3, 4), dtype="float32"),
+              transform=from_origin(100.0, 200.0, 10.0, 10.0),
+              crs=CRS.from_epsg(32631), resolution_m=10.0)
+    terrain = v3._terrain_mesh(dem)
+
+    assert terrain.bounds[0] == pytest.approx(105.0)
+    assert terrain.bounds[1] == pytest.approx(135.0)
+    assert terrain.bounds[2] == pytest.approx(175.0)
+    assert terrain.bounds[3] == pytest.approx(195.0)
+
+
+def test_drape_basemap_reprojects_tiles_to_terrain_crs(monkeypatch):
+    pytest.importorskip("pyvista")
+    pytest.importorskip("contextily")
+    from rasterio.warp import transform_bounds
+
+    import contextily as cx
+    import rasterio.warp as rwarp
+
+    from sillage.viz import volume3d as v3
+
+    dem = Dem(elevation=np.zeros((8, 8), dtype="float32"),
+              transform=from_origin(600000.0, 4900000.0, 50.0, 50.0),
+              crs=CRS.from_epsg(32631), resolution_m=50.0)
+    terrain = v3._terrain_mesh(dem)
+    xmin, xmax, ymin, ymax = terrain.bounds[:4]
+    webm = transform_bounds(dem.crs, CRS.from_epsg(3857), xmin, ymin, xmax, ymax)
+    ext3857 = (webm[0], webm[2], webm[1], webm[3])
+    img = np.zeros((6, 6, 4), dtype="uint8")
+    img[:, :, 0], img[:, :, 3] = 255, 255
+
+    def fake_bounds2img(*args, **kwargs):
+        return img, ext3857
+
+    calls = []
+    real_reproject = rwarp.reproject
+
+    def spy_reproject(*args, **kwargs):
+        calls.append(kwargs.get("dst_crs"))
+        return real_reproject(*args, **kwargs)
+
+    monkeypatch.setattr(cx, "bounds2img", fake_bounds2img)
+    monkeypatch.setattr(rwarp, "reproject", spy_reproject)
+
+    class _FakePlotter:
+        def __init__(self):
+            self.meshes = 0
+
+        def add_mesh(self, *a, **k):
+            self.meshes += 1
+
+    p = _FakePlotter()
+    assert v3._drape_basemap(p, terrain, dem.crs, "OpenStreetMap")
+    assert p.meshes == 1
+    assert len(calls) == 3
+    assert all(crs.to_epsg() == 32631 for crs in calls)
+
+
+def test_add_horizontal_scale_bar_draws_line_and_label():
+    pv = pytest.importorskip("pyvista")
+    from sillage.viz import volume3d as v3
+
+    xx, yy = np.meshgrid(np.linspace(0.0, 2000.0, 5), np.linspace(0.0, 1000.0, 5))
+    terrain = pv.StructuredGrid(xx, yy, np.zeros_like(xx))
+
+    class _FakePlotter:
+        def __init__(self):
+            self.meshes = 0
+            self.labels = []
+
+        def add_mesh(self, *a, **k):
+            self.meshes += 1
+
+        def add_point_labels(self, pts, labels, **k):
+            self.labels.extend(labels)
+
+    p = _FakePlotter()
+    v3._add_horizontal_scale_bar(p, terrain)
+    assert p.meshes >= 3  # bar + two ticks
+    assert p.labels and ("m" in p.labels[0] or "km" in p.labels[0])
 
 
 def test_gui_module_imports():
@@ -377,6 +479,14 @@ def test_clip_domain_boundary_drops_lateral_frame_and_lid():
     ca = aoi.cell_centers().points
     assert ca[:, 0].min() >= 5 and ca[:, 0].max() <= 15
     assert ca[:, 1].min() >= 5 and ca[:, 1].max() <= 15
+
+    # Manual view keeps the original if a too-tight clip would blank it; auto compaction can ask
+    # for the truthful empty mesh so boundary-only artifacts are not persisted.
+    kept = _clip_domain_boundary(vol, grid, aoi_bounds=(100, 110, 100, 110), lid_frac=0.0)
+    empty = _clip_domain_boundary(
+        vol, grid, aoi_bounds=(100, 110, 100, 110), lid_frac=0.0, keep_if_empty=False)
+    assert kept.n_cells == vol.n_cells
+    assert empty.n_cells == 0
 
 
 def test_populate_pass1_3d_builds_scene():
