@@ -107,7 +107,11 @@ floored by the genuinely completed fraction.
   terrain on pixel centres, scale bar (ADR-0027). Rotor/turbulence share a **2-D colormap** (height ×
   intensity) on a **single absolute scale** across sectors, uniform adjustable opacity, overlaps drawn
   by nearest sector (no alpha-stacking). Wind on a continuous 0–40 km/h scale.
-- **Two volumes.** "rotor" = reversed flow (`along_flow<0`); "turbulence" = TI ≥ `ti_floor` (√(2k/3)/
-  U_ref). Both are extracted, saved and switchable per result (ADR-0029).
-- **Save/open.** A run saves to a `.sillage` zip (manifest + DEM + per-case lee `.vtu`s + route winds
-  + per-day hour labels) and reopens without recomputing (ADR-0030).
+- **Four representations** (ADR-0031), one absolute scale across sub-domains, switchable per result:
+  *rotor* (reversed flow), *horizontal* (% of upstream wind, red = rotor → blue = full wind),
+  *vertical* (m/s, red = sink → green = lift), *turbulence* (absolute rms √(2k/3) [m/s] — comparable
+  across domains, unlike TI which normalises by each domain's wind). Computed once per case
+  (`extract_lee_volumes`); each has an adjustable colour max + volume floor + legend.
+- **Save/open.** A run saves to a `.sillage` zip (manifest + DEM + **per-metric** lee `.vtu`s
+  (`CaseResult.vtu_paths`) + route winds + per-day hour labels) and reopens — all four views — without
+  recomputing (ADR-0030/0031).

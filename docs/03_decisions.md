@@ -873,6 +873,33 @@ today. The bundle omits the full field, so it can't be re-solved at higher mesh 
 
 ---
 
+## ADR-0031 — Four lee-field representations; turbulence as absolute rms; per-metric persistence
+
+**Status.** Accepted (2026-06-29).
+
+**Context.** The single rotor (reversed-flow) volume answers "where does the air recirculate", but a
+pilot also wants to read **how much the flow slows/reverses** and **where it lifts vs sinks** — and
+the turbulence view showed big, "louche" disparities between adjacent sub-domains.
+
+**Decision.** From each momentum case, `viz.volume3d._compute_lee_scalars` derives four cell fields
+once: `along_flow` (m/s), `along_pct` (signed % of the upstream wind: −100 reversal → +100 free-stream),
+`w_ms` (signed vertical velocity), `turb_rms` = √(2k/3) [m/s]. `_threshold_lee` then yields a volume
+per **metric**: *rotor* (reversed flow, 2-D height×intensity colormap), *horizontal* (cells slowed
+below a %-floor, diverging RdBu: red = rotor → blue = full wind), *vertical* (|w| ≥ a m/s-floor,
+diverging RdYlGn: red = sink → green = lift), *turbulence* (rms ≥ a m/s-floor, 2-D height×rms). A UI
+"Représentation" combo switches them in both apps; all share one **absolute** scale across sub-domains.
+
+**Turbulence as absolute rms (m/s), not TI (%).** TI = √(2k/3)/U normalises by *each domain's own*
+upstream wind, so equal turbulence read differently per domain. The absolute rms √(2k/3) is
+comparable across domains regardless of wind. (Remaining inter-domain differences are then the
+*physical* ones — independent RANS solves have genuinely different k at the seams; ADR-0029.)
+
+**Persistence.** `CaseResult.vtu_paths` is a `{metric: .vtu}` dict; `extract_case_volumes` reads a
+case ONCE and writes every non-empty volume, so a reopened `.sillage` supports all four views (at the
+save-time floors). Bigger bundles than rotor-only — the cost of full reopenable analysis.
+
+---
+
 ## Open questions tracked as future ADRs
 
 - **Stability / diurnal winds on the momentum solver.** Available on the mass solver

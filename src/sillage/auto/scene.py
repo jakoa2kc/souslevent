@@ -33,6 +33,18 @@ def extract_volume(case_dir: str, wind_from_deg: float, aoi_bounds, *, metric: s
                                  aoi_bounds=aoi_bounds)
 
 
+def extract_case_volumes(case_dir: str, wind_from_deg: float, aoi_bounds, *, ref_speed_ms=None,
+                         floors=None):
+    """Read a case ONCE and return ``{metric: volume}`` for all representations (non-empty only) —
+    used to persist every view (rotor / horizontal / vertical / turbulence) to a ``.sillage``."""
+    from ..flow import openfoam_reader as ofr
+    from ..viz import volume3d as v3
+
+    mesh = ofr.read_case(case_dir)
+    return v3.extract_lee_volumes(mesh, v3.mean_flow_vector(wind_from_deg),
+                                  ref_speed_ms=ref_speed_ms, floors=floors, aoi_bounds=aoi_bounds)
+
+
 def _add_domain_box(plotter, terrain, aoi_bounds, color: str = "#10c0ff") -> None:
     """Draw the analysed feature domain (the un-buffered zone the rotor is clipped to) as a thin
     rectangle floating just above the local terrain — so the per-feature sub-domains are visible
@@ -96,10 +108,8 @@ def populate_auto_scene(plotter, dem, cases, crs=None, basemap_source: str = "IG
                round(float(vol_floor), 3) if metric != "rotor" else 0)
         rev = rotor_cache.get(key) if rotor_cache is not None else None
         if rev is None:
-            # rotor has its own persisted .vtu; turbulence its own; the velocity fields are extracted
-            # live (they reuse the rotor mesh's scalars only if it happens to cover them).
-            path = (getattr(case, "rotor_path", "") if metric == "rotor"
-                    else getattr(case, "turb_path", "") if metric == "turbulence" else "")
+            # each metric has its own persisted volume (.vtu); else extract live from the case
+            path = getattr(case, "vtu_paths", {}).get(metric, "")
             if path:  # compacted/loaded: read the persisted volume for this metric
                 try:
                     import pyvista as pv

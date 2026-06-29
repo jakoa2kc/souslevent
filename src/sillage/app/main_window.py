@@ -929,8 +929,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._p2_metric = "rotor"
         self._p2_opacity = 0.5
         self._p2_height_max_m = 300.0
-        self._p2_scale_max = {"rotor": 15.0, "horizontal": 100.0, "vertical": 3.0, "turbulence": 30.0}
-        self._p2_vol_floor = {"horizontal": 50.0, "vertical": 1.0, "turbulence": 20.0}
+        self._p2_scale_max = {"rotor": 15.0, "horizontal": 100.0, "vertical": 3.0, "turbulence": 3.0}
+        self._p2_vol_floor = {"horizontal": 50.0, "vertical": 1.0, "turbulence": 1.0}
         ctl = QtWidgets.QHBoxLayout()
         ctl.addWidget(QtWidgets.QLabel("Représentation :"))
         self.p2_metric_combo = QtWidgets.QComboBox()
@@ -957,19 +957,10 @@ class MainWindow(QtWidgets.QMainWindow):
     # --- Pass-2 3D display: metric/opacity, shared rendering with the auto app ----------
     def _p2_native_intensity_max(self) -> float:
         m, v = self._p2_metric, self._p2_scale_max[self._p2_metric]
-        if m == "rotor":
-            return v / 3.6            # km/h → m/s
-        if m == "turbulence":
-            return v / 100.0          # % → fraction
-        return v                      # horizontal (%) / vertical (m/s)
+        return v / 3.6 if m == "rotor" else v  # rotor km/h→m/s; others (%, m/s) used directly
 
     def _p2_native_vol_floor(self) -> float:
-        m = self._p2_metric
-        if m == "turbulence":
-            return self._p2_vol_floor[m] / 100.0
-        if m in ("horizontal", "vertical"):
-            return self._p2_vol_floor[m]
-        return 0.0
+        return self._p2_vol_floor.get(self._p2_metric, 0.0)
 
     def _p2_legend_image(self):
         from ..viz.volume3d import diverging_legend_image, rotor_legend_image
@@ -979,8 +970,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return rotor_legend_image(self._p2_height_max_m, vmax, ylabel="Intensité (km/h)",
                                       title="Rotor : hauteur × intensité")
         if m == "turbulence":
-            return rotor_legend_image(self._p2_height_max_m, vmax, ylabel="Turbulence (%)",
-                                      title="Turbulence : hauteur × intensité")
+            return rotor_legend_image(self._p2_height_max_m, vmax, ylabel="Turbulence rms (m/s)",
+                                      title="Turbulence : hauteur × rms")
         if m == "horizontal":
             return diverging_legend_image(vmax, "RdBu", "Vit. horizontale (% vent)",
                                           "Rouge = rotor · bleu = plein vent")

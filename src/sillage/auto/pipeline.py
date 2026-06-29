@@ -73,9 +73,7 @@ def _clean_stale(work_root: Path) -> None:
         _safe_rmtree(d)
     for f in work_root.glob("z*.tif"):
         _safe_unlink(f)
-    for f in work_root.glob("z*_rotor.vtu"):
-        _safe_unlink(f)
-    for f in work_root.glob("z*_turb.vtu"):
+    for f in work_root.glob("z*.vtu"):  # per-metric lee volumes (rotor/horizontal/vertical/turb)
         _safe_unlink(f)
 
 
@@ -117,31 +115,26 @@ def _compact_case(case: "CaseResult", work_root: Path) -> "CaseResult":
     Runs in the main thread (serialized — VTK reads aren't thread-safe) as each solve completes, so
     the disk only ever holds the few cases currently being solved. On a read failure it returns the
     case unchanged (keeps ``case_dir``) — never lose a result to a cleanup hiccup."""
-    from .scene import extract_volume
+    from .scene import extract_case_volumes
 
     stem = f"z{case.zone_index:02d}_h{case.hour:02d}"
-    paths = {"rotor": "", "turbulence": ""}
-    read_ok = False
-    for metric, suffix in (("rotor", "rotor"), ("turbulence", "turb")):
-        try:
-            vol = extract_volume(case.case_dir, case.wind_from_deg, case.aoi_bounds,
-                                 metric=metric, ref_speed_ms=case.wind_speed_ms)
-            read_ok = True  # the case was readable (turbulence may still be None if no TKE)
-        except Exception:
-            vol = None
-        if vol is not None and getattr(vol, "n_cells", 0):
-            p = work_root / f"{stem}_{suffix}.vtu"
-            try:
-                vol.save(str(p))
-                paths[metric] = str(p)
-            except Exception:
-                pass
-    if not read_ok:
+    try:
+        vols = extract_case_volumes(case.case_dir, case.wind_from_deg, case.aoi_bounds,
+                                    ref_speed_ms=case.wind_speed_ms)  # one read, all metrics
+    except Exception:
         return case  # couldn't read the case at all -> keep it for a later attempt
+    paths = {}
+    for metric, vol in vols.items():
+        p = work_root / f"{stem}_{metric}.vtu"
+        try:
+            vol.save(str(p))
+            paths[metric] = str(p)
+        except Exception:
+            pass
     _safe_rmtree(case.case_dir)              # the heavy NINJAFOAM_* OpenFOAM case
     _safe_rmtree(work_root / f"{stem}_run")  # WindNinja run dir (kmz/sampled)
     _safe_unlink(work_root / f"{stem}.tif")  # the crop DEM
-    return replace(case, case_dir="", rotor_path=paths["rotor"], turb_path=paths["turbulence"])
+    return replace(case, case_dir="", vtu_paths=paths)
 
 
 def bbox_from_route(route_latlon, margin_km: float):
@@ -264,8 +257,7 @@ class CaseResult:
     crs: object
     aoi_bounds: tuple[float, float, float, float]  # xmin, xmax, ymin, ymax (the un-buffered zone)
     elapsed_s: float
-    rotor_path: str = ""  # persisted reversed-flow volume (.vtu) — compaction / save
-    turb_path: str = ""   # persisted turbulence volume (.vtu) — compaction / save
+    vtu_paths: dict = field(default_factory=dict)  # metric -> persisted .vtu (compaction / save)
 
 
 @dataclass

@@ -573,7 +573,7 @@ def _add_rotor(plotter, rev, terrain, show_legend: bool = True, clim=None, opaci
     idx = cKDTree(tpts[:, :2]).query(centers[:, :2])[1]
     hagl = centers[:, 2] - tpts[idx, 2]  # height above the terrain
     # Intensity scalar = the chosen metric: turbulence intensity, else reversed-flow speed.
-    ti = rev.cell_data.get("turb_intensity")
+    ti = rev.cell_data.get("turb_rms")
     along = rev.cell_data.get("along_flow")
     if metric == "turbulence" and ti is not None:
         intensity = np.clip(np.asarray(ti), 0.0, None)
@@ -616,12 +616,15 @@ def _add_rotor(plotter, rev, terrain, show_legend: bool = True, clim=None, opaci
     return actor
 
 
-def extract_lee_volume(mesh, mean_flow_dir, *, metric: str = "rotor", ref_speed_ms=None,
-                       vol_floor: float = 0.20, aoi_bounds=None):
-    """Compute the lee scalars on an OpenFOAM mesh and return the **clipped volume for ``metric``**.
-    Shared by the auto scene and the manual app so both extract identically. Carries ``along_flow``
-    (m/s), ``along_pct`` (% of upstream wind, signed), ``w_ms`` (vertical, signed), ``turb_intensity``.
-    Returns ``None`` if empty/unavailable. ``vol_floor`` is in the metric's native unit."""
+LEE_METRICS = ("rotor", "horizontal", "vertical", "turbulence")
+DEFAULT_VOL_FLOORS = {"rotor": 0.0, "horizontal": 50.0, "vertical": 1.0, "turbulence": 1.0}
+
+
+def _compute_lee_scalars(mesh, mean_flow_dir, ref_speed_ms) -> None:
+    """Attach the lee cell scalars to ``mesh`` (computed once, then thresholded per metric):
+    ``along_flow`` (m/s), ``along_pct`` (% of upstream wind, signed: −100 reversal → +100 free-stream),
+    ``w_ms`` (vertical velocity, signed) + ``w_abs``, ``turb_rms`` = √(2k/3) [m/s] (turbulence rms —
+    an ABSOLUTE field, comparable across sub-domains regardless of their wind)."""
     along = np.asarray(ofr.along_flow_component(mesh, mean_flow_dir), dtype="float64")
     mesh["along_flow"] = along
     mesh["along_pct"] = along / max(float(ref_speed_ms or 0.0), 0.1) * 100.0
@@ -631,27 +634,49 @@ def extract_lee_volume(mesh, mean_flow_dir, *, metric: str = "rotor", ref_speed_
         mesh["w_abs"] = np.abs(w)
     except Exception:
         pass
-    ti = None
     try:
-        ti = ofr.turbulence_intensity(mesh, reference_speed=ref_speed_ms)
-        if ti is not None:
-            mesh["turb_intensity"] = np.asarray(ti, dtype="float64")
+        rms = ofr.turbulence_intensity(mesh, reference_speed=1.0)  # ref 1 → √(2k/3) in m/s
+        if rms is not None:
+            mesh["turb_rms"] = np.asarray(rms, dtype="float64")
     except Exception:
-        ti = None
+        pass
 
+
+def _threshold_lee(mesh, metric, vol_floor, aoi_bounds):
     if metric == "turbulence":
-        if ti is None:
+        if "turb_rms" not in mesh.array_names:
             return None
-        vol = mesh.threshold(value=float(vol_floor), scalars="turb_intensity")          # TI ≥ floor
+        vol = mesh.threshold(value=float(vol_floor), scalars="turb_rms")             # rms ≥ floor m/s
     elif metric == "horizontal":
-        vol = mesh.threshold(value=float(vol_floor), scalars="along_pct", invert=True)   # ≤ floor %
+        vol = mesh.threshold(value=float(vol_floor), scalars="along_pct", invert=True)  # ≤ floor %
     elif metric == "vertical":
         if "w_abs" not in mesh.array_names:
             return None
-        vol = mesh.threshold(value=float(vol_floor), scalars="w_abs")                    # |w| ≥ floor
+        vol = mesh.threshold(value=float(vol_floor), scalars="w_abs")                # |w| ≥ floor m/s
     else:  # rotor
-        vol = mesh.threshold(value=0.0, scalars="along_flow", invert=True)               # reversed
+        vol = mesh.threshold(value=0.0, scalars="along_flow", invert=True)           # reversed
     return _clip_domain_boundary(vol, mesh, aoi_bounds=aoi_bounds, keep_if_empty=False)
+
+
+def extract_lee_volume(mesh, mean_flow_dir, *, metric: str = "rotor", ref_speed_ms=None,
+                       vol_floor: float = 0.20, aoi_bounds=None):
+    """Compute the lee scalars then return the **clipped volume for ``metric``** (or ``None``).
+    Shared by the auto scene and the manual app so both extract identically."""
+    _compute_lee_scalars(mesh, mean_flow_dir, ref_speed_ms)
+    return _threshold_lee(mesh, metric, vol_floor, aoi_bounds)
+
+
+def extract_lee_volumes(mesh, mean_flow_dir, *, ref_speed_ms=None, floors=None, aoi_bounds=None):
+    """Compute the scalars ONCE and threshold **all metrics** → ``{metric: volume}`` (non-empty only).
+    For persisting every representation from a single case read."""
+    floors = floors or DEFAULT_VOL_FLOORS
+    _compute_lee_scalars(mesh, mean_flow_dir, ref_speed_ms)
+    out = {}
+    for metric in LEE_METRICS:
+        vol = _threshold_lee(mesh, metric, floors.get(metric, 0.0), aoi_bounds)
+        if vol is not None and vol.n_cells:
+            out[metric] = vol
+    return out
 
 
 def _clip_domain_boundary(rev, mesh, aoi_bounds=None, lateral_frac: float = 0.08,

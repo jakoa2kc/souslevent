@@ -46,8 +46,8 @@ def save_result(zip_path, result, *, cfg, hour_labels: dict, route_cells=None) -
     absolute date label shown on the slider (kept so reopening shows the right day, not today's).
     ``route_cells`` is the **run's** AROME route wind (``[(lat, lon, series), …]``) — saved so the
     reopened arrows match the computed lee zones, NOT today's forecast. Persists BOTH lee volumes
-    per case (rotor + turbulence) so either metric works on reopen."""
-    from .scene import extract_volume
+    per case (rotor / horizontal / vertical / turbulence) so every view works on reopen."""
+    from .scene import extract_case_volumes
 
     zip_path = Path(zip_path)
     if zip_path.suffix != SUFFIX:
@@ -59,28 +59,27 @@ def save_result(zip_path, result, *, cfg, hour_labels: dict, route_cells=None) -
 
         cases_meta = []
         for i, c in enumerate(result.cases):
-            files = {"rotor": "", "turbulence": ""}
-            for metric, attr, suffix in (("rotor", "rotor_path", "rotor"),
-                                         ("turbulence", "turb_path", "turb")):
-                vtu = f"{suffix}_{i:03d}.vtu"
-                src = getattr(c, attr, "")
-                if src and Path(src).exists():           # already persisted -> copy
+            files = {}
+            for metric, src in (getattr(c, "vtu_paths", {}) or {}).items():  # already persisted
+                if src and Path(src).exists():
+                    vtu = f"{metric}_{i:03d}.vtu"
                     shutil.copyfile(src, tmp / vtu)
                     files[metric] = vtu
-                elif c.case_dir:                         # not compacted -> extract this volume now
-                    try:
-                        vol = extract_volume(c.case_dir, c.wind_from_deg, c.aoi_bounds,
-                                             metric=metric, ref_speed_ms=c.wind_speed_ms)
-                        if vol is not None and vol.n_cells:
-                            vol.save(str(tmp / vtu))
-                            files[metric] = vtu
-                    except Exception:
-                        pass
+            if not files and c.case_dir:  # not compacted -> extract every metric from one read
+                try:
+                    for metric, vol in extract_case_volumes(
+                            c.case_dir, c.wind_from_deg, c.aoi_bounds,
+                            ref_speed_ms=c.wind_speed_ms).items():
+                        vtu = f"{metric}_{i:03d}.vtu"
+                        vol.save(str(tmp / vtu))
+                        files[metric] = vtu
+                except Exception:
+                    pass
             cases_meta.append({
                 "zone_index": c.zone_index, "hour": c.hour,
                 "wind_speed_ms": c.wind_speed_ms, "wind_from_deg": c.wind_from_deg,
                 "aoi_bounds": list(c.aoi_bounds), "elapsed_s": c.elapsed_s,
-                "rotor_file": files["rotor"], "turb_file": files["turbulence"],
+                "vtu_files": files,
             })
 
         manifest = {
@@ -138,8 +137,7 @@ def load_result(zip_path, dest_dir) -> LoadedResult:
             zone_index=int(m["zone_index"]), hour=int(m["hour"]), case_dir="",
             wind_speed_ms=float(m["wind_speed_ms"]), wind_from_deg=float(m["wind_from_deg"]),
             crs=crs, aoi_bounds=tuple(m["aoi_bounds"]), elapsed_s=float(m.get("elapsed_s", 0.0)),
-            rotor_path=str(dest / m["rotor_file"]) if m.get("rotor_file") else "",
-            turb_path=str(dest / m["turb_file"]) if m.get("turb_file") else "",
+            vtu_paths={metric: str(dest / fn) for metric, fn in m.get("vtu_files", {}).items()},
         )
         for m in manifest["cases"]
     ]

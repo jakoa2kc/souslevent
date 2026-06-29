@@ -1519,6 +1519,25 @@ the default view. Result: arrows stay visible and keep ~constant screen size on 
 
 ---
 
+## Entry 64 — Persist all 4 lee views in `.sillage` + turbulence as absolute rms (ADR-0031)  (2026-06-29)
+
+**Two requested follow-ups done.**
+1. **Velocity fields persisted.** `CaseResult` now holds `vtu_paths = {metric: .vtu}` instead of
+   separate rotor/turb paths. `viz.volume3d` split into `_compute_lee_scalars` (once) + `_threshold_lee`
+   (per metric) + `extract_lee_volumes` (all metrics from one mesh read); `auto.scene.extract_case_volumes`
+   reads a case once. `_compact_case` and `store.save_result` now persist **every** non-empty volume
+   (rotor / horizontal / vertical / turbulence), so a reopened `.sillage` supports all four views.
+2. **Turbulence comparable across sub-domains.** Switched the turbulence field from TI (% — normalised
+   by each domain's own wind, the source of the "louche" disparities) to **absolute rms √(2k/3) in
+   m/s** (`turbulence_intensity(ref=1.0)`), which is comparable regardless of wind. Both apps' turbulence
+   scale/floor are now in m/s; legend relabelled. Remaining differences are the genuine per-solve k
+   variations (ADR-0029).
+
+`_clean_stale` now globs `z*.vtu` (all metrics). Tests updated for `vtu_paths` +
+`extract_case_volumes`. Docs: ADR-0031, docs/10 metrics section. `pytest -q` → **90 passed**.
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

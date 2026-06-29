@@ -63,8 +63,8 @@ class AutoWindow(QtWidgets.QMainWindow):
         self._metric = "rotor"          # 3D colour metric (default rotor)
         self._height_max_m = 300.0      # top of the height colour scale (AGL, m) — 2-D metrics
         # per-metric colour-scale max (display units) and volume floor (display units)
-        self._scale_max = {"rotor": 15.0, "horizontal": 100.0, "vertical": 3.0, "turbulence": 30.0}
-        self._vol_floor = {"horizontal": 50.0, "vertical": 1.0, "turbulence": 20.0}
+        self._scale_max = {"rotor": 15.0, "horizontal": 100.0, "vertical": 3.0, "turbulence": 3.0}
+        self._vol_floor = {"horizontal": 50.0, "vertical": 1.0, "turbulence": 1.0}
         self._tex_cache = {}     # cached basemap textures so re-renders don't re-fetch tiles
         self._last_cfg = None    # AutoConfig of the shown result (for save)
         self._hour_labels = None  # {hour: absolute-date label} — from the run day, kept for reopen
@@ -775,20 +775,11 @@ class AutoWindow(QtWidgets.QMainWindow):
     def _native_intensity_max(self) -> float:
         """Colour-scale max in the units ``_add_rotor`` expects for the active metric."""
         m, v = self._metric, self._scale_max[self._metric]
-        if m == "rotor":
-            return v / 3.6        # km/h → m/s
-        if m == "turbulence":
-            return v / 100.0      # % → fraction
-        return v                  # horizontal (%) / vertical (m/s): used directly
+        return v / 3.6 if m == "rotor" else v  # rotor km/h→m/s; others (%, m/s) used directly
 
     def _native_vol_floor(self) -> float:
         """Volume threshold in native units for the active metric (0 for rotor — no floor)."""
-        m = self._metric
-        if m == "turbulence":
-            return self._vol_floor[m] / 100.0
-        if m in ("horizontal", "vertical"):
-            return self._vol_floor[m]
-        return 0.0
+        return self._vol_floor.get(self._metric, 0.0)
 
     def _apply_metric_to_spin(self) -> None:
         """Set the scale + volume-floor spinboxes' units/range/value for the active metric."""
@@ -798,7 +789,7 @@ class AutoWindow(QtWidgets.QMainWindow):
         if m == "rotor":
             s.setRange(2.0, 60.0), s.setSingleStep(1.0), s.setSuffix(" km/h")
         elif m == "turbulence":
-            s.setRange(2.0, 100.0), s.setSingleStep(5.0), s.setSuffix(" %")
+            s.setRange(0.5, 15.0), s.setSingleStep(0.5), s.setSuffix(" m/s")
         elif m == "horizontal":
             s.setRange(20.0, 200.0), s.setSingleStep(10.0), s.setSuffix(" %")
         else:  # vertical
@@ -810,8 +801,8 @@ class AutoWindow(QtWidgets.QMainWindow):
         f.setEnabled(m != "rotor")  # rotor's volume = reversed flow (no floor)
         f.blockSignals(True)
         if m == "turbulence":
-            f.setRange(2.0, 80.0), f.setSingleStep(2.0), f.setSuffix(" %")
-            f.setToolTip("Seuil de turbulence qui définit le VOLUME affiché.")
+            f.setRange(0.0, 10.0), f.setSingleStep(0.5), f.setSuffix(" m/s")
+            f.setToolTip("Seuil de turbulence rms (m/s) qui définit le VOLUME affiché.")
         elif m == "horizontal":
             f.setRange(-100.0, 100.0), f.setSingleStep(5.0), f.setSuffix(" %")
             f.setToolTip("Affiche les cellules ralenties SOUS ce % du vent amont (incl. flux inversé).")
@@ -832,8 +823,8 @@ class AutoWindow(QtWidgets.QMainWindow):
             return rotor_legend_image(self._height_max_m, vmax, ylabel="Intensité (km/h)",
                                       title="Rotor : hauteur × intensité")
         if m == "turbulence":
-            return rotor_legend_image(self._height_max_m, vmax, ylabel="Turbulence (%)",
-                                      title="Turbulence : hauteur × intensité")
+            return rotor_legend_image(self._height_max_m, vmax, ylabel="Turbulence rms (m/s)",
+                                      title="Turbulence : hauteur × rms")
         if m == "horizontal":
             return diverging_legend_image(vmax, "RdBu", "Vit. horizontale (% vent)",
                                           "Rouge = rotor · bleu = plein vent")

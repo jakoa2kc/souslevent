@@ -227,17 +227,15 @@ def test_compact_case_keeps_case_when_unreadable(tmp_path):
                       wind_speed_ms=8.0, wind_from_deg=270.0, crs=None,
                       aoi_bounds=(0.0, 1.0, 0.0, 1.0), elapsed_s=1.0)
     out = _compact_case(case, tmp_path)
-    assert out.case_dir == case.case_dir and out.rotor_path == ""
+    assert out.case_dir == case.case_dir and out.vtu_paths == {}
 
 
-def test_compact_case_deletes_empty_rotor_case(monkeypatch, tmp_path):
+def test_compact_case_deletes_case_with_no_volumes(monkeypatch, tmp_path):
     from sillage.auto import scene
     from sillage.auto.pipeline import CaseResult, _compact_case
 
-    class EmptyRotor:
-        n_cells = 0
-
-    monkeypatch.setattr(scene, "extract_volume", lambda *a, **k: EmptyRotor())
+    # case readable but no lee volume (empty dict) -> delete the heavy files, keep the result
+    monkeypatch.setattr(scene, "extract_case_volumes", lambda *a, **k: {})
     case_dir = tmp_path / "NINJAFOAM_z00_h09"
     run_dir = tmp_path / "z00_h09_run"
     crop = tmp_path / "z00_h09.tif"
@@ -249,7 +247,7 @@ def test_compact_case_deletes_empty_rotor_case(monkeypatch, tmp_path):
                       wind_speed_ms=8.0, wind_from_deg=270.0, crs=None,
                       aoi_bounds=(0.0, 1.0, 0.0, 1.0), elapsed_s=1.0)
     out = _compact_case(case, tmp_path)
-    assert out.case_dir == "" and out.rotor_path == ""
+    assert out.case_dir == "" and out.vtu_paths == {}
     assert not case_dir.exists() and not run_dir.exists() and not crop.exists()
 
 
@@ -295,9 +293,11 @@ def test_store_save_load_roundtrip(tmp_path):
     crs = CRS.from_epsg(32631)
     cases = [
         CaseResult(zone_index=0, hour=9, case_dir="", wind_speed_ms=8.0, wind_from_deg=270.0,
-                   crs=crs, aoi_bounds=(0.0, 1.0, 0.0, 1.0), elapsed_s=1.0, rotor_path=str(rotor)),
+                   crs=crs, aoi_bounds=(0.0, 1.0, 0.0, 1.0), elapsed_s=1.0,
+                   vtu_paths={"rotor": str(rotor), "vertical": str(rotor)}),
         CaseResult(zone_index=1, hour=10, case_dir="", wind_speed_ms=6.0, wind_from_deg=300.0,
-                   crs=crs, aoi_bounds=(1.0, 2.0, 1.0, 2.0), elapsed_s=2.0, rotor_path=str(rotor)),
+                   crs=crs, aoi_bounds=(1.0, 2.0, 1.0, 2.0), elapsed_s=2.0,
+                   vtu_paths={"rotor": str(rotor)}),
     ]
     result = AutoResult(dem_path="", crs=crs, partition=[], cases=cases, timings_summary="t")
     cfg = AutoConfig(bbox_latlon=(44.0, 6.0, 44.5, 6.5), hours=(9, 10),
@@ -313,7 +313,8 @@ def test_store_save_load_roundtrip(tmp_path):
     assert loaded.hour_labels[9] == "ven 9h"
     assert loaded.config["domain_mode"] == "corridor" and loaded.config["target_res_m"] == 5.0
     assert len(loaded.route_segments) == 1 and len(loaded.route_segments[0]) == 2
-    assert loaded.result.cases[0].rotor_path.endswith(".vtu")        # points at the extracted mesh
+    assert loaded.result.cases[0].vtu_paths["rotor"].endswith(".vtu")   # per-metric persisted mesh
+    assert loaded.result.cases[0].vtu_paths["vertical"].endswith(".vtu")
     assert loaded.result.cases[0].wind_from_deg == 270.0
 
 

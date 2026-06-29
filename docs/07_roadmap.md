@@ -128,9 +128,10 @@ topo scale, then a time-sliderable global 3D wake. See docs/10_auto_pipeline.md.
       + live progress (steps, %, ETA). ✔
 - [x] **Blind corridor paving** (`domain_mode="corridor"`, ADR-0029): Pass-2 everywhere along the
       route at max topo res, no Pass-1; **multi-segment routes** skip valley crossings (ADR-0030). ✔
-- [x] **Rendering**: rotor **and** turbulence volumes on a 2-D (height × intensity) colormap, single
-      absolute scale across sectors, adjustable maxima + turb floor, uniform opacity slider, 2-D +
-      continuous wind legends; overlaps drawn by nearest sector (no alpha-stacking). ✔
+- [x] **Rendering**: four lee representations (rotor / horizontal % / vertical m/s / turbulence rms),
+      single absolute scale across sectors, adjustable maxima + volume floors, uniform opacity slider,
+      2-D + continuous wind legends; overlaps drawn by nearest sector (no alpha-stacking); turbulence
+      as absolute rms (comparable between domains); all four persisted in `.sillage` (ADR-0031). ✔
 - [x] **Wave-based progress/ETA** (ADR-0028); disk-safe cases (ADR-0025); right-drag 3D pan. ✔
 - [x] **Save/open** results as a portable `.sillage` bundle (lee meshes + route winds + params), with
       run-day labels (ADR-0030); both apps render identically (Entry 60). ✔
