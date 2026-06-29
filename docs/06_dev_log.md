@@ -1309,6 +1309,216 @@ modules import (offscreen). Not committed.
 
 ---
 
+## Entry 55 — Blind corridor paving + hour-slider dates + sharper 3D basemap  (2026-06-26)
+
+**Blind paving (ADR-0029).** Feature detection under a fine corridor sometimes gave "un seul
+rectangle". User chose, for now, guaranteed coverage: Pass-2 everywhere. New
+`partition.corridor_tiles` lays square momentum domains every `tile_step_m` of route arc length
+(half = corridor half-width, `step ≤ 2·half` ⇒ overlap, no gaps); `run_auto` gets a
+`domain_mode="corridor"` branch that **skips Pass-1** entirely. UI: "Pavage aveugle" checkbox +
+sector-step + topo-resolution (5/10/25 m); CPU plan estimates sectors from route length / step.
+Limits restated to the user: seams between independent tiles, and a tile can't be smaller than
+~lee+buffer (rotors straddling a tile may split); 5 m over a long corridor is a heavy IGN fetch.
+
+**Hour slider.** The "ne fonctionne pas" was a **1-hour window** (nothing to scrub). Now the slider
+is disabled+labelled for a single créneau, shows **absolute dates** (`_fc.label_at` + flanking
+start/end labels) for multi-hour, and an in-window **rotor cache** keeps the (zone,hour) meshes so
+scrubbing doesn't re-read OpenFOAM cases each time.
+
+**Sharper 3D basemap.** `_drape_basemap(zoom_boost=…)` adds web-tile zoom above contextily's auto
+pick (capped to the provider max); the auto scene drapes at +2 for lee-zone detail.
+
+**Result.** `pytest -q` → **89 passed** (added `_resample_polyline` + `corridor_tiles` coverage).
+GUI imports clean (offscreen). Not committed.
+
+---
+
+## Entry 56 — Multi-segment routes + save/open `.sillage` results + km/h display (ADR-0030)  (2026-06-26)
+
+**Multi-segment routes.** To skip valley crossings, the route became a **list of segments**: the
+map's route mode now keeps `segments[]` + the current one, with a "＋ Segment" Leaflet button
+(`window.startNewSegment`) and emits the nested list; right-click deletes the last point, or reopens
+the previous segment when the current is empty. `MapTab.routeSelected` now carries segments;
+`AutoConfig.route_segments` added. `run_auto` paves (`corridor_tiles`) and screens (`corridor_mask`)
+**each segment independently** — the gaps are never computed. Window: per-segment length, wind fetch
+(one AROME series per segment, so no arrows in the gaps), validation, and labels.
+
+**Save / open results (ADR-0030).** New `auto.store`: `save_result` writes a `.sillage` zip =
+`manifest.json` (config, route segments, hours + absolute-date labels, per-case wind/aoi) + `dem.tif`
++ one **clipped rotor `.vtu` per case** (the lee meshes only, never the full field). `load_result`
+extracts to a temp dir and rebuilds an `AutoResult` pointing at the bundled `.vtu`. Window: "📂 Ouvrir"
+/ "💾 Sauvegarder" buttons; opening restores the wake, route, **run-day** hour labels (kept so a
+reopened result isn't relabelled to today) and the parameter controls; the temp dir is cleaned on close.
+
+**Also.** Wind speeds shown in **km/h** everywhere (×3.6 at the display edge; internal m/s, WindNinja
+`mps`, and colour thresholds unchanged). Hour slider: absolute dates + disabled for a single créneau
++ an in-window rotor cache so scrubbing doesn't re-read cases. Sharper 3D basemap (`zoom_boost`).
+
+**Result.** `pytest -q` → **90 passed** (added store round-trip, `corridor_tiles`/`_resample_polyline`,
+wave-ETA). GUI imports clean (offscreen). Not committed.
+
+---
+
+## Entry 57 — Rotor 2-D colormap (height × intensity) + adjustable opacity; overlap diagnosis  (2026-06-27)
+
+**Height jumps at adjacent-domain boundaries — diagnosis.** Even with similar wind, adjacent tiles
+show different rotor-top heights because each is an **independent RANS solve on its own mesh**
+(different vertical discretisation, esp. over different relief in each tile) and the rotor is a
+**hard reversed-flow threshold** (`along_flow < 0`); its top = the 0-crossing of the along-wind
+component, which is sensitive to mesh/solve, so it lands at different heights per tile and the ON/OFF
+threshold turns that into a visible step. It's the seam limit (ADR-0029) in the vertical; a single
+continuous solve is the only true fix (deliberately avoided). The rendering change below makes weak
+tops fade out, so the steps read far less harshly.
+
+**Rotor rendering reworked.** Replaced opacity-encodes-intensity with a **2-D colormap**: height
+drives the hue ramp, intensity warms it — strong rotor = yellow→orange→purple by height; as intensity
+drops the red is pulled out so a faint rotor reads green→blue by height (`_add_rotor`, `_rotor_warm_cmap`
++ a cool green→blue ramp, blended by `intensity`). Opacity is now **uniform and actor-level**, set by a
+**slider** in the 3D tab (`_on_opacity_change` updates actor opacity live — no scene rebuild / basemap
+refetch), so you can dial it down to see inside the volume thickness. `_add_rotor` returns the actor;
+`populate_auto_scene` collects them on `plotter._rotor_actors`.
+
+**Result.** `pytest -q` → **90 passed**. GUI imports clean (offscreen). Not committed.
+
+---
+
+## Entry 58 — 2-D legend, single shared scale, turbulence/rotor metric, applied on a button  (2026-06-27)
+
+**Single global scale (readability).** Rotor intensity was normalised per-mesh (each sector to its
+own 95th percentile) → sectors incomparable and part of the boundary mismatch. Now `_add_rotor`
+takes an **absolute** `intensity_max` and a shared `height_clim`, so **all sectors share one scale**.
+
+**Metric toggle (turbulence default).** `extract_rotor` now carries BOTH `along_flow` (reversed-flow
+speed) and `turb_intensity` (TI = √(2k/3)/U_ref, U_ref = the sector's upstream wind) on the rotor
+mesh (both saved in the `.vtu`). `_add_rotor(metric=…)` colours the recirculation volume by either.
+A "Représentation" dropdown (Turbulence / Rotor) switches it; the 2-D colormap (height × intensity)
+is unchanged, only the intensity axis units/scale swap (km/h ↔ %).
+
+**2-D legend + adjustable maxima + apply button.** A right-side panel shows the full **2-D colormap
+legend** (`rotor_legend_image`, matplotlib→QPixmap) with the metric's units. "Hauteur max" + "Intensité
+max" spinboxes now only refresh the **legend** live; the heavy 3D re-render waits for **« Appliquer »**
+(so editing a value no longer reloads each step). A **basemap texture cache** makes those re-renders
+(and hour scrubs) avoid re-fetching tiles. Opacity stays a live actor-level slider.
+
+**Result.** `pytest -q` → **90 passed**. GUI imports clean (offscreen). Not committed.
+
+---
+
+## Entry 59 — Two lee volumes (rotor / turbulence), run-winds saved, wind colour scale, faint boxes  (2026-06-27)
+
+**Two distinct volumes.** `extract_rotor` → `extract_volume(metric=…)`: "rotor" thresholds reversed
+flow (`along_flow < 0`); "turbulence" thresholds the turbulent zone (`turb_intensity ≥ ti_floor`,
+default 20 %). Both carry both scalars. `CaseResult` gains `turb_path`; `_compact_case`, `store`
+(save/load) and the scene cache (keyed by metric + floor) handle **both** volumes, so switching
+metric on a live OR reopened result works. A "Seuil turb." spinbox sets the turbulence-volume floor
+(applied on « Appliquer »; loaded results keep their saved volume).
+
+**Run winds saved (correctness).** The route AROME wind (`route_cells`) is now written into the
+`.sillage` bundle and restored on open — so a reopened result's arrows are the **run's** winds (that
+produced the lee zones), not today's forecast. (Before, opening didn't restore them and could even
+show a previously-drawn route's arrows.)
+
+**Wind colour scale.** Arrows use a **continuous** green→red scale, 0–40 km/h (clamped; >40 = "do
+not fly"), shared 2D + 3D (`wind_color`/`WIND_STOPS`). The 2D numeric labels are dropped for a
+gradient legend (Leaflet control on the map; a `wind_legend_image` colourbar in the 3D panel). [The
+first cut used discrete bands; switched to continuous per the pilot.]
+
+**Faint sector boxes.** The analysed-domain rectangles are now thin + 30 % opacity so they don't
+dominate the render.
+
+**Result.** `pytest -q` → **90 passed**. GUI imports clean (offscreen). Not committed.
+
+---
+
+## Entry 60 — Homogenise the manual app's render with the auto app + continuous wind scale  (2026-06-27)
+
+**Goal.** The manual 2-pass app (`sillage_gui` / `app.main_window`) and the auto app should look the
+same. Most rendering is shared via `viz.volume3d`, so the work was to route the manual app through
+the same paths and add the matching controls.
+
+**What changed.**
+- `viz.volume3d.populate_plotter`: both reversed-flow AND turbulence now render with the **same 2-D
+  colormap** (`_add_rotor`, height × intensity) + uniform `opacity`; new `zoom_boost` (sharper
+  basemap), `intensity_max`, `height_clim`. Stale "opacité = intensité" caption fixed.
+- `app.main_window` Pass-2 3D tab: a **Représentation** combo (Rotor / Turbulence), an **Opacité**
+  slider (live, actor-level), and the **2-D rotor legend + wind colourbar** — mirroring the auto app.
+  The last Pass-2 case is stored so these re-render without recomputing; basemap drawn at `zoom_boost=2`.
+- `app.main_window._draw_wind_arrows` (2-D screening map): the per-zone arrows use the **continuous
+  green→red wind scale** (0–40 km/h) with an inset colourbar; the numeric labels are dropped — matches
+  the auto map + 3-D arrows.
+- 3-D pan (right-drag), km/h display, scale bar, basemap reprojection were already shared/ported.
+
+**Result.** `pytest -q` → **90 passed**. Both apps import clean (offscreen). Manual + auto now share
+the rotor/turbulence colormap, the wind colour scale, opacity control and legends.
+
+---
+
+## Entry 61 — Default back to rotor + horizontal-% / vertical-velocity fields; turbulence disparity  (2026-06-27)
+
+**Default = rotor again** (turbulence kept but no longer the default).
+
+**Turbulence disparity between sub-domains — investigation.** Not a rendering bug: the colour scale is
+already absolute/shared (Entry 58). The remaining disparity is **structural** — (1) each sub-domain is
+an *independent* RANS solve, so its turbulence field *k* (hence TI) differs at the seams (the same
+limit as the rotor-height steps, but worse because *k* is more mesh/BC-sensitive than the mean flow),
+and (2) TI is normalised by **each domain's own upstream wind** (`turbulence_intensity(ref=case wind)`),
+so two domains with the same *k* but different AROME winds read differently. Fix options for later
+(noted, not done): normalise TI by a single global reference wind, or show absolute rms √(2k/3) [m/s].
+
+**New rotor velocity fields.** `extract_volume`/`extract_lee_volume` now carry `along_pct` (horizontal
+along-wind, signed, % of the upstream wind: −100 reversal → +100 free-stream) and `w_ms` (vertical
+velocity, signed). Two new representations share the 2-D-legend machinery but use a **diverging 1-D
+colormap**: *Vitesse horizontale* (RdBu: red = rotor → blue = full wind; volume = cells slowed below a
+%-floor, incl. reversal) and *Vitesse verticale* (RdYlGn: red = sink → green = lift; volume = |w| ≥
+a m/s-floor). Each has its own adjustable colour-scale max + volume floor + legend. `_add_rotor`
+branches (2-D height×intensity for rotor/turbulence, diverging for the velocity fields). Both apps
+(auto window + manual Pass-2 tab) expose the four via the *Représentation* combo.
+
+**Wind arrows adapt to zoom.** 3-D route arrows are world-sized, so they ballooned when zooming in.
+First cut keyed on camera *distance* — wrong, because the wheel-zoom in this style changes the
+camera **view angle**, not the distance (so only tilt/pan reacted). Fixed: `enable_wind_arrow_autoscale`
+observes the **camera ModifiedEvent** and rescales by an on-screen metric (`distance × tan(view_angle/2)`,
+or `parallel_scale`) so zoom/pan/tilt all keep the arrows ~constant on screen. Base size reduced.
+
+**Result.** `pytest -q` → **90 passed**. Both apps import clean (offscreen).
+
+---
+
+## Entry 62 — Fix: volumes vanished (bad import) + stronger wind yellow + whole-km scale bar  (2026-06-27)
+
+**Regression — no output volumes in 3D.** The shared `extract_lee_volume` (added in
+`viz.volume3d`) used `from . import openfoam_reader` — which resolves to `sillage.viz.openfoam_reader`
+(does not exist; the reader is in `sillage.flow`). It raised, the scene swallowed it per-case, so the
+map + arrows showed but **every lee volume was dropped**. Fixed by using the module-level `ofr`
+(`from ..flow import openfoam_reader as ofr`).
+
+**Wind scale.** The mid (~20 km/h) `#ffffbf` was too pale → switched to a vivid `#ffcc00`, and the
+~30 km/h orange strengthened (`#fb8c2a`); synced in `WIND_STOPS` and the 2-D map JS/legend.
+
+**Scale bar.** Now always a **whole number of km** (`_nice_scale_length_m` picks the largest of
+1/2/3/5/10/20… km fitting ~a third of the scene width; label is integer km).
+
+**Result.** `pytest -q` → **90 passed**.
+
+---
+
+## Entry 63 — Fix: wind arrows vanished (autoscale too twitchy) → discrete-event rescale  (2026-06-29)
+
+**Symptom.** After the camera-`ModifiedEvent` autoscale, the 3-D wind arrows disappeared. That event
+fires on every *intermediate* camera state during a render/reset, so the baseline was captured at a
+bad instant and `SetScale` could collapse the arrows to ~0.
+
+**Fix.** `enable_wind_arrow_autoscale` now rescales only on **discrete** view changes
+(`EndInteractionEvent` + mouse-wheel events, registered after the style so the zoom is already
+applied), never on the camera ModifiedEvent. `baseline_wind_autoscale(plotter)` captures the
+on-screen metric (`distance × tan(view/2)` or `parallel_scale`) and resets arrows to scale 1; the
+auto window calls it right after each render. Base arrow size nudged up (0.06) so they're visible at
+the default view. Result: arrows stay visible and keep ~constant screen size on zoom/pan/tilt.
+
+**Result.** `pytest -q` → **90 passed**.
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

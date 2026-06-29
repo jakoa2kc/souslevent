@@ -6,16 +6,16 @@ milestone is independently demonstrable.
 ## M0 — Scaffold (done)
 Repository structure, docs/traceability, module stubs, packaging, prompts. ✔
 
-## M1 — Pass-1 pipeline, end to end (current target)
+## M1 — Pass-1 pipeline, end to end ✔ (done)
 Prove the whole screening chain on **one known relief**.
-- [ ] `terrain/dem.py`: load a real IGN/SRTM DEM → reproject **UTM north-up**, meters,
-      validate (<50 km), fill no-data.
-- [ ] `terrain/geometry.py`: slope, aspect, ridge detection, Winstral shelter index.
-- [ ] `wind/forecast.py` + `profile.py`: fetch hourly wind profile (Open-Meteo) →
-      crest-height wind per hour. (Start with a single hour / hard-coded wind to unblock.)
-- [ ] `flow/windninja.py`: `run_mass(...)` shelling out to `WindNinja_cli`, ASCII u,v out.
-- [ ] `screening/indicator.py`: combine geometry + velocity deficit + empirical rules →
-      normalized hazard indicator + ranked candidates.
+- [x] `terrain/dem.py`: load a real IGN/SRTM DEM → reproject **UTM north-up**, meters,
+      validate (<50 km), fill no-data. ✔
+- [x] `terrain/geometry.py`: slope, aspect, ridge detection, Winstral shelter index. ✔
+- [x] `wind/forecast.py` + `profile.py`: hourly wind profile (Open-Meteo / AROME HD) →
+      crest-height wind per hour. ✔
+- [x] `flow/windninja.py`: `run_mass(...)` shelling out to `WindNinja_cli`, ASCII u,v out. ✔
+- [x] `screening/indicator.py`: geometry + velocity deficit + empirical rules →
+      normalized hazard indicator + ranked candidates (`find_candidates`). ✔
 - [x] `viz/map2d.py`: 2D hazard map (single hour + **time slider** + animated GIF). ✔
 - [x] `scripts/demo_pass1.py`: runs the above; `scripts/champsaur_pass1_hourly.py` adds the
       hourly loop on the Champsaur IGN DEM. ✔
@@ -78,7 +78,8 @@ valley-to-valley wind differentiation.
 - [x] Basemap under the Pass-1 map (IGN Géoplateforme / OSM / OpenTopoMap) for orientation,
       with hillshade fallback offline (ADR-0010). ✔
 - [ ] Uncertainty communication in the UI (candidates ≠ rotors; RANS-mean caveats).
-- [ ] Save/load an analysis with full provenance (DEM, forecast run, params).
+- [x] Save/load an analysis with provenance — auto results to `.sillage` (DEM + lee meshes +
+      route winds + params + run-day labels), reopened without recomputing (ADR-0030). ✔
 - [ ] **Pass-2 mesh resolution as a quality/time knob (ADR-0008):** preset (coarse/medium/
       fine) or target near-surface resolution, with a displayed time/RAM estimate; default
       medium, "refine to max" on doubt; bounded by a cost estimator.
@@ -125,8 +126,17 @@ topo scale, then a time-sliderable global 3D wake. See docs/10_auto_pipeline.md.
       The `.env` key still labels/gates the run + drives the slider window. ✔
 - [x] Parallel feature/hour solves (`momentum_workers` conservative default, slider up to cores)
       + live progress (steps, %, ETA). ✔
+- [x] **Blind corridor paving** (`domain_mode="corridor"`, ADR-0029): Pass-2 everywhere along the
+      route at max topo res, no Pass-1; **multi-segment routes** skip valley crossings (ADR-0030). ✔
+- [x] **Rendering**: rotor **and** turbulence volumes on a 2-D (height × intensity) colormap, single
+      absolute scale across sectors, adjustable maxima + turb floor, uniform opacity slider, 2-D +
+      continuous wind legends; overlaps drawn by nearest sector (no alpha-stacking). ✔
+- [x] **Wave-based progress/ETA** (ADR-0028); disk-safe cases (ADR-0025); right-drag 3D pan. ✔
+- [x] **Save/open** results as a portable `.sillage` bundle (lee meshes + route winds + params), with
+      run-day labels (ADR-0030); both apps render identically (Entry 60). ✔
 - [ ] Optional: the Météo-France **GRIB** path (eccodes) for >120 m AGL / pressure levels.
-- [ ] End-to-end tuning: `momentum_workers` vs CPU, global height legend, focal-point pan.
+- [ ] Open levers: per-sector IGN 5 m fetch (vs one corridor DEM), turbulence-volume floor as a
+      validated danger threshold, `momentum_workers` vs CPU benchmarking.
 
 ## Later / research
 - Humidity & latent effects; lee-wave structure; validation/hindcast against known flying

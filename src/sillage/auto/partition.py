@@ -133,6 +133,63 @@ def corridor_mask(dem: Dem, route_xy, margin_m: float) -> np.ndarray:
     return (distance_transform_edt(~line) * res) <= margin_m
 
 
+def _resample_polyline(route_xy, step_m: float):
+    """Points every ``step_m`` of arc length along a polyline (DEM CRS), incl. both endpoints."""
+    import math
+
+    pts = [tuple(route_xy[0])] if route_xy else []
+    acc = 0.0
+    for (x0, y0), (x1, y1) in zip(route_xy, route_xy[1:]):
+        seg = math.hypot(x1 - x0, y1 - y0)
+        if seg == 0.0:
+            continue
+        pos = 0.0
+        while acc + (seg - pos) >= step_m:
+            pos += step_m - acc
+            t = pos / seg
+            pts.append((x0 + (x1 - x0) * t, y0 + (y1 - y0) * t))
+            acc = 0.0
+        acc += seg - pos
+    if route_xy and pts[-1] != tuple(route_xy[-1]):
+        pts.append(tuple(route_xy[-1]))
+    return pts
+
+
+def corridor_tiles(
+    dem: Dem,
+    route_xy,
+    *,
+    step_m: float = 1500.0,
+    half_m: float = 1000.0,
+    target_res_m: float = 5.0,
+) -> list[SubZone]:
+    """**Blind paving** of Pass-2 momentum domains along the route — NO Pass-1 gating.
+
+    Lays a square domain of half-size ``half_m`` every ``step_m`` of arc length along the route
+    polyline (``route_xy`` in the DEM CRS). Every sector is computed (the user accepts the cost +
+    the seams between independent solves). ``half_m`` should be ≥ the corridor half-width so a tile
+    spans the corridor; ``step_m`` ≤ ``2·half_m`` keeps tiles touching/overlapping (no gaps)."""
+    elev = np.asarray(dem.elevation, dtype="float64")
+    h_px, w_px = elev.shape
+    res = float(dem.resolution_m)
+    left, _bottom, _right, top = dem.bounds
+
+    zones: list[SubZone] = []
+    for cx, cy in _resample_polyline(list(route_xy), max(50.0, step_m)):
+        bbox = (cx - half_m, cy - half_m, cx + half_m, cy + half_m)
+        pr0, pr1 = max(0, int((top - (cy + half_m)) / res)), min(h_px, int((top - (cy - half_m)) / res))
+        pc0, pc1 = max(0, int((cx - half_m - left) / res)), min(w_px, int((cx + half_m - left) / res))
+        dsub = elev[pr0:pr1, pc0:pc1]
+        dfin = dsub[np.isfinite(dsub)]
+        zones.append(SubZone(
+            bbox=bbox, center=(cx, cy),
+            crest_alt_m=float(np.nanpercentile(dsub, 80)) if dfin.size else 0.0,
+            relief_m=(float(dfin.max()) - float(dfin.min())) if dfin.size else 0.0,
+            est_cells=estimate_cells(2 * half_m, 2 * half_m, target_res_m),
+            pixel_window=(pr0, pr1, pc0, pc1)))
+    return zones
+
+
 def feature_domains(
     dem: Dem,
     hazard: np.ndarray,

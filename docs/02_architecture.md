@@ -97,6 +97,26 @@ a candidate (Pass 2). Each solver is used strictly where it is physically valid.
   volume** (`threshold` on along-flow velocity sign) and/or **turbulence-intensity
   volume**, windward green / leeward red-orange by severity. (Detail view.)
 
+### `app/` and `auto/` — the application layer (two apps, one engine)
+
+The libraries above are driven by **two desktop apps** that share every lower layer (so their
+**results and 3D rendering are identical**):
+
+- `app/main_window.py` — the **manual** 2-pass app (`sillage-gui`): draw a zone, browse the Pass-1
+  hazard by hour, draw a Pass-2 rectangle, inspect the 3D rotor/turbulence of that feature.
+- `auto/` — the **automatic** pipeline (`sillage-auto`, see `docs/10_auto_pipeline.md`): draw a flight
+  **route** (multi-segment) + a window, then `run_auto` solves Pass-2 along the corridor — either on
+  Pass-1 **features** or by **blind paving** — and aggregates per-hour 3D scenes. Submodules:
+  `pipeline` (orchestrator), `partition` (feature/corridor domains), `wind` (AROME-HD + route arrows),
+  `arome` (forecast window), `scene` (`extract_volume` + aggregate), `store` (`.sillage` save/open),
+  `progress` (wave ETA), `window` (UI).
+- `app/map_tab.py` — the **Leaflet/QtWebEngine** map shared by both (rectangle AOI **or** multi-segment
+  route + live corridor + wind arrows). `app/jobs.py` — the background `SolveJob` (progress/cancel).
+
+Rendering is centralised in `viz/volume3d.py`: basemap drape (reprojected, zoom-boosted), the rotor /
+turbulence **2-D colormap** (height × intensity) on a single absolute scale, uniform adjustable
+opacity, continuous wind-speed arrows + legends, scale bar, terrain-locked rotation + right-drag pan.
+
 ## The two handoffs (the load-bearing interfaces)
 
 1. **Wind → Pass 2 boundary condition.** Pass 2's homogeneous input wind is *read from

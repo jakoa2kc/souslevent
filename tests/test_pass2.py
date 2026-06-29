@@ -549,4 +549,4 @@ def test_add_compass_adds_north_and_wind_arrows():
     v3._add_compass(p, terrain, mean_flow_vector(270.0), wind_speed_ms=12.0, wind_from_deg=270.0)
     assert p.meshes == 2  # north + wind arrows
     assert p.labels[0] == "N"
-    assert "12 m/s" in p.labels[1] and "270" in p.labels[1]
+    assert "43 km/h" in p.labels[1] and "270" in p.labels[1]  # 12 m/s -> 43 km/h (display only)

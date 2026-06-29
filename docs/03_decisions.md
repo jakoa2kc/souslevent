@@ -819,6 +819,60 @@ lines for coarse in-solve progress. (Right-drag 3D pan shipped in the same pass 
 
 ---
 
+## ADR-0029 — Optional "blind paving" mode: Pass-2 everywhere along the route (no Pass-1)
+
+**Status.** Accepted (2026-06-26), opt-in alongside the feature-based default (ADR-0023).
+
+**Context.** Hazard-based feature detection under a fine corridor sometimes placed very few domains
+("un seul rectangle"), so stretches of the route were never analysed. The pilot prefers, for now,
+**guaranteed coverage**: compute Pass-2 *everywhere* along the route at max resolution and judge the
+result directly, accepting the cost.
+
+**Decision.** Add `AutoConfig.domain_mode="corridor"` (`partition.corridor_tiles`): **no Pass-1** —
+lay a square momentum domain every `tile_step_m` of route arc length, half-size `tile_half_m`
+(default = corridor half-width, ≥ 900 m), `step ≤ 2·half` so tiles overlap (no gaps). Each tile is
+solved on tile+buffer at `target_res_m` (UI: 5/10/25 m) with local AROME-HD wind, clipped to the
+tile. UI: a "Pavage aveugle" checkbox + sector step + topo resolution; the CPU plan estimates the
+sector count from route length / step. `domain_mode="features"` keeps ADR-0023.
+
+**Consequences.** Full route coverage, trivially parallel (more, smaller solves — good for OpenFOAM
+threading). **Accepts the limits we documented:** independent tiles don't match at seams, and a tile
+can't be smaller than ~lee+buffer, so rotors straddling a tile may be split. 5 m topo over a long
+corridor is a heavy IGN fetch → use short routes first. This is a deliberate cost/quality trade for
+guaranteed coverage; the feature-based mode remains the physically-cleaner default.
+
+**Overlap rendering.** Overlapping sectors are translucent meshes, so alpha-compositing would *stack*
+their opacity and fake a stronger rotor. The 3D scene therefore draws each space point from its
+**nearest sector centre only** (a Voronoi clip of the rotor cells in `auto.scene.populate_auto_scene`),
+so transparency reads as the true intensity — no double-counting. (True cross-solve averaging of the
+fields is heavier and deferred; winner-take-all by nearest centre is the cheap, deterministic fix.)
+
+---
+
+## ADR-0030 — Multi-segment routes + portable result bundles (`.sillage`)
+
+**Status.** Accepted (2026-06-26).
+
+**Context.** (1) A continuous route forced paving across valley crossings/transitions the pilot
+won't fly. (2) Auto runs are expensive; the result (the lee zones) should be re-openable without
+recomputing, but the full OpenFOAM field is far too big to keep.
+
+**Decision.** (1) The route is a **list of segments** (`AutoConfig.route_segments`); the map adds a
+"＋ Segment" button that keeps the current segment and starts a new one. `run_auto` paves/screens
+**each segment independently**, so the gaps between segments are never computed. `route_latlon`
+stays the flattened route (DEM extent + wind). (2) `auto.store` saves a run as a single
+**`.sillage` zip**: `manifest.json` (config, route segments, hours + absolute-date labels, per-case
+wind/aoi metadata) + `dem.tif` + one **clipped rotor `.vtu` per case** — i.e. only the reversed-flow
+lee meshes, never the full mesh field. `load_result` extracts to a temp dir and rebuilds an
+`AutoResult` whose cases point at the bundled `.vtu`, so the 3D scene redraws with no solve.
+
+**Consequences.** Disjoint corridors skip transition zones (less compute, the pilot's intent). A
+result file is small (lee meshes only) and portable; reopening restores the wake, route, per-day
+hour labels and parameters. Saved labels are kept so a reopened result shows its **run day**, not
+today. The bundle omits the full field, so it can't be re-solved at higher mesh — recompute for that.
+
+---
+
 ## Open questions tracked as future ADRs
 
 - **Stability / diurnal winds on the momentum solver.** Available on the mass solver

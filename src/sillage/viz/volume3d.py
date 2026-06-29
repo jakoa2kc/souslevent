@@ -58,21 +58,21 @@ def _seed_streamlines(mesh, mean_flow_dir: np.ndarray, n_points: int = 200):
         return None
 
 
-def _drape_basemap(plotter, terrain, crs, source: str) -> bool:
+def _drape_basemap(plotter, terrain, crs, source: str, zoom_boost: int = 0,
+                   texture_cache=None) -> bool:
     """Texture-drape a web-tile basemap (top-down) onto the terrain surface. Returns success.
 
     Needs the terrain CRS (UTM) to fetch the basemap for the right lon/lat area. Tiles arrive in
     WebMercator, so reproject the RGB raster to the terrain CRS before texturing; directly
     stretching WebMercator pixels onto UTM can show as a north/south offset on larger AOIs.
+
+    ``zoom_boost`` adds web-tile zoom levels above contextily's auto pick (each +1 ≈ 2× ground
+    resolution) so the drape is sharp enough to inspect lee-zone detail when the camera zooms in.
+    ``texture_cache`` (a dict) memoises the built texture by extent/source/zoom so hour-scrub and
+    threshold re-renders reuse it instead of re-fetching tiles (the slow part).
     """
     try:
-        import contextily as cx
         import pyvista as pv
-        from rasterio.crs import CRS as RCRS
-        from rasterio.enums import Resampling
-        from rasterio.transform import from_bounds
-        from rasterio.warp import transform as warp_xy
-        from rasterio.warp import reproject
 
         from .map2d import BASEMAP_SOURCES
 
@@ -80,33 +80,52 @@ def _drape_basemap(plotter, terrain, crs, source: str) -> bool:
             return False
         b = terrain.bounds
         xmin, xmax, ymin, ymax = b[0], b[1], b[2], b[3]
-        dst_crs = RCRS.from_user_input(crs)
-        xs = [xmin, xmin, xmax, xmax]
-        ys = [ymin, ymax, ymin, ymax]
-        lons, lats = warp_xy(dst_crs, RCRS.from_epsg(4326), xs, ys)
-        w, e = min(lons), max(lons)
-        s, n = min(lats), max(lats)
-        family, layer = BASEMAP_SOURCES[source]
-        prov = getattr(cx.providers, family)
-        if layer is not None:
-            prov = prov[layer]
-        img, ext3857 = cx.bounds2img(w, s, e, n, source=prov, ll=True)
-        # Keep the tile mosaic north-up (row 0 = north): with texture_map_to_plane below,
-        # VTK maps array row 0 to the north (point_v) edge, so NO vertical flip — flipping
-        # renders the basemap (and its text) upside down. Verified by a top-down drape test.
-        img = np.ascontiguousarray(img[:, :, :3])
-        h, ww = img.shape[:2]
-        src_transform = from_bounds(ext3857[0], ext3857[2], ext3857[1], ext3857[3], ww, h)
-        dst_transform = from_bounds(xmin, ymin, xmax, ymax, ww, h)
-        warped = np.zeros((h, ww, 3), dtype=np.uint8)
-        for band in range(3):
-            reproject(
-                img[:, :, band], warped[:, :, band],
-                src_transform=src_transform, src_crs=RCRS.from_epsg(3857),
-                dst_transform=dst_transform, dst_crs=dst_crs,
-                resampling=Resampling.bilinear,
-            )
-        tex = pv.numpy_to_texture(np.ascontiguousarray(warped))
+        key = (round(xmin), round(ymin), round(xmax), round(ymax), source, int(zoom_boost))
+        tex = texture_cache.get(key) if texture_cache is not None else None
+        if tex is None:
+            import contextily as cx
+            from rasterio.crs import CRS as RCRS
+            from rasterio.enums import Resampling
+            from rasterio.transform import from_bounds
+            from rasterio.warp import reproject
+            from rasterio.warp import transform as warp_xy
+
+            dst_crs = RCRS.from_user_input(crs)
+            lons, lats = warp_xy(dst_crs, RCRS.from_epsg(4326),
+                                 [xmin, xmin, xmax, xmax], [ymin, ymax, ymin, ymax])
+            w, e = min(lons), max(lons)
+            s, n = min(lats), max(lats)
+            family, layer = BASEMAP_SOURCES[source]
+            prov = getattr(cx.providers, family)
+            if layer is not None:
+                prov = prov[layer]
+            zoom = "auto"
+            if zoom_boost:  # sharper tiles for lee detail (capped to the provider max)
+                try:
+                    from contextily.tile import _calculate_zoom
+
+                    zmax = int(prov.get("max_zoom", 19)) if hasattr(prov, "get") else 19
+                    zoom = min(_calculate_zoom(w, s, e, n) + int(zoom_boost), zmax)
+                except Exception:
+                    zoom = "auto"
+            img, ext3857 = cx.bounds2img(w, s, e, n, zoom=zoom, source=prov, ll=True)
+            # Keep the tile mosaic north-up (row 0 = north): texture_map_to_plane maps array row 0
+            # to the north (point_v) edge, so NO vertical flip (flipping renders it upside down).
+            img = np.ascontiguousarray(img[:, :, :3])
+            h, ww = img.shape[:2]
+            src_transform = from_bounds(ext3857[0], ext3857[2], ext3857[1], ext3857[3], ww, h)
+            dst_transform = from_bounds(xmin, ymin, xmax, ymax, ww, h)
+            warped = np.zeros((h, ww, 3), dtype=np.uint8)
+            for band in range(3):
+                reproject(
+                    img[:, :, band], warped[:, :, band],
+                    src_transform=src_transform, src_crs=RCRS.from_epsg(3857),
+                    dst_transform=dst_transform, dst_crs=dst_crs,
+                    resampling=Resampling.bilinear,
+                )
+            tex = pv.numpy_to_texture(np.ascontiguousarray(warped))
+            if texture_cache is not None:
+                texture_cache[key] = tex
         terrain.texture_map_to_plane(
             origin=(xmin, ymin, 0.0), point_u=(xmax, ymin, 0.0), point_v=(xmin, ymax, 0.0),
             inplace=True)
@@ -138,28 +157,30 @@ def _terrain_mesh(dem, lift: float = 0.0):
     return pv.StructuredGrid(xx, yy, z + lift)
 
 
-def _nice_scale_length(span_m: float) -> float:
-    """A readable 1/2/5×10^n scale length, around one fifth of the scene width."""
-    target = max(1.0, span_m * 0.20)
-    decade = 10.0 ** np.floor(np.log10(target))
-    for mult in (1.0, 2.0, 5.0, 10.0):
-        val = mult * decade
-        if val >= target:
-            return float(val)
-    return float(10.0 * decade)
+_NICE_KM = (1, 2, 3, 5, 10, 20, 30, 50, 100, 200, 500)
+
+
+def _nice_scale_length_m(avail_m: float) -> float:
+    """A **whole number of km** (1/2/3/5/10…), the largest that fits in ``avail_m`` (≥ 1 km)."""
+    avail_km = max(1.0, avail_m / 1000.0)
+    length_km = 1
+    for km in _NICE_KM:
+        if km <= avail_km:
+            length_km = km
+    return float(length_km * 1000)
 
 
 def _scale_label(length_m: float) -> str:
-    return f"{length_m / 1000.0:g} km" if length_m >= 1000 else f"{length_m:g} m"
+    return f"{int(round(length_m / 1000.0))} km"
 
 
 def _add_horizontal_scale_bar(plotter, terrain) -> None:
-    """Floating horizontal scale bar in terrain CRS units (meters)."""
+    """Floating horizontal scale bar — always a whole number of km (terrain CRS units = metres)."""
     import pyvista as pv
 
     b = terrain.bounds
     dx, dy, dz = b[1] - b[0], b[3] - b[2], b[5] - b[4]
-    length = min(_nice_scale_length(min(dx, dy)), dx * 0.35)
+    length = _nice_scale_length_m(dx * 0.35)  # largest whole-km bar fitting ~a third of the width
     x0 = b[0] + 0.10 * dx
     y0 = b[2] + 0.08 * dy
     z = b[5] + 0.12 * max(dz, length * 0.12) + 20.0
@@ -278,30 +299,130 @@ def _add_north_arrow(plotter, terrain) -> None:
                              always_visible=True)
 
 
-def _add_wind_arrows_3d(plotter, terrain, winds) -> None:
-    """One wind arrow per WindNinja zone, sitting above the terrain, coloured by speed (turbo)."""
+# Continuous wind-speed colour scale (km/h), 0 → WIND_VMAX_KMH, shared by the 2-D map arrows, the
+# 3-D arrows and the legend. Green (calm) → red (40 km/h, the practical do-not-fly ceiling).
+WIND_VMAX_KMH = 40.0
+WIND_STOPS = ("#1a9850", "#a6d96a", "#ffcc00", "#fb8c2a", "#d73027")  # green→red, vivid mid
+
+
+def _wind_cmap():
+    from matplotlib.colors import LinearSegmentedColormap
+
+    return LinearSegmentedColormap.from_list("wind", WIND_STOPS)
+
+
+def wind_color(speed_kmh: float) -> str:
+    """Hex colour for a wind speed (km/h) on the continuous 0–``WIND_VMAX_KMH`` scale (clamped)."""
+    t = min(max(float(speed_kmh) / WIND_VMAX_KMH, 0.0), 1.0)
+    r, g, b, _a = _wind_cmap()(t)
+    return "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
+
+
+def wind_legend_image(vmax: float = WIND_VMAX_KMH, n: int = 256):
+    """Horizontal continuous wind-speed colourbar (0→``vmax`` km/h) as an RGBA uint8 array."""
     import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    grad = _wind_cmap()(np.linspace(0.0, 1.0, n))[:, :3]
+    img = np.tile(grad[None, :, :], (8, 1, 1))
+    fig = plt.figure(figsize=(2.5, 0.8), dpi=100)
+    ax = fig.add_axes([0.08, 0.42, 0.88, 0.30])
+    ax.imshow(img, origin="lower", aspect="auto", extent=[0.0, float(vmax), 0.0, 1.0])
+    ax.set_yticks([])
+    ax.set_xlabel("Vent (km/h)", fontsize=8)
+    ax.tick_params(labelsize=7)
+    fig.canvas.draw()
+    w, h = fig.canvas.get_width_height()
+    buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4).copy()
+    plt.close(fig)
+    return buf
+
+
+def _add_wind_arrows_3d(plotter, terrain, winds):
+    """One wind arrow per cell, above the terrain, coloured by the continuous wind scale. Returns
+    ``[(actor, origin), …]`` so ``enable_wind_arrow_autoscale`` can keep them ~constant on screen."""
     import pyvista as pv
-    from matplotlib.colors import Normalize
     from scipy.spatial import cKDTree
 
     tpts = np.asarray(terrain.points)
     tree = cKDTree(tpts[:, :2])
     b = terrain.bounds
     side = max(1, round(len(winds) ** 0.5))
-    length = min(0.14 * min(b[1] - b[0], b[3] - b[2]),
-                 0.42 * min(b[1] - b[0], b[3] - b[2]) / side)
+    length = min(0.06 * min(b[1] - b[0], b[3] - b[2]),
+                 0.32 * min(b[1] - b[0], b[3] - b[2]) / side)
     lift = 0.04 * (b[5] - b[4]) + 10.0
-    norm = Normalize(0.0, 20.0)
-    cmap = matplotlib.colormaps["turbo"]
+    actors = []
     for x, y, spd, drc in winds:
         zi = float(tpts[tree.query([x, y])[1], 2])
         blow = np.deg2rad((float(drc) + 180.0) % 360.0)
         d = (float(np.sin(blow)), float(np.cos(blow)), 0.0)
+        origin = (float(x), float(y), zi + lift)
         start = (x - d[0] * length / 2, y - d[1] * length / 2, zi + lift)
         arrow = pv.Arrow(start=start, direction=d, scale=length,
                          tip_length=0.30, tip_radius=0.10, shaft_radius=0.04)
-        plotter.add_mesh(arrow, color=cmap(norm(float(spd)))[:3])
+        actor = plotter.add_mesh(arrow, color=wind_color(float(spd) * 3.6))
+        actors.append((actor, origin))
+    return actors
+
+
+def _camera_screen_metric(camera):
+    """A scalar ∝ world-units-per-screen-pixel for the camera: ``parallel_scale`` in parallel
+    projection, else ``distance × tan(view_angle/2)`` (perspective). Wheel-zoom changes the view
+    angle (not the distance), so this captures zoom AND dolly/pan/tilt — unlike distance alone."""
+    if getattr(camera, "parallel_projection", False):
+        return max(float(camera.parallel_scale), 1e-6)
+    pos = np.asarray(camera.position, dtype="float64")
+    fp = np.asarray(camera.focal_point, dtype="float64")
+    dist = float(np.linalg.norm(pos - fp)) or 1.0
+    return max(dist * np.tan(np.radians(float(camera.view_angle)) / 2.0), 1e-6)
+
+
+def baseline_wind_autoscale(plotter):
+    """Capture the current view as the wind-arrow autoscale baseline (factor 1) and reset arrows to
+    their built size. Call right after a render once the camera is in place."""
+    try:
+        plotter._wind_ref_metric = _camera_screen_metric(plotter.camera)
+        for actor, _origin in getattr(plotter, "_wind_arrows", None) or []:
+            actor.SetScale(1.0, 1.0, 1.0)
+    except Exception:
+        pass
+
+
+def enable_wind_arrow_autoscale(plotter):
+    """Keep 3-D wind arrows ~constant on screen: on each **discrete** view change (drag-end + mouse
+    wheel) rescale them by the on-screen metric relative to ``plotter._wind_ref_metric`` (set by
+    ``baseline_wind_autoscale`` after a render). Discrete events only — not the camera ModifiedEvent,
+    which fires on every intermediate state during a reset and could collapse the arrows."""
+    try:
+        interactor = plotter.iren.interactor
+    except Exception:
+        return
+
+    def _rescale(*_a):
+        arrows = getattr(plotter, "_wind_arrows", None)
+        ref = getattr(plotter, "_wind_ref_metric", None)
+        if not arrows or not ref:
+            return
+        f = float(max(0.15, min(8.0, _camera_screen_metric(plotter.camera) / ref)))
+        for actor, origin in arrows:
+            try:
+                actor.SetOrigin(*origin)
+                actor.SetScale(f, f, f)
+            except Exception:
+                pass
+        try:
+            plotter.render()
+        except Exception:
+            pass
+
+    for ev in ("EndInteractionEvent", "MouseWheelForwardEvent", "MouseWheelBackwardEvent"):
+        try:
+            interactor.AddObserver(ev, _rescale, -1.0)  # after the style applies the zoom/move
+        except Exception:
+            pass
+    plotter._wind_autoscale = _rescale  # keep alive
 
 
 def populate_pass1_3d(plotter, dem, hazard=None, winds=None, crs=None,
@@ -342,49 +463,195 @@ def populate_pass1_3d(plotter, dem, hazard=None, winds=None, crs=None,
     return plotter
 
 
-def _add_rotor(plotter, rev, terrain, show_legend: bool = True, clim=None) -> None:
-    """Add the reversed-flow (rotor) volume coloured by HEIGHT ABOVE GROUND (yellow near the
-    ground -> red -> purple high up) with OPACITY proportional to rotor intensity.
+def _rotor_warm_cmap():
+    from matplotlib.colors import LinearSegmentedColormap
 
-    ``clim=(lo, hi)`` forces the height scale (so an aggregate of many feature rotors shares one
-    consistent scale + legend); ``show_legend=False`` skips the per-rotor scalar bar (the
-    aggregate adds a single legend itself)."""
-    from matplotlib.colors import LinearSegmentedColormap, Normalize
+    return LinearSegmentedColormap.from_list("rotor_warm", ["#ffff00", "#ff8c00", "#7a00b0"])
+
+
+def _rotor_cool_cmap():
+    from matplotlib.colors import LinearSegmentedColormap
+
+    return LinearSegmentedColormap.from_list("rotor_cool", ["#2ca02c", "#1f77b4"])
+
+
+def rotor_legend_image(height_max_m: float, intensity_max_display: float,
+                       ylabel: str = "Intensité (km/h)", title: str = "Rotor : hauteur × intensité",
+                       n: int = 64):
+    """Render the **2-D colormap** (x = height above ground [m], y = intensity in the metric's
+    display units) to an RGBA uint8 array for an on-screen legend. Matches ``_add_rotor``'s blend:
+    cool green→blue (faint) warming to yellow→orange→purple (strong) as intensity rises."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    warm = _rotor_warm_cmap()
+    cool = _rotor_cool_cmap()
+    hn = np.linspace(0.0, 1.0, n)
+    sn = np.linspace(0.0, 1.0, n)
+    warm_rgb = warm(hn)[:, :3]
+    cool_rgb = cool(hn)[:, :3]
+    img = cool_rgb[None] * (1.0 - sn[:, None, None]) + warm_rgb[None] * sn[:, None, None]  # (n,n,3)
+
+    fig = plt.figure(figsize=(2.5, 2.1), dpi=100)
+    ax = fig.add_axes([0.24, 0.22, 0.72, 0.66])
+    ax.imshow(img, origin="lower", aspect="auto",
+              extent=[0.0, float(height_max_m), 0.0, float(intensity_max_display)])
+    ax.set_xlabel("Hauteur sol (m)", fontsize=8)
+    ax.set_ylabel(ylabel, fontsize=8)
+    ax.set_title(title, fontsize=8)
+    ax.tick_params(labelsize=7)
+    fig.canvas.draw()
+    w, h = fig.canvas.get_width_height()
+    buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4).copy()
+    plt.close(fig)
+    return buf
+
+
+DIVERGING = {  # metric -> (matplotlib cmap, default ±range, unit label)
+    "horizontal": ("RdBu", 100.0, "Vitesse horizontale (% vent)"),   # red reversed → blue free-stream
+    "vertical": ("RdYlGn", 3.0, "Vitesse verticale (m/s)"),          # red sink → green lift
+}
+
+
+def diverging_legend_image(vmax: float, cmap_name: str, label: str, title: str, n: int = 256):
+    """Horizontal **diverging** colourbar (−vmax→+vmax) as an RGBA uint8 array (velocity fields)."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    grad = matplotlib.colormaps[cmap_name](np.linspace(0.0, 1.0, n))[:, :3]
+    img = np.tile(grad[None, :, :], (10, 1, 1))
+    fig = plt.figure(figsize=(2.5, 0.95), dpi=100)
+    ax = fig.add_axes([0.10, 0.42, 0.86, 0.26])
+    ax.imshow(img, origin="lower", aspect="auto", extent=[-float(vmax), float(vmax), 0.0, 1.0])
+    ax.set_yticks([])
+    ax.set_xlabel(label, fontsize=8)
+    ax.set_title(title, fontsize=8)
+    ax.tick_params(labelsize=7)
+    fig.canvas.draw()
+    w, h = fig.canvas.get_width_height()
+    buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4).copy()
+    plt.close(fig)
+    return buf
+
+
+def _add_rotor(plotter, rev, terrain, show_legend: bool = True, clim=None, opacity: float = 0.5,
+               intensity_max: float | None = None, metric: str = "rotor"):
+    """Colour the lee volume and add it. Two colouring modes:
+
+    - ``rotor`` / ``turbulence``: a **2-D colormap** — HEIGHT above ground drives the hue ramp,
+      intensity warms it (faint reads green→blue, strong yellow→orange→purple).
+    - ``horizontal`` / ``vertical``: a **diverging 1-D colormap** on the signed velocity field
+      (horizontal = % of upstream wind, red = reversed/rotor → blue = free-stream; vertical = m/s,
+      red = sink → green = lift), symmetric about 0 over ±``intensity_max``.
+
+    Opacity is uniform + adjustable (actor-level, so a slider changes it live). Returns the actor.
+    ``clim=(lo, hi)`` forces the height scale (2-D modes); ``show_legend=False`` skips the in-scene bar."""
+    from matplotlib.colors import Normalize
     from scipy.spatial import cKDTree
 
     centers = rev.cell_centers().points
+    alpha = float(np.clip(opacity, 0.02, 1.0))
+
+    if metric in DIVERGING:  # signed velocity field on a diverging colormap
+        import matplotlib
+
+        cmap_name, default_max, _label = DIVERGING[metric]
+        field_name = "along_pct" if metric == "horizontal" else "w_ms"
+        field = rev.cell_data.get(field_name)
+        field = np.asarray(field, dtype="float64") if field is not None else np.zeros(len(centers))
+        vmax = max(float(intensity_max) if intensity_max else default_max, 1e-6)
+        rgb = matplotlib.colormaps[cmap_name](np.clip(Normalize(-vmax, vmax)(field), 0.0, 1.0))[:, :3]
+        rev.cell_data["rotor_rgb"] = (rgb * 255).astype(np.uint8)
+        return plotter.add_mesh(rev, scalars="rotor_rgb", rgb=True, opacity=alpha,
+                                reset_camera=False)
+
     tpts = np.asarray(terrain.points)
     idx = cKDTree(tpts[:, :2]).query(centers[:, :2])[1]
     hagl = centers[:, 2] - tpts[idx, 2]  # height above the terrain
+    # Intensity scalar = the chosen metric: turbulence intensity, else reversed-flow speed.
+    ti = rev.cell_data.get("turb_intensity")
     along = rev.cell_data.get("along_flow")
-    intensity = np.clip(-np.asarray(along), 0.0, None) if along is not None else np.ones(len(centers))
+    if metric == "turbulence" and ti is not None:
+        intensity = np.clip(np.asarray(ti), 0.0, None)
+    elif along is not None:
+        intensity = np.clip(-np.asarray(along), 0.0, None)
+    else:
+        intensity = np.ones(len(centers))
 
-    cmap = LinearSegmentedColormap.from_list("yrp", ["#ffff00", "#ff2a00", "#7a00b0"])
+    warm = _rotor_warm_cmap()  # height ramp, intense
+    cool = _rotor_cool_cmap()  # height ramp, faint
     lo, hi = clim if clim is not None else (np.nanpercentile(hagl, 5), np.nanpercentile(hagl, 95))
     hi = max(hi, lo + 1e-6)
-    rgb = cmap(np.clip(Normalize(lo, hi)(hagl), 0, 1))[:, :3]
-    imax = max(float(np.nanpercentile(intensity, 95)), 1e-6)
-    alpha = 0.12 + 0.85 * np.clip(intensity / imax, 0.0, 1.0)  # weak transparent -> strong opaque
-    rev.cell_data["rotor_rgba"] = (np.c_[rgb, alpha] * 255).astype(np.uint8)
-    plotter.add_mesh(rev, scalars="rotor_rgba", rgba=True, reset_camera=False)
+    hn = np.clip(Normalize(lo, hi)(hagl), 0.0, 1.0)
+    # Intensity ceiling: an ABSOLUTE reversed-flow speed (m/s) when given, so sectors share one
+    # scale (comparable + adjustable); else fall back to this mesh's 95th percentile.
+    imax = max(float(intensity_max) if intensity_max else float(np.nanpercentile(intensity, 95)),
+               1e-6)
+    s = np.clip(intensity / imax, 0.0, 1.0)[:, None]  # 0 = faint rotor, 1 = strong
+    rgb = cool(hn)[:, :3] * (1.0 - s) + warm(hn)[:, :3] * s   # 2-D colormap: height × intensity
+    rev.cell_data["rotor_rgb"] = (rgb * 255).astype(np.uint8)
+    actor = plotter.add_mesh(rev, scalars="rotor_rgb", rgb=True,
+                             opacity=float(np.clip(opacity, 0.02, 1.0)), reset_camera=False)
     if not show_legend:
-        return
+        return actor
 
-    # Legend for the colour -> height-above-ground (m) mapping. The rotor itself is drawn with
-    # raw RGBA (colour=height, opacity=intensity), which carries no scalar bar, so add a tiny
-    # invisible proxy carrying the [lo, hi] range + the same colormap to render the bar.
+    # Height legend (the warm ramp = height at full intensity). The rotor uses raw RGB, which carries
+    # no scalar bar, so add a tiny invisible proxy holding the [lo, hi] range + the warm colormap.
     import pyvista as pv
 
     seed = centers[:2] if len(centers) >= 2 else np.zeros((2, 3))
     proxy = pv.PolyData(np.asarray(seed, dtype="float64"))
     proxy["Hauteur sol (m)"] = np.array([lo, hi], dtype="float64")
     plotter.add_mesh(
-        proxy, scalars="Hauteur sol (m)", cmap=cmap, clim=(lo, hi), style="points",
+        proxy, scalars="Hauteur sol (m)", cmap=warm, clim=(lo, hi), style="points",
         point_size=1.0, opacity=0.0, reset_camera=False, show_scalar_bar=True,
         scalar_bar_args=dict(title="Hauteur sol (m)", n_labels=5, fmt="%.0f", vertical=True,
                              title_font_size=14, label_font_size=12, position_x=0.86,
                              position_y=0.30, width=0.10, height=0.45),
     )
+    return actor
+
+
+def extract_lee_volume(mesh, mean_flow_dir, *, metric: str = "rotor", ref_speed_ms=None,
+                       vol_floor: float = 0.20, aoi_bounds=None):
+    """Compute the lee scalars on an OpenFOAM mesh and return the **clipped volume for ``metric``**.
+    Shared by the auto scene and the manual app so both extract identically. Carries ``along_flow``
+    (m/s), ``along_pct`` (% of upstream wind, signed), ``w_ms`` (vertical, signed), ``turb_intensity``.
+    Returns ``None`` if empty/unavailable. ``vol_floor`` is in the metric's native unit."""
+    along = np.asarray(ofr.along_flow_component(mesh, mean_flow_dir), dtype="float64")
+    mesh["along_flow"] = along
+    mesh["along_pct"] = along / max(float(ref_speed_ms or 0.0), 0.1) * 100.0
+    try:
+        w = np.asarray(ofr.velocity(mesh), dtype="float64")[:, 2]
+        mesh["w_ms"] = w
+        mesh["w_abs"] = np.abs(w)
+    except Exception:
+        pass
+    ti = None
+    try:
+        ti = ofr.turbulence_intensity(mesh, reference_speed=ref_speed_ms)
+        if ti is not None:
+            mesh["turb_intensity"] = np.asarray(ti, dtype="float64")
+    except Exception:
+        ti = None
+
+    if metric == "turbulence":
+        if ti is None:
+            return None
+        vol = mesh.threshold(value=float(vol_floor), scalars="turb_intensity")          # TI ≥ floor
+    elif metric == "horizontal":
+        vol = mesh.threshold(value=float(vol_floor), scalars="along_pct", invert=True)   # ≤ floor %
+    elif metric == "vertical":
+        if "w_abs" not in mesh.array_names:
+            return None
+        vol = mesh.threshold(value=float(vol_floor), scalars="w_abs")                    # |w| ≥ floor
+    else:  # rotor
+        vol = mesh.threshold(value=0.0, scalars="along_flow", invert=True)               # reversed
+    return _clip_domain_boundary(vol, mesh, aoi_bounds=aoi_bounds, keep_if_empty=False)
 
 
 def _clip_domain_boundary(rev, mesh, aoi_bounds=None, lateral_frac: float = 0.08,
@@ -452,7 +719,7 @@ def _add_compass(plotter, terrain, mean_flow_dir, wind_speed_ms=None, wind_from_
         plotter.add_mesh(wind, color="#1565c0")
         txt = "vent"
         if wind_speed_ms is not None:
-            txt = f"vent {wind_speed_ms:.0f} m/s"
+            txt = f"vent {wind_speed_ms * 3.6:.0f} km/h"
             if wind_from_deg is not None:
                 txt += f" · {wind_from_deg:.0f}°"
         pts.append((base[0] + wd[0] * length * 1.15, base[1] + wd[1] * length * 1.15,
@@ -476,6 +743,12 @@ def populate_plotter(
     wind_speed_ms=None,
     wind_from_deg=None,
     aoi_bounds=None,
+    zoom_boost: int = 0,
+    opacity: float = 0.5,
+    intensity_max=None,
+    height_clim=None,
+    metric=None,
+    vol_floor: float = 0.20,
 ):
     """Add the Pass-2 scene to an EXISTING plotter (standalone Plotter or embedded
     QtInteractor). Terrain is draped with a basemap (if ``crs`` is given) instead of an
@@ -487,8 +760,10 @@ def populate_plotter(
     mesh = ofr.read_case(case_dir)
     terrain = ofr.read_terrain_stl(case_dir)
 
-    if terrain is not None and terrain.n_points:
-        if not (crs is not None and _drape_basemap(plotter, terrain, crs, basemap_source)):
+    has_terrain = terrain is not None and terrain.n_points
+    if has_terrain:
+        if not (crs is not None
+                and _drape_basemap(plotter, terrain, crs, basemap_source, zoom_boost)):
             terrain["elevation_m"] = terrain.points[:, 2]
             plotter.add_mesh(terrain, scalars="elevation_m", cmap="gist_earth",
                              show_scalar_bar=False)
@@ -501,28 +776,47 @@ def populate_plotter(
             plotter.add_mesh(lines.tube(radius=max(lines.length / 1500.0, 1.0)),
                              color="white", opacity=0.5)
 
-    if show_reversed_flow:
+    captions = {
+        "rotor": "Couleur = hauteur sol (jaune→violet) × intensité du rotor · opacité réglable",
+        "turbulence": "Couleur = hauteur sol × intensité de turbulence · opacité réglable",
+        "horizontal": "Couleur = vitesse horizontale (% vent) · rouge = rotor, bleu = plein vent",
+        "vertical": "Couleur = vitesse verticale · vert = ascendance, rouge = dégueulante",
+    }
+    if metric is not None:  # unified metric path — shared with the auto app (identical rendering)
+        vol = extract_lee_volume(mesh, mean_flow_dir, metric=metric, ref_speed_ms=wind_speed_ms,
+                                 vol_floor=vol_floor, aoi_bounds=aoi_bounds)
+        if vol is not None and vol.n_cells:
+            if has_terrain:
+                _add_rotor(plotter, vol, terrain, show_legend=False, opacity=opacity,
+                           intensity_max=intensity_max, metric=metric, clim=height_clim)
+            else:
+                plotter.add_mesh(vol, color=REVERSED_COLOR, opacity=opacity)
+        caption = captions.get(metric, "")
+    else:  # legacy boolean path (build_scene / CLI snapshots): reversed-flow + optional turbulence
         mesh["along_flow"] = ofr.along_flow_component(mesh, mean_flow_dir)
-        rev = mesh.threshold(value=0.0, scalars="along_flow", invert=True)
-        # Drop the spurious rotor hugging the domain boundaries: clip to the drawn zone (the
-        # solve was buffered, so the downwind-edge artifact is outside it), + the lid.
-        rev = _clip_domain_boundary(rev, mesh, aoi_bounds=aoi_bounds)
-        if rev.n_cells and terrain is not None and terrain.n_points:
-            _add_rotor(plotter, rev, terrain)
-        elif rev.n_cells:
-            plotter.add_mesh(rev, color=REVERSED_COLOR, opacity=0.5)
-
-    if show_turbulence:
-        ti = ofr.turbulence_intensity(mesh)
+        ti = ofr.turbulence_intensity(mesh, reference_speed=wind_speed_ms)
         if ti is not None:
-            mesh["turb_intensity"] = ti
-            turb_vol = mesh.threshold(value=turbulence_threshold, scalars="turb_intensity")
-            if turb_vol.n_cells:
-                plotter.add_mesh(turb_vol, color=TURB_COLOR, opacity=0.35)
+            mesh["turb_intensity"] = np.asarray(ti)
+        if show_reversed_flow:
+            rev = mesh.threshold(value=0.0, scalars="along_flow", invert=True)
+            rev = _clip_domain_boundary(rev, mesh, aoi_bounds=aoi_bounds)
+            if rev.n_cells and has_terrain:
+                _add_rotor(plotter, rev, terrain, opacity=opacity, intensity_max=intensity_max,
+                           metric="rotor", clim=height_clim)
+            elif rev.n_cells:
+                plotter.add_mesh(rev, color=REVERSED_COLOR, opacity=opacity)
+        if show_turbulence and ti is not None:
+            turb = mesh.threshold(value=turbulence_threshold, scalars="turb_intensity")
+            turb = _clip_domain_boundary(turb, mesh, aoi_bounds=aoi_bounds)
+            if turb.n_cells and has_terrain:
+                _add_rotor(plotter, turb, terrain, opacity=opacity, intensity_max=intensity_max,
+                           metric="turbulence", clim=height_clim)
+            elif turb.n_cells:
+                plotter.add_mesh(turb, color=TURB_COLOR, opacity=0.35)
+        caption = captions["rotor"]
 
     plotter.add_text(SCENE_TEXT, font_size=9)
-    plotter.add_text("Rotor : jaune = près du sol → rouge → violet = haut ·"
-                     " opacité = intensité", position="lower_left", font_size=8)
+    plotter.add_text(caption, position="lower_left", font_size=8)
     plotter.show_axes()
     plotter.view_isometric()
     return plotter

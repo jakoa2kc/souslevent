@@ -53,7 +53,7 @@ class MapTab(QtWidgets.QWidget):
     double-click finish) and emits ``routeSelected([(lat, lon), ...])``."""
 
     aoiSelected = QtCore.Signal(float, float, float, float)
-    routeSelected = QtCore.Signal(list)  # [(lat, lon), ...]
+    routeSelected = QtCore.Signal(list)  # segments: [[(lat, lon), ...], ...]
 
     def __init__(self, center=ANCELLE_LATLON, radius_km: float = 30.0, mode: str = "rectangle",
                  parent=None):
@@ -94,7 +94,7 @@ class MapTab(QtWidgets.QWidget):
         return self._bbox
 
     def selected_route(self):
-        """Return the last drawn route as [(lat, lon), ...], or None."""
+        """Return the drawn route as a list of segments ``[[(lat, lon), ...], ...]``, or None."""
         return self._route
 
     def set_margin_km(self, km: float) -> None:
@@ -120,11 +120,16 @@ class MapTab(QtWidgets.QWidget):
         import json
 
         try:
-            pts = [(float(p[0]), float(p[1])) for p in json.loads(route_json)]
+            raw = json.loads(route_json)
         except Exception:
             return
-        self._route = pts
-        self.routeSelected.emit(pts)
+        segments = []
+        for seg in raw:  # each segment kept only if it has at least 2 points
+            pts = [(float(p[0]), float(p[1])) for p in seg if len(p) >= 2]
+            if len(pts) >= 2:
+                segments.append(pts)
+        self._route = segments
+        self.routeSelected.emit(segments)
 
 
 def _km_width(s, w, n, e):
@@ -204,41 +209,57 @@ function emit(layer) {
 map.on(L.Draw.Event.CREATED, function(e) { drawn.clearLayers(); drawn.addLayer(e.layer); emit(e.layer); });
 """
 
-# Flight-route drawing: left-click add a point, right-click remove the last, double-click finish.
-# The route is sent to Python on EVERY change (so "Valider" can use the current route without a
-# double-click), and a corridor of the current margin is drawn live (turf.js buffer).
+# Flight-route drawing with MULTIPLE segments: left-click add a point, right-click remove the last,
+# double-click finish, and a "＋ Segment" button starts a NEW segment while keeping the previous
+# ones (so valley crossings / transitions between segments are NOT paved). The whole list of
+# segments is sent to Python on EVERY change; each segment gets its own corridor buffer (turf.js).
 _ROUTE_JS = """
 map.doubleClickZoom.disable();
-var route = [];
+var segments = [];   // completed segments: [[[lat,lon],...], ...]
+var route = [];      // the segment currently being drawn
 var marginKm = 2.0;
-var line = L.polyline([], {color:'#e6194b', weight:3}).addTo(map);
+var lineLayer = L.layerGroup().addTo(map);
 var marks = L.layerGroup().addTo(map);
 var corridor = L.layerGroup().addTo(map);
+function allSegments() { var s = segments.slice(); if (route.length >= 1) s.push(route); return s; }
 function drawCorridor() {
   corridor.clearLayers();
-  if (route.length >= 2 && typeof turf !== 'undefined') {
-    try {
-      var ls = turf.lineString(route.map(function(p){ return [p[1], p[0]]; }));  // turf = [lon,lat]
-      var buf = turf.buffer(ls, marginKm, {units:'kilometers'});
-      L.geoJSON(buf, {style:{color:'#1565c0', weight:1, fillColor:'#1565c0', fillOpacity:0.12}}).addTo(corridor);
-    } catch (err) {}
-  }
+  if (typeof turf === 'undefined') return;
+  allSegments().forEach(function(seg) {
+    if (seg.length >= 2) {
+      try {
+        var ls = turf.lineString(seg.map(function(p){ return [p[1], p[0]]; }));  // turf = [lon,lat]
+        var buf = turf.buffer(ls, marginKm, {units:'kilometers'});
+        L.geoJSON(buf, {style:{color:'#1565c0', weight:1, fillColor:'#1565c0', fillOpacity:0.12}}).addTo(corridor);
+      } catch (err) {}
+    }
+  });
 }
-function emitRoute() { if (window.bridge) window.bridge.on_route(JSON.stringify(route)); }
+function emitRoute() { if (window.bridge) window.bridge.on_route(JSON.stringify(allSegments())); }
 function redraw() {
-  line.setLatLngs(route);
+  lineLayer.clearLayers();
   marks.clearLayers();
-  route.forEach(function(p) {
-    L.circleMarker(p, {radius:4, color:'#e6194b', fillColor:'#e6194b', fillOpacity:1}).addTo(marks);
+  var segs = allSegments();
+  segs.forEach(function(seg, i) {
+    var color = (i === segs.length - 1) ? '#e6194b' : '#9c1840';   // current segment vs finished
+    if (seg.length >= 1) L.polyline(seg, {color:color, weight:3}).addTo(lineLayer);
+    seg.forEach(function(p) {
+      L.circleMarker(p, {radius:4, color:color, fillColor:color, fillOpacity:1}).addTo(marks);
+    });
   });
   drawCorridor();
   emitRoute();
 }
 window.setCorridorMargin = function(km) { marginKm = km; drawCorridor(); };
+window.startNewSegment = function() {          // keep the current segment, begin a fresh one
+  if (route.length >= 2) { segments.push(route); route = []; redraw(); }
+};
 map.on('click', function(e) { route.push([e.latlng.lat, e.latlng.lng]); redraw(); });
 map.on('contextmenu', function(e) {
   if (e.originalEvent) e.originalEvent.preventDefault();
-  route.pop(); redraw();                       // right-click removes the last point
+  if (route.length > 0) route.pop();           // remove the last point of the current segment
+  else if (segments.length > 0) route = segments.pop();  // empty -> reopen the previous segment
+  redraw();
 });
 map.on('dblclick', function(e) {               // double-click = "done" (drops the duplicate click)
   if (route.length >= 2) {
@@ -247,7 +268,48 @@ map.on('dblclick', function(e) {               // double-click = "done" (drops t
   }
   redraw();
 });
+var SegmentControl = L.Control.extend({               // "＋ Segment" button (top-left)
+  options: {position: 'topleft'},
+  onAdd: function() {
+    var div = L.DomUtil.create('div', 'leaflet-bar');
+    var a = L.DomUtil.create('a', '', div);
+    a.href = '#';
+    a.title = 'Nouveau segment (saute la zone de transition entre les deux)';
+    a.innerHTML = '＋';
+    a.style.cssText = 'font-size:18px;font-weight:bold;text-align:center;line-height:26px;';
+    L.DomEvent.on(a, 'click', function(ev) { L.DomEvent.stop(ev); window.startNewSegment(); });
+    return div;
+  }
+});
+map.addControl(new SegmentControl());
+var WindLegend = L.Control.extend({                   // wind-speed colour scale (km/h)
+  options: {position: 'bottomleft'},
+  onAdd: function() {
+    var d = L.DomUtil.create('div');
+    d.style.cssText = 'background:rgba(255,255,255,0.85);padding:4px 7px;border-radius:4px;'
+      + 'font:11px sans-serif;line-height:15px;box-shadow:0 1px 4px rgba(0,0,0,0.3);';
+    d.innerHTML = '<b>Vent (km/h)</b><br>'
+      + '<div style="width:130px;height:10px;border:1px solid #888;background:'
+      + 'linear-gradient(to right,#1a9850,#a6d96a,#ffcc00,#fb8c2a,#d73027)"></div>'
+      + '<div style="display:flex;justify-content:space-between;width:130px;font-size:9px">'
+      + '<span>0</span><span>20</span><span>&ge;40</span></div>';
+    return d;
+  }
+});
+map.addControl(new WindLegend());
 // AROME wind arrows along the route (updated from Python on slider change).
+// Continuous wind colour scale 0..40 km/h (green -> red), matching the 3D arrows + legend.
+var WIND_STOPS = ['#1a9850', '#a6d96a', '#ffcc00', '#fb8c2a', '#d73027'];
+function _whex(c) {
+  return [parseInt(c.substr(1, 2), 16), parseInt(c.substr(3, 2), 16), parseInt(c.substr(5, 2), 16)];
+}
+function windColor(kmh) {
+  var t = Math.max(0, Math.min(1, kmh / 40));
+  var n = WIND_STOPS.length - 1, f = t * n, i = Math.min(n - 1, Math.floor(f)), u = f - i;
+  var a = _whex(WIND_STOPS[i]), b = _whex(WIND_STOPS[i + 1]);
+  return 'rgb(' + Math.round(a[0] + (b[0] - a[0]) * u) + ',' + Math.round(a[1] + (b[1] - a[1]) * u)
+    + ',' + Math.round(a[2] + (b[2] - a[2]) * u) + ')';
+}
 window._windLayer = null;
 window.showWind = function(json) {
   var arrows = JSON.parse(json);
@@ -255,14 +317,12 @@ window.showWind = function(json) {
   window._windLayer = L.layerGroup().addTo(map);
   arrows.forEach(function(a) {
     var blowTo = (a.dir + 180) % 360;     // arrow points where the wind blows TO
-    var c = a.spd < 4 ? '#2e7d32' : a.spd < 8 ? '#f9a825' : a.spd < 12 ? '#ef6c00' : '#c62828';
+    var c = windColor(a.spd * 3.6);       // continuous 0..40 km/h
     var html = '<div style="transform:rotate(' + blowTo + 'deg);transform-origin:13px 13px;">'
-      + '<svg width="26" height="26"><line x1="13" y1="21" x2="13" y2="6" stroke="' + c
-      + '" stroke-width="2.6"/><polygon points="13,2 8,11 18,11" fill="' + c + '"/></svg></div>'
-      + '<div style="text-align:center;font:bold 10px sans-serif;color:#111;'
-      + 'text-shadow:0 0 2px #fff,0 0 2px #fff;">' + a.spd.toFixed(0) + '</div>';
+      + '<svg width="26" height="26"><line x1="13" y1="22" x2="13" y2="6" stroke="' + c
+      + '" stroke-width="3"/><polygon points="13,2 7,12 19,12" fill="' + c + '"/></svg></div>';
     L.marker([a.lat, a.lon], {interactive:false, icon: L.divIcon(
-      {html:html, className:'', iconSize:[26,40], iconAnchor:[13,13]})}).addTo(window._windLayer);
+      {html:html, className:'', iconSize:[26,26], iconAnchor:[13,13]})}).addTo(window._windLayer);
   });
 };
 """

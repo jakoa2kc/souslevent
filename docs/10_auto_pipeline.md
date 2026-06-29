@@ -15,41 +15,51 @@ layer; only the orchestration + UI differ. See **ADR-0022**.
 ## Dataflow
 
 ```
-(flight ROUTE [(lat,lon),…] + corridor margin, flight-window hours)   ─ ADR-0024
-  │   bbox = route bbox + margin ; later the hazard is masked to a corridor around the route
+(flight ROUTE = list of SEGMENTS [[(lat,lon),…],…] + corridor margin, window hours)  ─ ADR-0024/0030
+  │   bbox = route bbox + margin ; gaps BETWEEN segments (valley crossings) are never computed
   │
-  ├─ terrain.acquire.prepare_dem  ──────────────►  fine zone DEM (IGN ~1 m native, buffered)
+  ├─ terrain.acquire.prepare_dem  ──────────────►  corridor DEM (IGN de-striped, target res 5/10/25 m)
   │
-  ├─ Pass-1 mass over the WHOLE zone (continuous) ►  hazard map  (screening.pass1.hourly_indicator)
-  │      find_candidates → auto.partition.feature_domains:
-  │      ONE momentum domain per feature, half ~ lee_factor × local relief / 2  (ADR-0023)
-  │      → separated domains, NO grid seams to reconcile
+  ├─ domains, per the chosen mode:
+  │   • "features" (default, ADR-0023): Pass-1 mass over the corridor → hazard → find_candidates →
+  │       auto.partition.feature_domains: ONE domain per relief, half ~ lee_factor×relief/2, no seams
+  │   • "corridor" (blind paving, ADR-0029): NO Pass-1 — auto.partition.corridor_tiles paves each
+  │       segment with square domains every tile_step_m (overlapping), at max topo resolution
   │
-  ├─ for each (feature × hour):                   auto.pipeline.run_auto  (bounded concurrency)
+  ├─ for each (domain × hour):                    auto.pipeline.run_auto  (bounded concurrency)
   │      auto.wind.local_wind_provider(hour)(centre) → (speed, from_deg)   [AROME HD / fallback]
   │      terrain.crop_dem(zone + AUTO_EDGE_BUFFER) → flow.windninja.run_momentum → OpenFOAM case
-  │      (parallel-then-sequential retry, like the Pass-1 loops)
+  │      (parallel-then-sequential retry; disk-safe: optional compaction to a small .vtu)
   │
-  └─ AutoResult: { compact rotor mesh per (feature, hour), wind, zone bounds }  + timings
+  └─ AutoResult: { rotor + turbulence volume per (domain, hour), wind, zone bounds }  + timings
         │
-        └─ auto.scene.populate_auto_scene(hour)  → global 3D for that hour
-             drape fine DEM once (basemap reprojected to DEM CRS) + overlay each feature rotor,
-             CLIPPED to its zone (ADR-0021 / ADR-0027)
+        └─ auto.scene.populate_auto_scene(hour, metric)  → global 3D for that hour
+             drape DEM once (basemap reprojected to DEM CRS, zoom-boosted) + overlay each domain's
+             volume (rotor OR turbulence), CLIPPED to its zone + drawn by NEAREST sector only so
+             overlaps don't alpha-stack (ADR-0021 / ADR-0027 / ADR-0029)
 ```
 
-Progress + **ETA** (`auto.progress.ProgressTracker`): `done/total · % · reste ~Xm`, the ETA from
-the mean of observed per-task durations × remaining tasks.
+Route **AROME wind arrows** (`auto.wind.route_wind_series` / `arrows_at_hour`) are drawn on the 2-D
+map (keyed to the moving window handle) and in 3-D (keyed to the render hour); they are saved with a
+run so a reopened result shows the **run's** winds, not today's (ADR-0030).
+
+Progress + **ETA** (`auto.progress.ProgressTracker`): the solves run `workers` at a time, so the ETA
+is **wave-based** — `ceil(total/workers)` waves, `total estimate = mean solve × waves`, `eta =
+estimate − elapsed` (wall-clock; ADR-0028). The headline % is the elapsed fraction of that estimate,
+floored by the genuinely completed fraction.
 
 ## Modules (`src/sillage/auto/`)
 
 | Module | Role | Status |
 |---|---|---|
-| `partition.py` | `feature_domains` (one domain per Pass-1 feature; `partition_zone` grid kept, unused) | **done, tested** |
-| `progress.py` | `ProgressTracker` (percent + ETA) | **done, tested** |
-| `wind.py` | per-feature upstream wind (`make(hour)->provider`) | **done** (AROME HD via Open-Meteo + fallback) |
-| `pipeline.py` | `AutoConfig` / `AutoResult` / `run_auto` orchestrator | **done** (integration-run) |
-| `scene.py` | aggregate one hour's cases into a 3D scene | **done** (reuses `viz.volume3d`) |
-| `window.py` | the 2-tab IHM (route → run → 3D time slider) | **done** (needs live tuning) |
+| `partition.py` | `feature_domains` (hazard) + `corridor_tiles` (blind paving) + `corridor_mask` | **done, tested** |
+| `progress.py` | `ProgressTracker` (wave-based % + ETA, ADR-0028) | **done, tested** |
+| `wind.py` | per-domain upstream wind + `route_wind_series`/`arrows_at_hour` (arrows) | **done** (AROME HD via Open-Meteo + fallback) |
+| `arome.py` | forecast window (absolute dates) from the AROME/Open-Meteo horizon | **done, tested** |
+| `pipeline.py` | `AutoConfig` / `AutoResult` / `run_auto`; modes, disk-safe compaction, parallel plan | **done** (integration-run) |
+| `scene.py` | `extract_volume` (rotor/turbulence) + aggregate one hour into a 3D scene | **done** (reuses `viz.volume3d`) |
+| `store.py` | save/open a run as a portable `.sillage` bundle (lee meshes only, ADR-0030) | **done, tested** |
+| `window.py` | the 2-tab IHM (route → run → 3D time slider + metric/opacity/scales + save/open) | **done** |
 
 ## Reuse map (no duplication)
 
@@ -64,14 +74,17 @@ the mean of observed per-task durations × remaining tasks.
 ## UI contract (`window.py`)
 
 - **Tab 1 — sélection:** `MapTab(mode="route")` (IGN; draw the flight route — left-click add,
-  right-click undo, double-click finish) + a **window range slider** (absolute AROME dates) +
-  **« Calculs simultanés »** + **« Marge corridor »** + **« Valider »** → `run_auto` on a
-  `SolveJob`; the CPU plan shows integer division (`jobs × threads/job = used/total cores`,
-  perfect divisors, useful cap from the selected window). A live step **log** + a
-  **% / elapsed / ETA** line (a 1 s timer keeps it ticking).
-- **Tab 2 — rendu 3D:** an embedded `QtInteractor` (terrain-locked rotation, ADR: azimuth/elev) +
-  an **hour slider** over the computed range → `populate_auto_scene(result.cases_for_hour(h))`;
-  pan/zoom/tilt + a movable focal point (PyVista camera). Switches here when the run finishes.
+  right-click undo, double-click finish, **« ＋ » = new segment** to skip a valley) with the live
+  corridor + AROME wind arrows; a **window range slider** (absolute dates), **« Calculs simultanés »**,
+  **« Marge corridor »**, **« Features max »**, **« Pavage aveugle »** + **pas** + **topo (5/10/25 m)**,
+  **« Valider »** → `run_auto` on a `SolveJob`. The CPU plan shows integer division (`jobs × threads
+  = used/total cores`, perfect divisors, estimated domains). A live step **log** + **% / elapsed / ETA**.
+- **Tab 2 — rendu 3D:** an embedded `QtInteractor` (rotation locked to azimuth/elev + **right-drag
+  pan**) + an **hour slider** (absolute-date labels) → `populate_auto_scene(...)`. Right panel:
+  **Représentation** (Turbulence / Rotor), the **2-D legend** (height × intensity), **Hauteur max** /
+  **Intensité max** / **Seuil turb.** + **« Appliquer »**, an **Opacité** slider (live), a continuous
+  **wind colourbar**, and **📂 Ouvrir / 💾 Sauvegarder** (`.sillage`). The manual app's Pass-2 tab
+  carries the same Représentation/Opacité controls + legends, so both apps render identically.
 
 ## Key decisions / open items
 
@@ -86,10 +99,15 @@ the mean of observed per-task durations × remaining tasks.
   `mesh_count` + a lean per-feature domain.
 - **Cost.** A run is `len(zones) × len(hours)` momentum solves — minutes to a long while; the ETA
   sets expectations. Caching (`*_vel.asc` reuse, the DEM cache) keeps re-launches cheaper.
-- **Disk cleanup.** Auto OpenFOAM cases are kept while the window is open, then deleted on close
-  (and before the next run) by `cleanup_auto_artifacts`; reusable DEMs + Pass-1 screening cache stay.
-- **3D georeferencing.** Web-tile basemaps are reprojected from WebMercator to the DEM CRS before
-  texture draping; terrain vertices use DEM pixel centres, and the 3D scene includes a horizontal
-  scale bar (ADR-0027).
-- **Global height legend.** `scene.py` currently legends off the first rotor; a global height
-  `clim` across zones is a small follow-up (`_add_rotor(clim=…)` already supports it).
+- **Disk.** OpenFOAM cases are kept while the window is open, then deleted on close (and before the
+  next run) by `cleanup_auto_artifacts`; reusable DEMs + Pass-1 screening cache stay. A `MIN_FREE_GB`
+  guard stops a runaway run; optional `compact_cases_during_run` extracts the lee meshes and deletes
+  cases mid-run (ADR-0025). `locate_openfoam_case(dem_stem=…)` keeps parallel solves from colliding.
+- **3D georeferencing + rendering.** Basemaps reprojected WebMercator→DEM CRS (zoom-boosted),
+  terrain on pixel centres, scale bar (ADR-0027). Rotor/turbulence share a **2-D colormap** (height ×
+  intensity) on a **single absolute scale** across sectors, uniform adjustable opacity, overlaps drawn
+  by nearest sector (no alpha-stacking). Wind on a continuous 0–40 km/h scale.
+- **Two volumes.** "rotor" = reversed flow (`along_flow<0`); "turbulence" = TI ≥ `ti_floor` (√(2k/3)/
+  U_ref). Both are extracted, saved and switchable per result (ADR-0029).
+- **Save/open.** A run saves to a `.sillage` zip (manifest + DEM + per-case lee `.vtu`s + route winds
+  + per-day hour labels) and reopens without recomputing (ADR-0030).

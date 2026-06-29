@@ -53,6 +53,7 @@ crest height just upstream of the feature. See `docs/05_windninja_integration.md
 | Data sources, formats, gotchas | `docs/04_data_sources.md` |
 | Exact WindNinja CLI usage & limits | `docs/05_windninja_integration.md` |
 | The chronological reasoning trail | `docs/06_dev_log.md` |
+| The one-click automatic pipeline | `docs/10_auto_pipeline.md` |
 | What's built / what's next | `docs/07_roadmap.md` |
 | Domain vocabulary (paragliding+CFD+meteo) | `docs/08_glossary.md` |
 | How to debug / common failures | `docs/support/troubleshooting.md` |
@@ -62,17 +63,42 @@ crest height just upstream of the feature. See `docs/05_windninja_integration.md
 
 ```
 src/sillage/
-  config.py            global paths/settings/units
+  config.py            global paths/settings/units (generated artefacts under C:\A2K\SousLeVent)
   terrain/dem.py       load DEM, reproject to UTM north-up, validate for WindNinja
   terrain/geometry.py  slope, aspect, ridge detection, Winstral shelter index
+  terrain/acquire.py   fetch the DEM (IGN 1 m de-striped / world) at a target resolution
   wind/forecast.py     fetch wind profiles (Open-Meteo / AROME), hour by hour
-  flow/windninja.py    subprocess wrapper around WindNinja_cli (mass + momentum)
-  flow/openfoam_reader.py  read the OpenFOAM case directly via PyVista (Pass 2 3D field)
-  screening/indicator.py   combine terrain geometry + velocity deficit + empirical rules
+  wind/profile.py      crest-height wind blend; per-point providers
+  wind/meteofrance.py  validate the AROME API key (offline JWT check)
+  flow/windninja.py    subprocess wrapper around WindNinja_cli (mass + momentum), case locator
+  flow/openfoam_reader.py  read the OpenFOAM case directly via PyVista (U, k -> 3D field)
+  screening/indicator.py   terrain geometry + velocity deficit + empirical rules -> hazard
+  screening/pass1.py       hourly Pass-1 stack (parallel), candidate finder
   viz/map2d.py         2D screening map with a time slider
-  viz/volume3d.py      3D recirculation volumes (PyVista)
-scripts/demo_pass1.py  end-to-end Pass-1 walkthrough
+  viz/volume3d.py      3D rendering: basemap drape, rotor 2-D colormap, wind arrows, legends, pan
+  auto/                ONE-CLICK automatic pipeline (see docs/10):
+    pipeline.py          run_auto: DEM -> (Pass-1 features | blind corridor tiling) -> Pass-2 ×hours
+    partition.py         feature_domains (hazard) + corridor_tiles (blind paving) + corridor_mask
+    wind.py              local AROME-HD wind per domain + route wind series (arrows)
+    arome.py             forecast window (absolute dates) from the AROME/Open-Meteo horizon
+    scene.py             aggregate one hour into a 3D scene (extract_volume rotor/turbulence)
+    store.py             save/open a run as a portable .sillage bundle (lee meshes only)
+    progress.py          parallelism-aware (wave) progress + ETA
+    window.py            the automatic-mode desktop app (route + window -> 3D wake)
+  app/
+    main_window.py       the manual 2-pass desktop app (draw zone, Pass-1 map, Pass-2 3D)
+    map_tab.py           Leaflet map tab (rectangle OR multi-segment route) shared by both apps
+    jobs.py              background QThread job runner (progress/cancel)
+scripts/
+  sillage_gui.py         launch the manual app    sillage_auto.py  launch the automatic app
+  demo_pass1.py          end-to-end Pass-1 walkthrough
 ```
+
+**Two apps, one engine.** `app.main_window` (manual: pick a feature, see its precise rotor) and
+`auto.window` (automatic: draw a route, get the whole corridor's wake) share `viz.volume3d`,
+`app.map_tab`, `flow/*` and `wind/*`, so **results and 3D rendering are identical** (same rotor/turbulence
+2-D colormap, same continuous wind colour scale, opacity, legends, scale bar, terrain-locked rotation
++ right-drag pan).
 
 ## Hard facts you must not violate (they cause silent wrong results)
 
@@ -90,8 +116,13 @@ scripts/demo_pass1.py  end-to-end Pass-1 walkthrough
 
 ## Project status
 
-Early scaffold. Pass-1 pipeline is the first milestone. Pass-2 (momentum + 3D) is
-stubbed with clear contracts. See `docs/07_roadmap.md` and `docs/06_dev_log.md`.
+Both passes work end-to-end in two desktop apps. Pass-1 (hourly, parallel) screens for candidate
+reliefs; Pass-2 (momentum + 3D) resolves the recirculation and is driven either by hand (manual app)
+or automatically along a flight route (auto app). The automatic pipeline adds: AROME-HD local wind,
+feature-based **or** blind-corridor domains, parallel solves with honest wave-based progress/ETA,
+disk-safe case handling, a time slider over absolute dates, rotor **and** turbulence volumes on a
+2-D (height × intensity) colormap with adjustable scales, route wind arrows, and save/open of results
+(`.sillage`). See `docs/07_roadmap.md`, `docs/10_auto_pipeline.md` and `docs/06_dev_log.md`.
 
 ## Conventions
 

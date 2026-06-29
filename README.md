@@ -37,10 +37,13 @@ docs/                  ← the full reasoning trail + technical & support docs
   00_project_overview  01_theory_and_physics  02_architecture  03_decisions (ADRs)
   04_data_sources      05_windninja_integration  06_dev_log     07_roadmap  08_glossary
   support/             environment.md  troubleshooting.md
+  10_auto_pipeline     ← the one-click automatic mode
 prompts/               ← paste-in context for AI assistants (context_primer, coding_agent_brief)
 src/sillage/           ← the package
   terrain/  wind/  flow/  screening/  viz/   config.py
-scripts/               ← demo_pass1.py (sillage-pass1), demo_pass2_single.py
+  app/                 ← manual desktop app (main_window) + shared map_tab + jobs
+  auto/                ← automatic pipeline (route → corridor → Pass-2 ×hours → 3D) + save/open
+scripts/               ← sillage_gui.py (manual), sillage_auto.py (auto), demo_pass1.py, …
 tests/
 ```
 
@@ -58,14 +61,24 @@ python scripts/demo_pass1.py --dem path/to/dem.tif --wind-dir 270 --wind-speed 1
 python scripts/demo_pass1.py --dem path/to/dem.tif --run-windninja --fetch-forecast
 ```
 
+Desktop apps (need WindNinja installed + a display):
+
+```bash
+python scripts/sillage_gui.py     # manual: draw a zone, Pass-1 map, draw a Pass-2 rectangle → 3D
+python scripts/sillage_auto.py    # automatic: draw a flight route + window → corridor wake (3D)
+```
+
 You also need **WindNinja** installed separately (provides `WindNinja_cli` and the
 momentum solver). See `docs/support/environment.md`.
 
 ## Status
 
-Early scaffold. **Pass-1 pipeline is the current milestone (M1)**; Pass-2 (momentum + 3D)
-is stubbed with clear contracts. Roadmap in `docs/07_roadmap.md`; the chronological
-reasoning trail (including ideas tried and dropped) in `docs/06_dev_log.md`.
+Both passes work end-to-end in **two desktop apps** that share one engine (identical results +
+3D rendering). The manual app does click-to-detail Pass-2; the automatic app solves Pass-2 along a
+flight route (feature-based **or** blind corridor paving), with AROME-HD local wind, parallel solves
++ wave-based ETA, rotor **and** turbulence 3D volumes (2-D height×intensity colormap), and save/open
+of results (`.sillage`). Roadmap in `docs/07_roadmap.md`; the chronological reasoning trail in
+`docs/06_dev_log.md`; the automatic mode in `docs/10_auto_pipeline.md`.
 
 ## For AI tools / new contributors
 

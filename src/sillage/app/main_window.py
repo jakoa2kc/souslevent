@@ -117,6 +117,11 @@ PASS2_MESH_PRESETS: dict[str, tuple[int, int]] = {
 }
 PASS2_MESH_DEFAULT = "Moyen — défaut"
 
+# Pass-2 3D colour metrics (shared model with the auto app).
+P2_METRICS = ("rotor", "horizontal", "vertical", "turbulence")
+P2_METRIC_LABELS = ("Rotor (flux inversé)", "Vitesse horizontale (% vent)",
+                    "Vitesse verticale (m/s)", "Turbulence")
+
 
 def _estimate_minutes(mesh_count: int) -> int:
     """Rough runtime proxy (CPU-bound), calibrated on the Champsaur smoke run
@@ -695,22 +700,27 @@ class MainWindow(QtWidgets.QMainWindow):
         import numpy as np
         from matplotlib import colors
 
+        from ..viz.volume3d import WIND_VMAX_KMH, _wind_cmap, wind_color
+
         left, right, bottom, top = self._home_extent
         domain = min(right - left, top - bottom)
         side = max(1, round(len(winds) ** 0.5))
         alen = min(0.16 * domain, 0.42 * domain / side)  # shrink as the zone grid densifies
-        norm = colors.Normalize(0.0, 20.0)               # 0..20 m/s -> colour
-        cmap = matplotlib.colormaps["turbo"]
-        for x, y, spd, drc in winds:
+        for x, y, spd, drc in winds:  # continuous green→red colour (0–40 km/h), no number label
             blow_to = np.deg2rad((float(drc) + 180.0) % 360.0)
             dx, dy = alen * np.sin(blow_to), alen * np.cos(blow_to)
-            col = cmap(norm(float(spd)))
             ax.annotate("", xy=(x + dx / 2, y + dy / 2), xytext=(x - dx / 2, y - dy / 2),
-                        arrowprops=dict(arrowstyle="-|>", color=col, lw=2.2,
-                                        shrinkA=0, shrinkB=0), zorder=6)
-            ax.text(x - dx / 2, y - dy / 2, f"{float(spd):.0f} m/s", fontsize=7, color="black",
-                    ha="center", va="center", zorder=7,
-                    bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.6))
+                        arrowprops=dict(arrowstyle="-|>", color=wind_color(float(spd) * 3.6),
+                                        lw=2.2, shrinkA=0, shrinkB=0), zorder=6)
+        try:  # compact wind colour legend, matching the 3D + auto scales
+            sm = matplotlib.cm.ScalarMappable(
+                norm=colors.Normalize(0.0, WIND_VMAX_KMH), cmap=_wind_cmap())
+            cax = ax.inset_axes([0.74, 0.05, 0.22, 0.03])
+            cb = ax.figure.colorbar(sm, cax=cax, orientation="horizontal")
+            cb.set_label("Vent (km/h)", fontsize=7)
+            cb.ax.tick_params(labelsize=6)
+        except Exception:
+            pass
 
     def _on_wind_arrows_toggle(self, *_args) -> None:
         if self._hourly:
@@ -911,8 +921,124 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._p2_placeholder.setAlignment(QtCore.Qt.AlignCenter)
         self._p2_layout.addWidget(self._p2_placeholder)
-        lay.addWidget(self._p2_widget)
+        lay.addWidget(self._p2_widget, stretch=1)
+
+        # Display controls — same metric/opacity choices + legends as the auto app, so both render
+        # identically. The last Pass-2 case is kept so these re-render without recomputing.
+        self._pass2_view = None      # (case_dir, wind_spd, wind_dir, crs, aoi_bounds)
+        self._p2_metric = "rotor"
+        self._p2_opacity = 0.5
+        self._p2_height_max_m = 300.0
+        self._p2_scale_max = {"rotor": 15.0, "horizontal": 100.0, "vertical": 3.0, "turbulence": 30.0}
+        self._p2_vol_floor = {"horizontal": 50.0, "vertical": 1.0, "turbulence": 20.0}
+        ctl = QtWidgets.QHBoxLayout()
+        ctl.addWidget(QtWidgets.QLabel("Représentation :"))
+        self.p2_metric_combo = QtWidgets.QComboBox()
+        self.p2_metric_combo.addItems(list(P2_METRIC_LABELS))
+        self.p2_metric_combo.currentIndexChanged.connect(self._on_p2_metric_change)
+        ctl.addWidget(self.p2_metric_combo)
+        ctl.addSpacing(16)
+        ctl.addWidget(QtWidgets.QLabel("Opacité :"))
+        self.p2_opacity_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.p2_opacity_slider.setRange(5, 100)
+        self.p2_opacity_slider.setValue(int(self._p2_opacity * 100))
+        self.p2_opacity_slider.setFixedWidth(140)
+        self.p2_opacity_slider.valueChanged.connect(self._on_p2_opacity_change)
+        ctl.addWidget(self.p2_opacity_slider)
+        ctl.addStretch(1)
+        self.p2_rotor_legend = QtWidgets.QLabel()
+        ctl.addWidget(self.p2_rotor_legend)
+        self.p2_wind_legend = QtWidgets.QLabel()
+        ctl.addWidget(self.p2_wind_legend)
+        lay.addLayout(ctl)
+        self._update_p2_legends()
         return w
+
+    # --- Pass-2 3D display: metric/opacity, shared rendering with the auto app ----------
+    def _p2_native_intensity_max(self) -> float:
+        m, v = self._p2_metric, self._p2_scale_max[self._p2_metric]
+        if m == "rotor":
+            return v / 3.6            # km/h → m/s
+        if m == "turbulence":
+            return v / 100.0          # % → fraction
+        return v                      # horizontal (%) / vertical (m/s)
+
+    def _p2_native_vol_floor(self) -> float:
+        m = self._p2_metric
+        if m == "turbulence":
+            return self._p2_vol_floor[m] / 100.0
+        if m in ("horizontal", "vertical"):
+            return self._p2_vol_floor[m]
+        return 0.0
+
+    def _p2_legend_image(self):
+        from ..viz.volume3d import diverging_legend_image, rotor_legend_image
+
+        m, vmax = self._p2_metric, self._p2_scale_max[self._p2_metric]
+        if m == "rotor":
+            return rotor_legend_image(self._p2_height_max_m, vmax, ylabel="Intensité (km/h)",
+                                      title="Rotor : hauteur × intensité")
+        if m == "turbulence":
+            return rotor_legend_image(self._p2_height_max_m, vmax, ylabel="Turbulence (%)",
+                                      title="Turbulence : hauteur × intensité")
+        if m == "horizontal":
+            return diverging_legend_image(vmax, "RdBu", "Vit. horizontale (% vent)",
+                                          "Rouge = rotor · bleu = plein vent")
+        return diverging_legend_image(vmax, "RdYlGn", "Vit. verticale (m/s)",
+                                      "Vert = ascendance · rouge = dégueulante")
+
+    def _update_p2_legends(self) -> None:
+        try:
+            from PySide6.QtGui import QImage, QPixmap
+
+            from ..viz.volume3d import wind_legend_image
+
+            for label, buf in ((self.p2_rotor_legend, self._p2_legend_image()),
+                               (self.p2_wind_legend, wind_legend_image())):
+                h, w = buf.shape[:2]
+                img = QImage(bytes(buf.data), w, h, 4 * w, QImage.Format_RGBA8888)
+                label.setPixmap(QPixmap.fromImage(img))
+        except Exception:
+            pass
+
+    def _on_p2_metric_change(self, idx: int) -> None:
+        self._p2_metric = P2_METRICS[idx] if 0 <= idx < len(P2_METRICS) else "rotor"
+        self._update_p2_legends()
+        self._render_pass2_3d()
+
+    def _on_p2_opacity_change(self, val: int) -> None:
+        self._p2_opacity = max(0.02, val / 100.0)
+        actors = getattr(self.plotter, "_rotor_actors", None) if self.plotter is not None else None
+        if actors:  # live actor-level update, no rebuild
+            for a in actors:
+                try:
+                    a.GetProperty().SetOpacity(self._p2_opacity)
+                except Exception:
+                    pass
+            try:
+                self.plotter.render()
+            except Exception:
+                pass
+
+    def _render_pass2_3d(self) -> None:
+        if self._pass2_view is None or not self._ensure_plotter():
+            return
+        case_dir, wind_spd, wind_dir, crs, aoi_bounds = self._pass2_view
+        cam = self.plotter.camera_position if getattr(self, "_p2_rendered", False) else None
+        self.plotter.clear()
+        volume3d.populate_plotter(
+            self.plotter, case_dir, volume3d.mean_flow_vector(wind_dir),
+            metric=self._p2_metric, vol_floor=self._p2_native_vol_floor(),
+            crs=crs, basemap_source=self.basemap_combo.currentText(),
+            wind_speed_ms=wind_spd, wind_from_deg=wind_dir, aoi_bounds=aoi_bounds,
+            zoom_boost=2, opacity=self._p2_opacity,
+            intensity_max=self._p2_native_intensity_max(),
+            height_clim=(0.0, self._p2_height_max_m))
+        if cam is not None:
+            self.plotter.camera_position = cam
+        else:
+            self.plotter.reset_camera()
+            self._p2_rendered = True
 
     def _ensure_plotter(self) -> bool:
         """Create the embedded QtInteractor on demand. Returns True if the 3D view is ready."""
@@ -1408,7 +1534,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Lancer un calcul momentum sur la zone tracée (~{half_m * 2 / 1000:.1f} km) ?\n\n"
             f"Centre ({cx:.0f}, {cy:.0f}), maillage « {mesh_name} » "
             f"({mesh_count:,} mailles, ~{_estimate_minutes(mesh_count)} min).\n"
-            f"Vent ({wind_src}) : {bc_spd:.0f} m/s de {bc_dir:.0f}°.",
+            f"Vent ({wind_src}) : {bc_spd * 3.6:.0f} km/h de {bc_dir:.0f}°.",
         )
         if resp != QtWidgets.QMessageBox.StandardButton.Yes:
             return
@@ -1496,13 +1622,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._ensure_plotter():
             self._finish_job("Viewport 3D indisponible")
             return
-        mfd = volume3d.mean_flow_vector(wind_dir)
-        self.plotter.clear()
         crs = crop_crs or (self._dem.crs if self._dem is not None else None)
-        volume3d.populate_plotter(self.plotter, case_dir, mfd, show_turbulence=False,
-                                  crs=crs, basemap_source=self.basemap_combo.currentText(),
-                                  wind_speed_ms=wind_spd, wind_from_deg=wind_dir,
-                                  aoi_bounds=aoi_bounds)
-        self.plotter.reset_camera()
+        self._pass2_view = (case_dir, wind_spd, wind_dir, crs, aoi_bounds)
+        self._p2_rendered = False  # fresh result -> fit the camera once
+        self._render_pass2_3d()
         self.tabs.setCurrentWidget(self._analyse_tab)
         self._finish_job(f"Rotor Pass-2 en ({xy[0]:.0f}, {xy[1]:.0f})")

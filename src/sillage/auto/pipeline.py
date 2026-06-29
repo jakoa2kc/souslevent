@@ -29,7 +29,7 @@ from ..terrain.dem import crop_dem, load_dem, write_dem
 from ..timing import RunTimings
 import numpy as np
 
-from .partition import SubZone, corridor_mask, feature_domains
+from .partition import SubZone, corridor_mask, corridor_tiles, feature_domains
 from .progress import ProgressTracker
 from .wind import local_wind_provider
 
@@ -75,6 +75,8 @@ def _clean_stale(work_root: Path) -> None:
         _safe_unlink(f)
     for f in work_root.glob("z*_rotor.vtu"):
         _safe_unlink(f)
+    for f in work_root.glob("z*_turb.vtu"):
+        _safe_unlink(f)
 
 
 def cleanup_auto_artifacts(cache_dir) -> None:
@@ -109,38 +111,37 @@ def _screening_work_dir(
 
 
 def _compact_case(case: "CaseResult", work_root: Path) -> "CaseResult":
-    """Persist a solved case's small rotor mesh and **delete the bulky OpenFOAM case**.
+    """Persist a solved case's small volumes (rotor + turbulence) and **delete the bulky OpenFOAM
+    case**.
 
-    Runs in the main thread (serialized — VTK reads aren't thread-safe) as each solve completes,
-    so the disk only ever holds the few cases currently being solved, not every (feature × hour).
-    On any failure it returns the case unchanged (keeps ``case_dir`` so the scene can still read
-    it) — never lose a result to a cleanup hiccup."""
-    from .scene import extract_rotor
+    Runs in the main thread (serialized — VTK reads aren't thread-safe) as each solve completes, so
+    the disk only ever holds the few cases currently being solved. On a read failure it returns the
+    case unchanged (keeps ``case_dir``) — never lose a result to a cleanup hiccup."""
+    from .scene import extract_volume
 
-    try:
-        rev = extract_rotor(case.case_dir, case.wind_from_deg, case.aoi_bounds)
-    except Exception:
-        return case
-    if rev is None:
-        return case
-    if not getattr(rev, "n_cells", 0):
-        # No reversed-flow cells: keep the result for progress/domain-box display, but do not
-        # keep hundreds of MB of OpenFOAM files just to render "nothing".
-        stem = f"z{case.zone_index:02d}_h{case.hour:02d}"
-        _safe_rmtree(case.case_dir)
-        _safe_rmtree(work_root / f"{stem}_run")
-        _safe_unlink(work_root / f"{stem}.tif")
-        return replace(case, case_dir="")
-    rotor_path = work_root / f"z{case.zone_index:02d}_h{case.hour:02d}_rotor.vtu"
-    try:
-        rev.save(str(rotor_path))
-    except Exception:
-        return case
     stem = f"z{case.zone_index:02d}_h{case.hour:02d}"
-    _safe_rmtree(case.case_dir)           # the heavy NINJAFOAM_* OpenFOAM case
+    paths = {"rotor": "", "turbulence": ""}
+    read_ok = False
+    for metric, suffix in (("rotor", "rotor"), ("turbulence", "turb")):
+        try:
+            vol = extract_volume(case.case_dir, case.wind_from_deg, case.aoi_bounds,
+                                 metric=metric, ref_speed_ms=case.wind_speed_ms)
+            read_ok = True  # the case was readable (turbulence may still be None if no TKE)
+        except Exception:
+            vol = None
+        if vol is not None and getattr(vol, "n_cells", 0):
+            p = work_root / f"{stem}_{suffix}.vtu"
+            try:
+                vol.save(str(p))
+                paths[metric] = str(p)
+            except Exception:
+                pass
+    if not read_ok:
+        return case  # couldn't read the case at all -> keep it for a later attempt
+    _safe_rmtree(case.case_dir)              # the heavy NINJAFOAM_* OpenFOAM case
     _safe_rmtree(work_root / f"{stem}_run")  # WindNinja run dir (kmz/sampled)
     _safe_unlink(work_root / f"{stem}.tif")  # the crop DEM
-    return replace(case, case_dir="", rotor_path=str(rotor_path))
+    return replace(case, case_dir="", rotor_path=paths["rotor"], turb_path=paths["turbulence"])
 
 
 def bbox_from_route(route_latlon, margin_km: float):
@@ -226,12 +227,20 @@ class AutoConfig:
 
     bbox_latlon: tuple[float, float, float, float]  # south, west, north, east (DEM/screen extent)
     hours: tuple[int, ...]                          # clock hours to compute over the window
-    route_latlon: tuple = ()                        # optional flight route [(lat, lon), ...]
+    route_latlon: tuple = ()                        # flattened flight route [(lat, lon), ...]
+    route_segments: tuple = ()                       # disjoint segments [[(lat, lon), ...], ...];
+    # the gaps between segments (valley crossings) are NOT paved/screened. Empty ⇒ route_latlon
+    # is treated as one segment.
     corridor_margin_km: float = 2.0                 # restrict features to this band around the route
     window_start_iso: str = ""                      # provenance only (the flight day midnight)
     target_res_m: float = 10.0                      # finest topo scale for the momentum DEM
     max_features: int = DEFAULT_MAX_FEATURES        # momentum domains placed on the top-N features
     feature_separation_m: float = 1200.0            # min spacing between feature domains
+    # "features" = Pass-1 screening then one domain per candidate relief; "corridor" = blind paving
+    # of the whole route (no Pass-1), domains every tile_step_m of half-size tile_half_m.
+    domain_mode: str = "features"
+    tile_step_m: float = 1500.0                     # corridor mode: spacing between sectors
+    tile_half_m: float = 0.0                        # corridor mode: 0 ⇒ derive from corridor margin
     mesh_count: int = 300_000                       # WindNinja momentum mesh (ADR-0008) — finer now
     # that domains are tighter; raise for precision after live benchmarks
     iterations: int = 300
@@ -255,7 +264,8 @@ class CaseResult:
     crs: object
     aoi_bounds: tuple[float, float, float, float]  # xmin, xmax, ymin, ymax (the un-buffered zone)
     elapsed_s: float
-    rotor_path: str = ""  # compact persisted rotor mesh (.vtu), optional low-disk mode
+    rotor_path: str = ""  # persisted reversed-flow volume (.vtu) — compaction / save
+    turb_path: str = ""   # persisted turbulence volume (.vtu) — compaction / save
 
 
 @dataclass
@@ -321,50 +331,76 @@ def run_auto(
     left, bottom, right, top = dem.bounds
     cx0, cy0 = (left + right) / 2.0, (bottom + top) / 2.0
 
-    # FEATURE-BASED domains (ADR-0023): screen the WHOLE zone once (continuous Pass-1 mass) to
-    # find the relief features, then place ONE momentum domain per feature — no grid, no internal
-    # seams to reconcile (which is why tiled momentum showed flow "climbing" at every joint).
-    with timings.measure("criblage"):
-        if on_progress is not None:
-            on_progress(0, "Criblage Pass-1 sur toute la zone (détection des reliefs)…")
-        from ..screening.pass1 import hourly_indicator
+    # The route as disjoint segments (gaps between them are never paved/screened).
+    segments_ll = list(cfg.route_segments) or ([list(cfg.route_latlon)] if cfg.route_latlon else [])
 
-        try:
-            rep_spd, rep_dir = make(cfg.hours[0])(cx0, cy0)  # representative wind for screening
-        except Exception:
-            rep_spd, rep_dir = 8.0, 270.0  # geometry-driven screening if the forecast is down
-        if on_progress is not None:
-            on_progress(0, f"Criblage : vent représentatif {rep_spd:.1f} m/s de {rep_dir:.0f}°")
-        screen_work = _screening_work_dir(work_root, dem_path, rep_spd, rep_dir, 150.0)
-        hazard, _vel = hourly_indicator(
-            dem=dem, cli=cli, dem_path=str(dem_path), work_dir=screen_work,
-            wind_speed_ms=rep_spd, wind_from_deg=rep_dir, resolution_m=150.0,
-            edge_buffer_m=300.0, force_run=False, cancel=cancel,
-            on_progress=lambda p, m: on_progress(0, f"Criblage : {m}") if on_progress else None)
-
-    if cfg.route_latlon:  # keep only features within the corridor around the planned route
+    def _seg_xy(seg):
         from rasterio.crs import CRS
         from rasterio.warp import transform as warp_xy
 
-        lats = [p[0] for p in cfg.route_latlon]
-        lons = [p[1] for p in cfg.route_latlon]
+        lons = [p[1] for p in seg]
+        lats = [p[0] for p in seg]
         xs, ys = warp_xy(CRS.from_epsg(4326), dem.crs, lons, lats)
-        mask = corridor_mask(dem, list(zip(xs, ys)), cfg.corridor_margin_km * 1000.0)
-        hazard = np.where(mask, hazard, 0.0)
-        if on_progress is not None:
-            on_progress(0, f"Corridor : marge {cfg.corridor_margin_km:.1f} km autour du parcours")
+        return list(zip(xs, ys))
 
-    with timings.measure("features"):
-        # On a route, tie how close two features may sit to the corridor width: a finer corridor
-        # asks for finer-grained analysis ⇒ more (smaller-spaced) features along the route.
-        sep = cfg.feature_separation_m
-        if cfg.route_latlon:
-            sep = max(800.0, min(sep, cfg.corridor_margin_km * 1000.0))
-        zones = feature_domains(
-            dem, hazard, max_features=cfg.max_features,
-            min_separation_m=sep, target_res_m=cfg.target_res_m)
-        if on_progress is not None:
-            on_progress(0, f"{len(zones)} feature(s) détectée(s) (espacement ≥ {sep:.0f} m)")
+    if cfg.domain_mode == "corridor" and segments_ll:
+        # BLIND PAVING (ADR-0029): no Pass-1 — tile each route segment with momentum domains.
+        margin_m = cfg.corridor_margin_km * 1000.0
+        half_m = cfg.tile_half_m if cfg.tile_half_m > 0 else max(margin_m, 900.0)
+        step_m = max(300.0, min(cfg.tile_step_m, 2.0 * half_m))  # overlap, no gaps along a segment
+        with timings.measure("features"):
+            if on_progress is not None:
+                on_progress(0, "Pavage aveugle des secteurs le long du parcours (sans criblage)…")
+            zones = []
+            for seg in segments_ll:
+                if len(seg) >= 1:
+                    zones += corridor_tiles(dem, _seg_xy(seg), step_m=step_m, half_m=half_m,
+                                            target_res_m=cfg.target_res_m)
+            if on_progress is not None:
+                on_progress(0, f"Pavage : {len(zones)} secteurs sur {len(segments_ll)} segment(s) "
+                               f"(pas {step_m:.0f} m, demi-largeur {half_m:.0f} m, "
+                               f"topo {cfg.target_res_m:.0f} m)")
+    else:
+        # FEATURE-BASED domains (ADR-0023): screen the WHOLE zone once (continuous Pass-1 mass) to
+        # find the relief features, then place ONE momentum domain per feature — no grid, no
+        # internal seams to reconcile (why tiled momentum showed flow "climbing" at every joint).
+        with timings.measure("criblage"):
+            if on_progress is not None:
+                on_progress(0, "Criblage Pass-1 sur toute la zone (détection des reliefs)…")
+            from ..screening.pass1 import hourly_indicator
+
+            try:
+                rep_spd, rep_dir = make(cfg.hours[0])(cx0, cy0)  # representative screening wind
+            except Exception:
+                rep_spd, rep_dir = 8.0, 270.0  # geometry-driven screening if the forecast is down
+            if on_progress is not None:
+                on_progress(0, f"Criblage : vent {rep_spd * 3.6:.0f} km/h de {rep_dir:.0f}°")
+            screen_work = _screening_work_dir(work_root, dem_path, rep_spd, rep_dir, 150.0)
+            hazard, _vel = hourly_indicator(
+                dem=dem, cli=cli, dem_path=str(dem_path), work_dir=screen_work,
+                wind_speed_ms=rep_spd, wind_from_deg=rep_dir, resolution_m=150.0,
+                edge_buffer_m=300.0, force_run=False, cancel=cancel,
+                on_progress=lambda p, m: on_progress(0, f"Criblage : {m}") if on_progress else None)
+
+        if segments_ll:  # keep only features within the corridor around each route segment
+            mask = np.zeros(dem.shape, dtype=bool)
+            for seg in segments_ll:
+                if len(seg) >= 1:
+                    mask |= corridor_mask(dem, _seg_xy(seg), cfg.corridor_margin_km * 1000.0)
+            hazard = np.where(mask, hazard, 0.0)
+            if on_progress is not None:
+                on_progress(0, f"Corridor : marge {cfg.corridor_margin_km:.1f} km autour du parcours")
+
+        with timings.measure("features"):
+            # Finer corridor ⇒ finer-grained features along the route.
+            sep = cfg.feature_separation_m
+            if cfg.route_latlon:
+                sep = max(800.0, min(sep, cfg.corridor_margin_km * 1000.0))
+            zones = feature_domains(
+                dem, hazard, max_features=cfg.max_features,
+                min_separation_m=sep, target_res_m=cfg.target_res_m)
+            if on_progress is not None:
+                on_progress(0, f"{len(zones)} feature(s) détectée(s) (espacement ≥ {sep:.0f} m)")
 
     if not zones:
         if on_progress is not None:
@@ -412,7 +448,7 @@ def run_auto(
         write_dem(crop, crop_path)
         if on_progress is not None:
             on_progress(tracker.display_percent,
-                        f"{zlabel} · vent {spd:.0f} m/s de {drc:.0f}° · maillage + solveur…")
+                        f"{zlabel} · vent {spd * 3.6:.0f} km/h de {drc:.0f}° · maillage + solveur…")
         t0 = perf_counter()
         run = run_momentum(
             cli=cli, dem_path=str(crop_path),

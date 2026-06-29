@@ -115,6 +115,29 @@ def test_feature_domains_places_one_domain_per_feature():
         assert abs((z.bbox[3] - z.bbox[1]) - width) < 1.0
 
 
+def test_resample_polyline_spaces_and_keeps_endpoints():
+    from sillage.auto.partition import _resample_polyline
+
+    assert _resample_polyline([], 1000.0) == []
+    pts = _resample_polyline([(0.0, 0.0), (3000.0, 0.0)], 1000.0)
+    assert pts[0] == (0.0, 0.0) and pts[-1] == (3000.0, 0.0)  # both endpoints kept
+    assert len(pts) >= 4                                       # ~every 1 km over 3 km
+
+
+def test_corridor_tiles_paves_route_without_gaps():
+    from sillage.auto.partition import corridor_tiles
+
+    dem = _dem(np.zeros((200, 200)), res_m=50.0)  # 10 x 10 km
+    left, _b, _r, top = dem.bounds
+    ymid = top - 5000.0
+    route = [(left + 2000.0, ymid), (left + 8000.0, ymid)]  # straight ~6 km W->E
+    tiles = corridor_tiles(dem, route, step_m=1500.0, half_m=1000.0, target_res_m=10.0)
+    assert len(tiles) >= 4
+    xs = sorted(t.center[0] for t in tiles)
+    assert max(b - a for a, b in zip(xs, xs[1:])) <= 1500.0 + 1.0   # no gap larger than the step
+    assert all(abs((t.bbox[2] - t.bbox[0]) - 2000.0) < 1e-6 for t in tiles)  # square, 2*half
+
+
 def test_corridor_mask_keeps_band_around_route():
     from sillage.auto.partition import corridor_mask
 
@@ -214,7 +237,7 @@ def test_compact_case_deletes_empty_rotor_case(monkeypatch, tmp_path):
     class EmptyRotor:
         n_cells = 0
 
-    monkeypatch.setattr(scene, "extract_rotor", lambda *a, **k: EmptyRotor())
+    monkeypatch.setattr(scene, "extract_volume", lambda *a, **k: EmptyRotor())
     case_dir = tmp_path / "NINJAFOAM_z00_h09"
     run_dir = tmp_path / "z00_h09_run"
     crop = tmp_path / "z00_h09.tif"
@@ -261,6 +284,37 @@ def test_momentum_parallel_plan_integer_division():
     assert capped.threads_per_worker == 2
     assert capped.used_cores == 12
     assert capped.idle_cores == 2
+
+
+def test_store_save_load_roundtrip(tmp_path):
+    from sillage.auto.pipeline import AutoConfig, AutoResult, CaseResult
+    from sillage.auto.store import load_result, save_result
+
+    rotor = tmp_path / "r.vtu"
+    rotor.write_bytes(b"<VTKFile/>")  # dummy; the round-trip only references the path
+    crs = CRS.from_epsg(32631)
+    cases = [
+        CaseResult(zone_index=0, hour=9, case_dir="", wind_speed_ms=8.0, wind_from_deg=270.0,
+                   crs=crs, aoi_bounds=(0.0, 1.0, 0.0, 1.0), elapsed_s=1.0, rotor_path=str(rotor)),
+        CaseResult(zone_index=1, hour=10, case_dir="", wind_speed_ms=6.0, wind_from_deg=300.0,
+                   crs=crs, aoi_bounds=(1.0, 2.0, 1.0, 2.0), elapsed_s=2.0, rotor_path=str(rotor)),
+    ]
+    result = AutoResult(dem_path="", crs=crs, partition=[], cases=cases, timings_summary="t")
+    cfg = AutoConfig(bbox_latlon=(44.0, 6.0, 44.5, 6.5), hours=(9, 10),
+                     route_segments=(((44.1, 6.1), (44.2, 6.2)),), domain_mode="corridor",
+                     target_res_m=5.0, tile_step_m=1500.0)
+
+    out = save_result(tmp_path / "res", result, cfg=cfg, hour_labels={9: "ven 9h", 10: "ven 10h"})
+    assert out.endswith(".sillage")
+
+    loaded = load_result(out, tmp_path / "open")
+    assert [c.hour for c in loaded.result.cases] == [9, 10]
+    assert loaded.hours == [9, 10]
+    assert loaded.hour_labels[9] == "ven 9h"
+    assert loaded.config["domain_mode"] == "corridor" and loaded.config["target_res_m"] == 5.0
+    assert len(loaded.route_segments) == 1 and len(loaded.route_segments[0]) == 2
+    assert loaded.result.cases[0].rotor_path.endswith(".vtu")        # points at the extracted mesh
+    assert loaded.result.cases[0].wind_from_deg == 270.0
 
 
 def test_progress_tracker_wave_eta_and_summary():
