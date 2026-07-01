@@ -469,10 +469,28 @@ def _rotor_warm_cmap():
     return LinearSegmentedColormap.from_list("rotor_warm", ["#ffff00", "#ff8c00", "#7a00b0"])
 
 
+def _rotor_intensity_cmap():
+    from matplotlib.colors import LinearSegmentedColormap
+
+    return LinearSegmentedColormap.from_list("rotor_intensity", ["#ffff66", "#ff8c00", "#7a00b0"])
+
+
 def _rotor_cool_cmap():
     from matplotlib.colors import LinearSegmentedColormap
 
     return LinearSegmentedColormap.from_list("rotor_cool", ["#2ca02c", "#1f77b4"])
+
+
+def _wind_balance_cmap():
+    from matplotlib.colors import LinearSegmentedColormap
+
+    return LinearSegmentedColormap.from_list("wind_balance", ["#d73027", "#fff7bc", "#2ca02c"])
+
+
+def _vertical_motion_cmap():
+    from matplotlib.colors import LinearSegmentedColormap
+
+    return LinearSegmentedColormap.from_list("vertical_motion", ["#b2182b", "#fff7bc", "#1a9850"])
 
 
 def rotor_legend_image(height_max_m: float, intensity_max_display: float,
@@ -500,6 +518,42 @@ def rotor_legend_image(height_max_m: float, intensity_max_display: float,
               extent=[0.0, float(height_max_m), 0.0, float(intensity_max_display)])
     ax.set_xlabel("Hauteur sol (m)", fontsize=8)
     ax.set_ylabel(ylabel, fontsize=8)
+    ax.set_title(title, fontsize=8)
+    ax.tick_params(labelsize=7)
+    fig.canvas.draw()
+    w, h = fig.canvas.get_width_height()
+    buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4).copy()
+    plt.close(fig)
+    return buf
+
+
+def range_legend_image(vmin: float, vmax: float, cmap, label: str, title: str,
+                       *, center: float | None = None, n: int = 256):
+    """Horizontal scalar colourbar. If ``center`` is given, it stays at the middle colour."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import Normalize, TwoSlopeNorm
+
+    cm = matplotlib.colormaps[cmap] if isinstance(cmap, str) else cmap
+    vmin, vmax = float(vmin), float(vmax)
+    if center is not None:
+        center = float(center)
+        vmin = min(vmin, center - 1e-6)
+        vmax = max(vmax, center + 1e-6)
+        norm = TwoSlopeNorm(vmin=vmin, vcenter=center, vmax=vmax)
+    else:
+        vmax = max(vmax, vmin + 1e-6)
+        norm = Normalize(vmin=vmin, vmax=vmax)
+    vals = np.linspace(vmin, vmax, n)
+    grad = cm(np.clip(norm(vals), 0.0, 1.0))[:, :3]
+    img = np.tile(grad[None, :, :], (10, 1, 1))
+    fig = plt.figure(figsize=(2.5, 0.95), dpi=100)
+    ax = fig.add_axes([0.10, 0.42, 0.86, 0.26])
+    ax.imshow(img, origin="lower", aspect="auto", extent=[vmin, vmax, 0.0, 1.0])
+    ax.set_yticks([])
+    ax.set_xlabel(label, fontsize=8)
     ax.set_title(title, fontsize=8)
     ax.tick_params(labelsize=7)
     fig.canvas.draw()
@@ -539,85 +593,74 @@ def diverging_legend_image(vmax: float, cmap_name: str, label: str, title: str, 
 
 
 def _add_rotor(plotter, rev, terrain, show_legend: bool = True, clim=None, opacity: float = 0.5,
-               intensity_max: float | None = None, metric: str = "rotor"):
-    """Colour the lee volume and add it. Two colouring modes:
+               intensity_max: float | None = None, metric: str = "rotor", metric_range=None):
+    """Colour the lee volume and add it.
 
-    - ``rotor`` / ``turbulence``: a **2-D colormap** — HEIGHT above ground drives the hue ramp,
-      intensity warms it (faint reads green→blue, strong yellow→orange→purple).
-    - ``horizontal`` / ``vertical``: a **diverging 1-D colormap** on the signed velocity field
-      (horizontal = % of upstream wind, red = reversed/rotor → blue = free-stream; vertical = m/s,
-      red = sink → green = lift), symmetric about 0 over ±``intensity_max``.
+    The auto app uses scalar colour ramps controlled by metric-specific sliders:
+    rotor/turbulence min→max (upper values clamp), horizontal red→yellow→green centred on 0,
+    and vertical red→pale-yellow→green centred on 0 with a hidden calm gap.
 
     Opacity is uniform + adjustable (actor-level, so a slider changes it live). Returns the actor.
-    ``clim=(lo, hi)`` forces the height scale (2-D modes); ``show_legend=False`` skips the in-scene bar."""
-    from matplotlib.colors import Normalize
-    from scipy.spatial import cKDTree
+    ``clim`` is kept for the legacy/manual height-colour path compatibility."""
+    from matplotlib.colors import Normalize, TwoSlopeNorm
 
     centers = rev.cell_centers().points
     alpha = float(np.clip(opacity, 0.02, 1.0))
+    metric_range = metric_range or {}
 
-    if metric in DIVERGING:  # signed velocity field on a diverging colormap
-        import matplotlib
-
-        cmap_name, default_max, _label = DIVERGING[metric]
-        field_name = "along_pct" if metric == "horizontal" else "w_ms"
-        field = rev.cell_data.get(field_name)
-        field = np.asarray(field, dtype="float64") if field is not None else np.zeros(len(centers))
-        vmax = max(float(intensity_max) if intensity_max else default_max, 1e-6)
-        rgb = matplotlib.colormaps[cmap_name](np.clip(Normalize(-vmax, vmax)(field), 0.0, 1.0))[:, :3]
+    def _paint(field, cmap, vmin, vmax, *, center=None):
+        field = np.asarray(field, dtype="float64")
+        if center is None:
+            vmax2 = max(float(vmax), float(vmin) + 1e-6)
+            norm = Normalize(float(vmin), vmax2)
+        else:
+            center2 = float(center)
+            vmin2 = min(float(vmin), center2 - 1e-6)
+            vmax2 = max(float(vmax), center2 + 1e-6)
+            norm = TwoSlopeNorm(vmin=vmin2, vcenter=center2, vmax=vmax2)
+        rgb = cmap(np.clip(norm(field), 0.0, 1.0))[:, :3]
         rev.cell_data["rotor_rgb"] = (rgb * 255).astype(np.uint8)
         return plotter.add_mesh(rev, scalars="rotor_rgb", rgb=True, opacity=alpha,
                                 reset_camera=False)
 
-    tpts = np.asarray(terrain.points)
-    idx = cKDTree(tpts[:, :2]).query(centers[:, :2])[1]
-    hagl = centers[:, 2] - tpts[idx, 2]  # height above the terrain
-    # Intensity scalar = the chosen metric: turbulence intensity, else reversed-flow speed.
-    ti = rev.cell_data.get("turb_rms")
-    along = rev.cell_data.get("along_flow")
-    if metric == "turbulence" and ti is not None:
-        intensity = np.clip(np.asarray(ti), 0.0, None)
-    elif along is not None:
-        intensity = np.clip(-np.asarray(along), 0.0, None)
+    if metric == "horizontal":
+        field = rev.cell_data.get("along_pct")
+        field = np.asarray(field, dtype="float64") if field is not None else np.zeros(len(centers))
+        vmin = metric_range.get("min", -(float(intensity_max) if intensity_max else 100.0))
+        vmax = metric_range.get("max", float(intensity_max) if intensity_max else 100.0)
+        actor = _paint(field, _wind_balance_cmap(), vmin, vmax, center=0.0)
+    elif metric == "vertical":
+        field = rev.cell_data.get("w_ms")
+        field = np.asarray(field, dtype="float64") if field is not None else np.zeros(len(centers))
+        vmax = float(intensity_max) if intensity_max else 3.0
+        vmin = metric_range.get("sink_min", -vmax)
+        vmax = metric_range.get("lift_max", vmax)
+        actor = _paint(field, _vertical_motion_cmap(), vmin, vmax, center=0.0)
+    elif metric == "turbulence":
+        field = rev.cell_data.get("turb_rms")
+        field = np.asarray(field, dtype="float64") if field is not None else np.zeros(len(centers))
+        vmin = metric_range.get("min", 0.0)
+        vmax = metric_range.get(
+            "max",
+            float(intensity_max) if intensity_max else float(np.nanpercentile(field, 95)))
+        actor = _paint(field, _rotor_intensity_cmap(), vmin, vmax)
     else:
-        intensity = np.ones(len(centers))
-
-    warm = _rotor_warm_cmap()  # height ramp, intense
-    cool = _rotor_cool_cmap()  # height ramp, faint
-    lo, hi = clim if clim is not None else (np.nanpercentile(hagl, 5), np.nanpercentile(hagl, 95))
-    hi = max(hi, lo + 1e-6)
-    hn = np.clip(Normalize(lo, hi)(hagl), 0.0, 1.0)
-    # Intensity ceiling: an ABSOLUTE reversed-flow speed (m/s) when given, so sectors share one
-    # scale (comparable + adjustable); else fall back to this mesh's 95th percentile.
-    imax = max(float(intensity_max) if intensity_max else float(np.nanpercentile(intensity, 95)),
-               1e-6)
-    s = np.clip(intensity / imax, 0.0, 1.0)[:, None]  # 0 = faint rotor, 1 = strong
-    rgb = cool(hn)[:, :3] * (1.0 - s) + warm(hn)[:, :3] * s   # 2-D colormap: height × intensity
-    rev.cell_data["rotor_rgb"] = (rgb * 255).astype(np.uint8)
-    actor = plotter.add_mesh(rev, scalars="rotor_rgb", rgb=True,
-                             opacity=float(np.clip(opacity, 0.02, 1.0)), reset_camera=False)
+        along = rev.cell_data.get("along_flow")
+        field = np.clip(-np.asarray(along), 0.0, None) if along is not None else np.ones(len(centers))
+        vmin = metric_range.get("min", 0.0)
+        vmax = metric_range.get(
+            "max",
+            float(intensity_max) if intensity_max else float(np.nanpercentile(field, 95)))
+        actor = _paint(field, _rotor_intensity_cmap(), vmin, vmax)
     if not show_legend:
         return actor
 
-    # Height legend (the warm ramp = height at full intensity). The rotor uses raw RGB, which carries
-    # no scalar bar, so add a tiny invisible proxy holding the [lo, hi] range + the warm colormap.
-    import pyvista as pv
-
-    seed = centers[:2] if len(centers) >= 2 else np.zeros((2, 3))
-    proxy = pv.PolyData(np.asarray(seed, dtype="float64"))
-    proxy["Hauteur sol (m)"] = np.array([lo, hi], dtype="float64")
-    plotter.add_mesh(
-        proxy, scalars="Hauteur sol (m)", cmap=warm, clim=(lo, hi), style="points",
-        point_size=1.0, opacity=0.0, reset_camera=False, show_scalar_bar=True,
-        scalar_bar_args=dict(title="Hauteur sol (m)", n_labels=5, fmt="%.0f", vertical=True,
-                             title_font_size=14, label_font_size=12, position_x=0.86,
-                             position_y=0.30, width=0.10, height=0.45),
-    )
     return actor
 
 
 LEE_METRICS = ("rotor", "horizontal", "vertical", "turbulence")
 DEFAULT_VOL_FLOORS = {"rotor": 0.0, "horizontal": 50.0, "vertical": 1.0, "turbulence": 1.0}
+LEE_SOURCE_ARRAYS = ("along_flow", "along_pct", "w_ms", "w_abs", "turb_rms")
 
 
 def _compute_lee_scalars(mesh, mean_flow_dir, ref_speed_ms) -> None:
@@ -642,28 +685,112 @@ def _compute_lee_scalars(mesh, mean_flow_dir, ref_speed_ms) -> None:
         pass
 
 
-def _threshold_lee(mesh, metric, vol_floor, aoi_bounds):
-    if metric == "turbulence":
-        if "turb_rms" not in mesh.array_names:
-            return None
-        vol = mesh.threshold(value=float(vol_floor), scalars="turb_rms")             # rms ≥ floor m/s
-    elif metric == "horizontal":
-        vol = mesh.threshold(value=float(vol_floor), scalars="along_pct", invert=True)  # ≤ floor %
-    elif metric == "vertical":
-        if "w_abs" not in mesh.array_names:
-            return None
-        vol = mesh.threshold(value=float(vol_floor), scalars="w_abs")                # |w| ≥ floor m/s
-    else:  # rotor
-        vol = mesh.threshold(value=0.0, scalars="along_flow", invert=True)           # reversed
+def _cell_array(mesh, name: str):
+    if name in mesh.cell_data:
+        arr = np.asarray(mesh.cell_data[name])
+    elif name in mesh.array_names:
+        arr = np.asarray(mesh[name])
+    else:
+        return None
+    return arr if len(arr) == mesh.n_cells else None
+
+
+def _extract_cells_by_mask(mesh, mask):
+    idx = np.nonzero(np.asarray(mask, dtype=bool))[0]
+    return mesh.extract_cells(idx.astype(np.int64))
+
+
+def _threshold_lee(mesh, metric, vol_floor, aoi_bounds, metric_range=None):
+    vol = _threshold_lee_source(mesh, metric, vol_floor, metric_range=metric_range)
+    if vol is None:
+        return None
     return _clip_domain_boundary(vol, mesh, aoi_bounds=aoi_bounds, keep_if_empty=False)
 
 
+def _threshold_lee_source(mesh, metric, vol_floor, metric_range=None):
+    metric_range = metric_range or {}
+    if metric_range:
+        if metric == "turbulence":
+            vals = _cell_array(mesh, "turb_rms")
+            if vals is None:
+                return None
+            return _extract_cells_by_mask(mesh, vals >= float(metric_range.get("min", vol_floor)))
+        if metric == "horizontal":
+            vals = _cell_array(mesh, "along_pct")
+            if vals is None:
+                return None
+            return _extract_cells_by_mask(mesh, vals <= float(metric_range.get("max", vol_floor)))
+        if metric == "vertical":
+            vals = _cell_array(mesh, "w_ms")
+            if vals is None:
+                return None
+            sink_max = float(metric_range.get("sink_max", -abs(float(vol_floor))))
+            lift_min = float(metric_range.get("lift_min", abs(float(vol_floor))))
+            return _extract_cells_by_mask(mesh, (vals <= sink_max) | (vals >= lift_min))
+        vals = _cell_array(mesh, "along_flow")
+        if vals is None:
+            return None
+        intensity = -np.asarray(vals, dtype="float64")
+        return _extract_cells_by_mask(
+            mesh, (vals < 0.0) & (intensity >= float(metric_range.get("min", 0.0))))
+
+    if metric == "turbulence":
+        if "turb_rms" not in mesh.array_names:
+            return None
+        return mesh.threshold(value=float(vol_floor), scalars="turb_rms")            # rms ≥ floor m/s
+    elif metric == "horizontal":
+        if "along_pct" not in mesh.array_names:
+            return None
+        return mesh.threshold(value=float(vol_floor), scalars="along_pct", invert=True)  # ≤ floor %
+    elif metric == "vertical":
+        if "w_abs" not in mesh.array_names:
+            return None
+        return mesh.threshold(value=float(vol_floor), scalars="w_abs")               # |w| ≥ floor m/s
+    if "along_flow" not in mesh.array_names:
+        return None
+    return mesh.threshold(value=0.0, scalars="along_flow", invert=True)              # reversed
+
+
+def _slim_lee_source(mesh):
+    """Keep only the scalar fields needed to re-threshold/re-render a saved lee source."""
+    for name in list(mesh.cell_data.keys()):
+        if name not in LEE_SOURCE_ARRAYS:
+            del mesh.cell_data[name]
+    for name in list(mesh.point_data.keys()):
+        del mesh.point_data[name]
+    for name in LEE_SOURCE_ARRAYS:
+        if name in mesh.cell_data:
+            mesh.cell_data[name] = np.asarray(mesh.cell_data[name], dtype=np.float32)
+    return mesh
+
+
 def extract_lee_volume(mesh, mean_flow_dir, *, metric: str = "rotor", ref_speed_ms=None,
-                       vol_floor: float = 0.20, aoi_bounds=None):
+                       vol_floor: float = 0.20, aoi_bounds=None, metric_range=None):
     """Compute the lee scalars then return the **clipped volume for ``metric``** (or ``None``).
     Shared by the auto scene and the manual app so both extract identically."""
     _compute_lee_scalars(mesh, mean_flow_dir, ref_speed_ms)
-    return _threshold_lee(mesh, metric, vol_floor, aoi_bounds)
+    return _threshold_lee(mesh, metric, vol_floor, aoi_bounds, metric_range=metric_range)
+
+
+def extract_lee_source(mesh, mean_flow_dir, *, ref_speed_ms=None, aoi_bounds=None):
+    """Return the clipped, threshold-independent lee source used by ``.sillage`` v2.
+
+    It keeps all cells inside the displayed analysis domain (with the same boundary/lid trimming as
+    rendered volumes) and only the derived scalar fields needed to rebuild any metric threshold.
+    This is far smaller than a full OpenFOAM case but lets reopened bundles re-extract volumes.
+    """
+    _compute_lee_scalars(mesh, mean_flow_dir, ref_speed_ms)
+    source = _clip_domain_boundary(mesh, mesh, aoi_bounds=aoi_bounds, keep_if_empty=False)
+    if source is None or not source.n_cells:
+        return None
+    return _slim_lee_source(source)
+
+
+def threshold_lee_source(source, *, metric: str = "rotor", vol_floor: float = 0.20,
+                         metric_range=None):
+    """Threshold a saved lee source without re-reading an OpenFOAM case."""
+    vol = _threshold_lee_source(source, metric, vol_floor, metric_range=metric_range)
+    return vol if vol is not None and vol.n_cells else None
 
 
 def extract_lee_volumes(mesh, mean_flow_dir, *, ref_speed_ms=None, floors=None, aoi_bounds=None):

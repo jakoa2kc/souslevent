@@ -1189,6 +1189,9 @@ index/clamp). GUI module imports clean (offscreen). Not yet committed.
 - **Too aggressive default parallelism.** Claude's auto mode defaulted to all physical cores
   (14 here). Before benchmarking NinjaFOAM/OpenFOAM, default is now conservative:
   `default_momentum_workers() = min(4, detected cores)`, while the UI slider can still go higher.
+  **Superseded on 2026-07-01:** after the CPU-plan UI was made explicit, the default request is back
+  to all detected cores; the effective workers are capped by the real task count and split through
+  the same `momentum_parallel_plan(...)` helper used by the logs.
 - **Disk leak on "no rotor" cases.** `_compact_case` kept full OpenFOAM cases when extraction
   produced an empty rotor mesh. It now deletes case/run/crop and records `case_dir=""`.
 - **Boundary-only rotor artifact.** The manual 3D clip keeps the original mesh if clipping would
@@ -1219,7 +1222,7 @@ if it can make WindNinja/OpenFOAM or VTK rendering more fragile.
 - `run_auto` now keeps full OpenFOAM cases during normal UI runs. `_compact_case` is retained only
   behind `AutoConfig.compact_cases_during_run=True` for a future low-disk mode.
 - New `cleanup_auto_artifacts(cache_dir)` removes `<cache>/auto` transient artifacts:
-  `NINJAFOAM_*`, `z*_run`, `z*.tif`, `z*_rotor.vtu`; it keeps reusable `dem_*.tif` and `screening/`.
+  `NINJAFOAM_*`, `z*_run`, `z*.tif`, `z*.vtu`; it keeps reusable `dem_*.tif` and `screening/`.
 - `AutoWindow.closeEvent` cleans the auto artifacts on close. If a solve is still running, it asks
   cancellation and refuses to delete under OpenFOAM's feet; if a route-wind fetch is still running,
   it waits briefly before closing.
@@ -1535,6 +1538,120 @@ the default view. Result: arrows stay visible and keep ~constant screen size on 
 
 `_clean_stale` now globs `z*.vtu` (all metrics). Tests updated for `vtu_paths` +
 `extract_case_volumes`. Docs: ADR-0031, docs/10 metrics section. `pytest -q` → **90 passed**.
+
+---
+
+## Entry 65 — `.sillage` v2: optional re-analysable sources for live threshold changes  (2026-06-30)
+
+**Trigger.** Claude correctly flagged that reopened `.sillage` volumes were frozen at save-time
+thresholds: changing "Seuil volume" could recolour/re-render only the persisted mesh, not re-extract
+cells, unless the OpenFOAM case was still present.
+
+**What changed.**
+- `viz.volume3d.extract_lee_source(...)` creates a compact source mesh: the displayed analysis domain
+  after boundary/lid trimming, with only derived cell scalars (`along_flow`, `along_pct`, `w_ms`,
+  `w_abs`, `turb_rms`) stored as float32; original OpenFOAM arrays are dropped.
+- `viz.volume3d.threshold_lee_source(...)` re-extracts rotor/horizontal/vertical/turbulence volumes
+  from that source at the current UI threshold, with no OpenFOAM case.
+- `auto.scene.populate_auto_scene` now prefers `CaseResult.source_path` when present, caches the source,
+  and thresholds it live. Compact old bundles still use per-metric `vtu_paths`.
+- `auto.store.save_result(..., include_sources=True)` writes `.sillage` v2 (`storage_mode:
+  reanalyzable`) with `source_XXX.vtu` per case. The save dialog asks: re-analysable (larger) or
+  compact (smaller, thresholds fixed). `load_result` remains backward-compatible.
+- `_compact_case` also persists a source path when low-disk compaction is enabled.
+- Save/open staging now uses the configured Sillage temp root (`SILLAGE_TMP_DIR` /
+  `SILLAGE_GENERATED_ROOT\tmp`) instead of the OS-global temp; tests can pass an explicit temp dir.
+
+**Size estimate.** Observed current bundles in `C:\A2K\SousLeVent\run_save`: 14–151 MB. A source-based
+bundle should usually be around **2.5× to 6×** the compact bundle depending on how much of each domain
+is covered by thresholds; still far below keeping full `NINJAFOAM_*` OpenFOAM cases.
+
+**Verification.** `pytest tests\test_auto.py tests\test_pass2.py -q` -> **59 passed**.
+Full suite `pytest -q` -> **93 passed**. `git diff --check` OK (Windows LF/CRLF warnings only).
+
+---
+
+## Entry 66 — Auto 3-D visual ranges: metric-specific sliders  (2026-06-30)
+
+**Trigger.** The 3-D controls were still generic spinboxes ("Échelle max", "Seuil volume",
+"Hauteur max") and several did not make sense for every representation.
+
+**What changed.**
+- Auto 3-D right panel now uses range sliders and hides irrelevant controls per representation:
+  rotor min/max, horizontal min/max, vertical sink + lift sliders, turbulence min/max.
+- The slider ranges drive actual extraction/re-thresholding (`metric_range`) as well as colour
+  clamping. On `.sillage` v2 sources this re-extracts from saved raw scalars; compact old bundles
+  can only be further restricted because missing cells are not recoverable.
+- Horizontal colour is red→pale yellow→green centred on 0; values below the negative colour min stay
+  red and values above the positive max are hidden. Vertical keeps pale yellow at 0 and hides the calm
+  gap between the sink/lift sliders. Rotor/turbulence hide values below min and clamp above max.
+
+**Verification.** Covered by the July 1 full suite in Entry 67.
+
+---
+
+## Entry 67 — Auto topo preset 1 m when IGN data is available  (2026-07-01)
+
+**Trigger.** User asked to expose a 1 m topo option in the auto first tab if IGN data is available.
+
+**What changed.**
+- `auto.window` topo combo now offers **1 m (IGN)**, 5 m, 10 m, 25 m; saved configs restore to the
+  nearest preset.
+- `terrain.acquire.prepare_dem_ign` no longer forces a minimum ×2 block-average at 1 m. For a 1 m
+  target it keeps the native HIGHRES fetch; coarser presets still average down to de-stripe.
+- Docs note that 1 m is for short corridors and only meaningful under IGN HIGHRES coverage; `source=auto`
+  still falls back to the worldwide DEM outside coverage.
+
+**Verification.** `pytest tests\test_auto.py tests\test_pass2.py -q` -> **60 passed**.
+Full suite `pytest -q` -> **94 passed**. `git diff --check` OK (Windows LF/CRLF warnings only).
+
+---
+
+## Entry 68 — Documentation catch-up: CPU default + cleanup scope  (2026-07-01)
+
+**Why.** A few previous implementation details were correct in code but under-documented or
+contradicted by older entries, which made handoff with Claude ambiguous.
+
+**Recorded now.**
+- `default_momentum_workers()` currently requests **all detected physical cores** by default. The
+  real parallelism is not blindly all cores: `momentum_parallel_plan(...)` caps workers by
+  `domains × hours`, assigns `cores // workers` threads per NinjaFOAM solve, and is used by both the
+  UI Plan CPU line and the run log.
+- The earlier Entry 50 note about `min(4, detected cores)` is historical only; it was superseded by
+  the later user request to default to available cores while showing an honest integer CPU split.
+- `cleanup_auto_artifacts(...)` now deletes `z*.vtu`, not only `z*_rotor.vtu`, because auto artifacts
+  can be compact metric volumes (`rotor`, `horizontal`, `vertical`, `turbulence`) or re-analysable
+  `*_source.vtu` files.
+
+**Verification.** Documentation-only catch-up. Behaviour was covered by the Entry 67 suite:
+targeted auto/pass2 `60 passed`, full suite `94 passed`.
+
+---
+
+## Entry 65 — Continuous sectors: feathered weighted-average blend + inter-zone audit (ADR-0032)  (2026-06-29)
+
+**Symptom.** Nearest-sector display left a hard **diagonal vertical plane** between adjacent sectors
+(their value levels differ). User asked for a weighted average (barycentric) + an audit of other
+inter-zone causes.
+
+**Blend.** `populate_auto_scene` now: still draws each point once (nearest sector → no alpha-stack),
+but colours each cell by a **feathered distance-weighted average** of the metric's field
+(`along_flow` / `along_pct` / `w_ms` / `turb_rms`) across overlapping sectors. Weight = `(1 −
+d_centre/half)²`, only where the neighbour actually covers the point; `Σ w v / Σ w`. Both sides of a
+boundary compute the same value → the seam disappears. Two passes (extract all + KDTrees, then
+blend+draw); blended draws cached per (zone, hour, metric, floor). Overlap neighbours found by aoi-box
+test (bounded cost). ADR-0032.
+
+**Audit — other inter-zone value sources.** (1) **fixed** — `along_pct` was normalised by each zone's
+own wind → horizontal-% differed per zone for the same m/s; now normalised by the hour's **global**
+wind (median of the sectors), so it's identical everywhere (threshold + colour live; colour on reopen).
+(2) `_clip_domain_boundary` cuts the top `lid_frac`
+of *each* mesh's height → the volume top is at a different absolute altitude per zone (a horizontal
+extent step). (3) Colour scale / `metric_range` / `vol_floor` / `height_clim` are shared across
+sectors — confirmed NOT a source. (4) The dominant remaining cause is physical: independent RANS
+solves with per-zone wind BCs.
+
+**Result.** `pytest -q` → **94 passed**.
 
 ---
 

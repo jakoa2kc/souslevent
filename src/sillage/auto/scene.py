@@ -10,7 +10,7 @@ from __future__ import annotations
 
 
 def extract_volume(case_dir: str, wind_from_deg: float, aoi_bounds, *, metric: str = "rotor",
-                   ref_speed_ms=None, vol_floor: float = 0.20):
+                   ref_speed_ms=None, vol_floor: float = 0.20, metric_range=None):
     """Read an OpenFOAM momentum case and return the clipped 3-D **volume for ``metric``**:
 
       - ``"rotor"``       — reversed-flow recirculation (``along_flow`` < 0);
@@ -30,7 +30,7 @@ def extract_volume(case_dir: str, wind_from_deg: float, aoi_bounds, *, metric: s
     mesh = ofr.read_case(case_dir)
     return v3.extract_lee_volume(mesh, v3.mean_flow_vector(wind_from_deg), metric=metric,
                                  ref_speed_ms=ref_speed_ms, vol_floor=vol_floor,
-                                 aoi_bounds=aoi_bounds)
+                                 aoi_bounds=aoi_bounds, metric_range=metric_range)
 
 
 def extract_case_volumes(case_dir: str, wind_from_deg: float, aoi_bounds, *, ref_speed_ms=None,
@@ -43,6 +43,17 @@ def extract_case_volumes(case_dir: str, wind_from_deg: float, aoi_bounds, *, ref
     mesh = ofr.read_case(case_dir)
     return v3.extract_lee_volumes(mesh, v3.mean_flow_vector(wind_from_deg),
                                   ref_speed_ms=ref_speed_ms, floors=floors, aoi_bounds=aoi_bounds)
+
+
+def extract_case_source(case_dir: str, wind_from_deg: float, aoi_bounds, *, ref_speed_ms=None):
+    """Read a case ONCE and return the compact, threshold-independent lee source for ``.sillage``
+    re-analysis. The full OpenFOAM case is not stored; only the clipped cells + derived scalars."""
+    from ..flow import openfoam_reader as ofr
+    from ..viz import volume3d as v3
+
+    mesh = ofr.read_case(case_dir)
+    return v3.extract_lee_source(mesh, v3.mean_flow_vector(wind_from_deg),
+                                 ref_speed_ms=ref_speed_ms, aoi_bounds=aoi_bounds)
 
 
 def _add_domain_box(plotter, terrain, aoi_bounds, color: str = "#10c0ff") -> None:
@@ -65,7 +76,8 @@ def _add_domain_box(plotter, terrain, aoi_bounds, color: str = "#10c0ff") -> Non
 def populate_auto_scene(plotter, dem, cases, crs=None, basemap_source: str = "IGN plan",
                         route_winds=None, basemap_zoom_boost: int = 2, rotor_cache=None,
                         rotor_opacity: float = 0.5, height_clim=None, intensity_max=None,
-                        metric: str = "rotor", vol_floor: float = 0.20, texture_cache=None):
+                        metric: str = "rotor", vol_floor: float = 0.20, texture_cache=None,
+                        metric_range=None):
     """Add the global wake scene for one hour to ``plotter``.
 
     ``dem`` is the full fine zone DEM (terrain), ``cases`` the :class:`auto.pipeline.CaseResult`
@@ -84,60 +96,149 @@ def populate_auto_scene(plotter, dem, cases, crs=None, basemap_source: str = "IG
         plotter.add_mesh(terrain, scalars="elevation_m", cmap="gist_earth",
                          show_scalar_bar=False, reset_camera=False)
 
-    # Sector centres (aoi midpoints) → each space point is drawn by its NEAREST sector only, so
-    # overlapping sectors don't alpha-stack their opacity (which would fake a stronger rotor). The
-    # transparency then reads as the true intensity. See ADR-0029 (overlap handling).
+    # Each space point is drawn by ONE sector (its nearest centre) so overlapping sectors don't
+    # alpha-stack; but the coloured value is a **distance-weighted average across all overlapping
+    # sectors** (feathered), so it is continuous across sector boundaries — no diagonal seams from
+    # the differing per-sector wind BCs. See ADR-0029 / ADR-0032 (overlap handling + blend).
     import numpy as np
 
+    try:
+        from scipy.spatial import cKDTree
+    except Exception:
+        cKDTree = None
+
+    # the cell field each metric colours by (blended below)
+    field_name = {"rotor": "along_flow", "horizontal": "along_pct",
+                  "vertical": "w_ms", "turbulence": "turb_rms"}.get(metric, "along_flow")
+
     centers = np.array([[(c.aoi_bounds[0] + c.aoi_bounds[1]) / 2.0,
-                         (c.aoi_bounds[2] + c.aoi_bounds[3]) / 2.0] for c in cases])
-    ctree = None
-    if len(centers) > 1:
-        try:
-            from scipy.spatial import cKDTree
+                         (c.aoi_bounds[2] + c.aoi_bounds[3]) / 2.0] for c in cases]) \
+        if cases else np.zeros((0, 2))
+    ctree = cKDTree(centers) if (cKDTree is not None and len(centers) > 1) else None
 
-            ctree = cKDTree(centers)
-        except Exception:
-            ctree = None
+    range_key = tuple(sorted((k, round(float(v), 3)) for k, v in (metric_range or {}).items()))
+    floor_key = range_key or (round(float(vol_floor), 3) if metric != "rotor" else 0)
 
+    # Global reference wind for THIS hour (median of the sectors' upstream winds): the horizontal
+    # metric shows the along-wind speed as a % of THIS single wind, so both the threshold and the
+    # colour mean the same thing in every sector (instead of each zone's own wind).
+    winds = [float(c.wind_speed_ms) for c in cases if getattr(c, "wind_speed_ms", 0)]
+    global_wind = max(float(np.median(winds)) if winds else 1.0, 0.1)
+
+    def _rev_for(case):
+        key = (case.zone_index, case.hour, metric, floor_key)
+        rev = rotor_cache.get(key) if rotor_cache is not None else None
+        if rev is not None:
+            return rev
+        source_path = getattr(case, "source_path", "")
+        if source_path:  # re-analysable .sillage: threshold the saved source at the live floor
+            try:
+                import pyvista as pv
+
+                source_key = (case.zone_index, case.hour, "source", 0)
+                source = rotor_cache.get(source_key) if rotor_cache is not None else None
+                if source is None:
+                    source = pv.read(source_path)
+                    if rotor_cache is not None:
+                        rotor_cache[source_key] = source
+                rev = v3.threshold_lee_source(source, metric=metric, vol_floor=vol_floor,
+                                              metric_range=metric_range)
+            except Exception:
+                rev = None
+        path = getattr(case, "vtu_paths", {}).get(metric, "")
+        if rev is None and path:  # compact .sillage: read the persisted volume for this metric
+            try:
+                import pyvista as pv
+
+                rev = pv.read(path)
+                if metric_range:
+                    rev = v3.threshold_lee_source(rev, metric=metric, vol_floor=vol_floor,
+                                                  metric_range=metric_range)
+            except Exception:
+                rev = None
+        if rev is None and case.case_dir:  # not compacted: extract from the OpenFOAM case
+            # horizontal % uses the GLOBAL hour wind so threshold + colour are comparable per zone
+            ref = global_wind if metric == "horizontal" else case.wind_speed_ms
+            try:
+                rev = extract_volume(case.case_dir, case.wind_from_deg, case.aoi_bounds,
+                                     metric=metric, ref_speed_ms=ref,
+                                     vol_floor=vol_floor, metric_range=metric_range)
+            except Exception:
+                rev = None  # a missing/failed case shouldn't blank the whole scene
+        if rotor_cache is not None and rev is not None:
+            rotor_cache[key] = rev
+        return rev
+
+    # Pass 1 — extract every sector's volume; build a KDTree of its cell centres + its metric field.
+    sectors = []
+    for i, case in enumerate(cases):
+        rev = _rev_for(case)
+        if rev is None or not rev.n_cells or cKDTree is None:
+            sectors.append(None)
+            continue
+        if metric == "horizontal" and "along_flow" in rev.array_names:  # re-% to the global wind
+            rev["along_pct"] = np.asarray(rev["along_flow"], dtype="float64") / global_wind * 100.0
+        cc = np.asarray(rev.cell_centers().points)[:, :2]
+        fld = rev.cell_data.get(field_name)
+        half = max((case.aoi_bounds[1] - case.aoi_bounds[0]) / 2.0,
+                   (case.aoi_bounds[3] - case.aoi_bounds[2]) / 2.0, 1.0)
+        spacing = float(np.sqrt((2.0 * half) ** 2 / max(len(cc), 1)))
+        sectors.append({
+            "rev": rev, "cc": cc, "center": centers[i], "half": half,
+            "cover": max(3.0 * spacing, 0.06 * half),  # nearest-cell dist to count as "covered"
+            "fvals": np.asarray(fld, dtype="float64") if fld is not None else None,
+            "tree": cKDTree(cc),
+        })
+    for i, s in enumerate(sectors):  # neighbour = sectors whose aoi box overlaps
+        if s is None:
+            continue
+        s["neigh"] = [j for j, t in enumerate(sectors)
+                      if t is not None and j != i
+                      and abs(s["center"][0] - t["center"][0]) < s["half"] + t["half"]
+                      and abs(s["center"][1] - t["center"][1]) < s["half"] + t["half"]]
+
+    def _blend(pts, i):
+        wsum = np.zeros(len(pts))
+        vsum = np.zeros(len(pts))
+        for j in [i] + sectors[i]["neigh"]:
+            t = sectors[j]
+            if t is None or t["fvals"] is None:
+                continue
+            d, idx = t["tree"].query(pts)
+            dc = np.hypot(pts[:, 0] - t["center"][0], pts[:, 1] - t["center"][1])
+            w = np.clip(1.0 - np.clip(dc / t["half"], 0.0, 1.0), 0.0, 1.0) ** 2  # feather to edge
+            w = np.where(d <= t["cover"], w, 0.0)                                # only where covered
+            vsum += w * t["fvals"][idx]
+            wsum += w
+        return wsum, vsum
+
+    # Pass 2 — draw each sector's OWNED cells (one draw per point), coloured by the blended field.
     rendered = 0
     rotor_actors = []
     for i, case in enumerate(cases):
-        # cache per (zone, hour, metric, floor) — each metric is a DIFFERENT volume
-        key = (case.zone_index, case.hour, metric,
-               round(float(vol_floor), 3) if metric != "rotor" else 0)
-        rev = rotor_cache.get(key) if rotor_cache is not None else None
-        if rev is None:
-            # each metric has its own persisted volume (.vtu); else extract live from the case
-            path = getattr(case, "vtu_paths", {}).get(metric, "")
-            if path:  # compacted/loaded: read the persisted volume for this metric
-                try:
-                    import pyvista as pv
-
-                    rev = pv.read(path)
-                except Exception:
-                    rev = None
-            if rev is None and case.case_dir:  # not compacted: extract from the OpenFOAM case
-                try:
-                    rev = extract_volume(case.case_dir, case.wind_from_deg, case.aoi_bounds,
-                                         metric=metric, ref_speed_ms=case.wind_speed_ms,
-                                         vol_floor=vol_floor)
-                except Exception:
-                    rev = None  # a missing/failed case shouldn't blank the whole scene
-            if rotor_cache is not None and rev is not None:
-                rotor_cache[key] = rev
         _add_domain_box(plotter, terrain, case.aoi_bounds)  # show the analysed sub-domain
-        draw = rev
-        if rev is not None and rev.n_cells and ctree is not None:
-            # keep only cells this sector "owns" (its centre is the nearest) — no overlap double-draw
-            cc = np.asarray(rev.cell_centers().points)[:, :2]
-            owned = np.nonzero(ctree.query(cc)[1] == i)[0]
-            draw = rev.extract_cells(owned) if len(owned) else None
-        if draw is not None and draw.n_cells:
-            # Shared absolute scales across sectors (clim + intensity_max) — the window draws the
-            # 2-D legend, so no in-scene scalar bar here.
+        s = sectors[i]
+        if s is None:
+            continue
+        owned = (np.nonzero(ctree.query(s["cc"])[1] == i)[0] if ctree is not None
+                 else np.arange(len(s["cc"])))
+        if not len(owned):
+            continue
+        bkey = (case.zone_index, case.hour, metric, floor_key, "blend")
+        draw = rotor_cache.get(bkey) if rotor_cache is not None else None
+        if draw is None:
+            draw = s["rev"].extract_cells(owned)
+            if s["fvals"] is not None:  # replace the metric field by the cross-sector weighted mean
+                wsum, vsum = _blend(s["cc"][owned], i)
+                own = s["fvals"][owned]
+                draw.cell_data[field_name] = np.where(wsum > 1e-9,
+                                                      vsum / np.maximum(wsum, 1e-12), own)
+            if rotor_cache is not None:
+                rotor_cache[bkey] = draw
+        if draw.n_cells:
             actor = v3._add_rotor(plotter, draw, terrain, show_legend=False, opacity=rotor_opacity,
-                                  clim=height_clim, intensity_max=intensity_max, metric=metric)
+                                  clim=height_clim, intensity_max=intensity_max, metric=metric,
+                                  metric_range=metric_range)
             if actor is not None:
                 rotor_actors.append(actor)
             rendered += 1

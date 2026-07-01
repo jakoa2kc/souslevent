@@ -5,6 +5,8 @@ No WindNinja, no network, no display — the heavy orchestration (run_auto) is i
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -235,6 +237,7 @@ def test_compact_case_deletes_case_with_no_volumes(monkeypatch, tmp_path):
     from sillage.auto.pipeline import CaseResult, _compact_case
 
     # case readable but no lee volume (empty dict) -> delete the heavy files, keep the result
+    monkeypatch.setattr(scene, "extract_case_source", lambda *a, **k: None)
     monkeypatch.setattr(scene, "extract_case_volumes", lambda *a, **k: {})
     case_dir = tmp_path / "NINJAFOAM_z00_h09"
     run_dir = tmp_path / "z00_h09_run"
@@ -248,6 +251,37 @@ def test_compact_case_deletes_case_with_no_volumes(monkeypatch, tmp_path):
                       aoi_bounds=(0.0, 1.0, 0.0, 1.0), elapsed_s=1.0)
     out = _compact_case(case, tmp_path)
     assert out.case_dir == "" and out.vtu_paths == {}
+    assert not case_dir.exists() and not run_dir.exists() and not crop.exists()
+
+
+def test_compact_case_prefers_source_over_metric_volumes(monkeypatch, tmp_path):
+    from sillage.auto import scene
+    from sillage.auto.pipeline import CaseResult, _compact_case
+
+    class Source:
+        n_cells = 1
+
+        def save(self, path):
+            Path(path).write_bytes(b"source")
+
+    monkeypatch.setattr(scene, "extract_case_source", lambda *a, **k: Source())
+    monkeypatch.setattr(scene, "extract_case_volumes",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("unused")))
+    case_dir = tmp_path / "NINJAFOAM_z00_h09"
+    run_dir = tmp_path / "z00_h09_run"
+    crop = tmp_path / "z00_h09.tif"
+    (case_dir / "system").mkdir(parents=True)
+    run_dir.mkdir()
+    crop.write_bytes(b"crop")
+
+    case = CaseResult(zone_index=0, hour=9, case_dir=str(case_dir),
+                      wind_speed_ms=8.0, wind_from_deg=270.0, crs=None,
+                      aoi_bounds=(0.0, 1.0, 0.0, 1.0), elapsed_s=1.0)
+    out = _compact_case(case, tmp_path)
+
+    assert out.case_dir == "" and out.vtu_paths == {}
+    assert out.source_path.endswith("z00_h09_source.vtu")
+    assert Path(out.source_path).read_bytes() == b"source"
     assert not case_dir.exists() and not run_dir.exists() and not crop.exists()
 
 
@@ -304,18 +338,46 @@ def test_store_save_load_roundtrip(tmp_path):
                      route_segments=(((44.1, 6.1), (44.2, 6.2)),), domain_mode="corridor",
                      target_res_m=5.0, tile_step_m=1500.0)
 
-    out = save_result(tmp_path / "res", result, cfg=cfg, hour_labels={9: "ven 9h", 10: "ven 10h"})
+    save_tmp = tmp_path / "save_tmp"
+    out = save_result(tmp_path / "res", result, cfg=cfg,
+                      hour_labels={9: "ven 9h", 10: "ven 10h"}, temp_dir=save_tmp)
     assert out.endswith(".sillage")
+    assert save_tmp.exists() and not any(save_tmp.iterdir())
 
     loaded = load_result(out, tmp_path / "open")
     assert [c.hour for c in loaded.result.cases] == [9, 10]
     assert loaded.hours == [9, 10]
     assert loaded.hour_labels[9] == "ven 9h"
+    assert loaded.storage_mode == "compact"
     assert loaded.config["domain_mode"] == "corridor" and loaded.config["target_res_m"] == 5.0
     assert len(loaded.route_segments) == 1 and len(loaded.route_segments[0]) == 2
     assert loaded.result.cases[0].vtu_paths["rotor"].endswith(".vtu")   # per-metric persisted mesh
     assert loaded.result.cases[0].vtu_paths["vertical"].endswith(".vtu")
     assert loaded.result.cases[0].wind_from_deg == 270.0
+
+
+def test_store_reanalyzable_roundtrip_keeps_source(tmp_path):
+    from sillage.auto.pipeline import AutoConfig, AutoResult, CaseResult
+    from sillage.auto.store import load_result, save_result
+
+    source = tmp_path / "source.vtu"
+    source.write_bytes(b"<VTKFile/>")  # copied only; rendering tests cover readable meshes
+    crs = CRS.from_epsg(32631)
+    case = CaseResult(zone_index=0, hour=9, case_dir="", wind_speed_ms=8.0,
+                      wind_from_deg=270.0, crs=crs, aoi_bounds=(0.0, 1.0, 0.0, 1.0),
+                      elapsed_s=1.0, source_path=str(source))
+    result = AutoResult(dem_path="", crs=crs, partition=[], cases=[case])
+    cfg = AutoConfig(bbox_latlon=(44.0, 6.0, 44.5, 6.5), hours=(9,))
+
+    save_tmp = tmp_path / "save_src_tmp"
+    out = save_result(tmp_path / "res_src", result, cfg=cfg, hour_labels={9: "ven 9h"},
+                      include_sources=True, temp_dir=save_tmp)
+    loaded = load_result(out, tmp_path / "open_src")
+
+    assert loaded.storage_mode == "reanalyzable"
+    assert save_tmp.exists() and not any(save_tmp.iterdir())
+    assert loaded.result.cases[0].source_path.endswith("source_000.vtu")
+    assert loaded.result.cases[0].vtu_paths == {}
 
 
 def test_progress_tracker_wave_eta_and_summary():

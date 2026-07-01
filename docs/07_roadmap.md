@@ -78,8 +78,9 @@ valley-to-valley wind differentiation.
 - [x] Basemap under the Pass-1 map (IGN Géoplateforme / OSM / OpenTopoMap) for orientation,
       with hillshade fallback offline (ADR-0010). ✔
 - [ ] Uncertainty communication in the UI (candidates ≠ rotors; RANS-mean caveats).
-- [x] Save/load an analysis with provenance — auto results to `.sillage` (DEM + lee meshes +
-      route winds + params + run-day labels), reopened without recomputing (ADR-0030). ✔
+- [x] Save/load an analysis with provenance — auto results to `.sillage` (DEM + compact lee
+      meshes or re-analysable lee sources + route winds + params + run-day labels), reopened
+      without recomputing (ADR-0030/0031). ✔
 - [ ] **Pass-2 mesh resolution as a quality/time knob (ADR-0008):** preset (coarse/medium/
       fine) or target near-surface resolution, with a displayed time/RAM estimate; default
       medium, "refine to max" on doubt; bounded by a cost estimator.
@@ -124,17 +125,18 @@ topo scale, then a time-sliderable global 3D wake. See docs/10_auto_pipeline.md.
 - [x] **AROME 1.5 km local wind** via Open-Meteo `arome_france_hd` (height-AGL, highest level),
       per sub-zone → valley-scale variation; keyless JSON (finer than the MF 2.5 km GRIB API).
       The `.env` key still labels/gates the run + drives the slider window. ✔
-- [x] Parallel feature/hour solves (`momentum_workers` conservative default, slider up to cores)
-      + live progress (steps, %, ETA). ✔
+- [x] Parallel feature/hour solves (`momentum_workers` defaults to all detected cores, then is
+      capped by available tasks; integer CPU split shown in the UI) + live progress (steps, %, ETA). ✔
 - [x] **Blind corridor paving** (`domain_mode="corridor"`, ADR-0029): Pass-2 everywhere along the
       route at max topo res, no Pass-1; **multi-segment routes** skip valley crossings (ADR-0030). ✔
 - [x] **Rendering**: four lee representations (rotor / horizontal % / vertical m/s / turbulence rms),
-      single absolute scale across sectors, adjustable maxima + volume floors, uniform opacity slider,
-      2-D + continuous wind legends; overlaps drawn by nearest sector (no alpha-stacking); turbulence
-      as absolute rms (comparable between domains); all four persisted in `.sillage` (ADR-0031). ✔
+      metric-specific range sliders, uniform opacity slider, continuous wind legend; overlaps drawn
+      by nearest sector (no alpha-stacking); turbulence as absolute rms (comparable between domains);
+      all four persisted in `.sillage` (ADR-0031). ✔
 - [x] **Wave-based progress/ETA** (ADR-0028); disk-safe cases (ADR-0025); right-drag 3D pan. ✔
-- [x] **Save/open** results as a portable `.sillage` bundle (lee meshes + route winds + params), with
-      run-day labels (ADR-0030); both apps render identically (Entry 60). ✔
+- [x] **Save/open** results as a portable `.sillage` bundle (compact lee meshes or re-analysable
+      lee sources + route winds + params), with run-day labels (ADR-0030/0031); reopened v2 sources
+      can re-extract "Seuil volume" without OpenFOAM. ✔
 - [ ] Optional: the Météo-France **GRIB** path (eccodes) for >120 m AGL / pressure levels.
 - [ ] Open levers: per-sector IGN 5 m fetch (vs one corridor DEM), turbulence-volume floor as a
       validated danger threshold, `momentum_workers` vs CPU benchmarking.

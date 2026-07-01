@@ -227,6 +227,50 @@ def test_add_horizontal_scale_bar_draws_line_and_label():
     assert p.labels and ("m" in p.labels[0] or "km" in p.labels[0])
 
 
+def test_lee_source_can_be_rethresholded_without_openfoam_case():
+    pv = pytest.importorskip("pyvista")
+    from sillage.viz import volume3d as v3
+
+    grid = pv.ImageData(dimensions=(11, 11, 6), spacing=(1.0, 1.0, 1.0))
+    centers = grid.cell_centers().points
+    u = np.zeros((grid.n_cells, 3), dtype="float32")
+    u[:, 0] = np.where(centers[:, 0] < 5.0, -2.0, 1.0)  # reversed on the west half
+    u[:, 2] = np.select([centers[:, 1] < 3.0, centers[:, 1] > 5.0], [-1.5, 1.2], default=0.1)
+    grid.cell_data["U"] = u
+    grid.cell_data["k"] = np.full(grid.n_cells, 1.5, dtype="float32")
+
+    source = v3.extract_lee_source(
+        grid, np.array([1.0, 0.0, 0.0]), ref_speed_ms=2.0, aoi_bounds=(1.0, 9.0, 1.0, 9.0))
+    assert source is not None and source.n_cells
+    assert "U" not in source.cell_data
+    assert {"along_flow", "along_pct", "w_ms", "w_abs", "turb_rms"}.issubset(source.cell_data)
+
+    rotor = v3.threshold_lee_source(source, metric="rotor")
+    vertical = v3.threshold_lee_source(source, metric="vertical", vol_floor=1.0)
+    horizontal_range = v3.threshold_lee_source(
+        source, metric="horizontal", metric_range={"min": -80.0, "max": 40.0})
+    rotor_range = v3.threshold_lee_source(
+        source, metric="rotor", metric_range={"min": 1.5, "max": 3.0})
+    vertical_range = v3.threshold_lee_source(
+        source, metric="vertical",
+        metric_range={"sink_min": -2.0, "sink_max": -1.0, "lift_min": 1.0, "lift_max": 2.0})
+    turbulence_range = v3.threshold_lee_source(
+        source, metric="turbulence", metric_range={"min": 1.0, "max": 2.0})
+    assert rotor is not None and rotor.n_cells
+    assert vertical is not None and vertical.n_cells
+    assert horizontal_range is not None and horizontal_range.n_cells
+    assert rotor_range is not None and rotor_range.n_cells
+    assert vertical_range is not None and vertical_range.n_cells
+    assert turbulence_range is not None and turbulence_range.n_cells
+    assert np.all(np.asarray(rotor.cell_data["along_flow"]) < 0.0)
+    assert np.all(np.asarray(vertical.cell_data["w_abs"]) >= 1.0)
+    assert np.all(np.asarray(horizontal_range.cell_data["along_pct"]) <= 40.0)
+    assert np.all(-np.asarray(rotor_range.cell_data["along_flow"]) >= 1.5)
+    vw = np.asarray(vertical_range.cell_data["w_ms"])
+    assert np.all((vw <= -1.0) | (vw >= 1.0))
+    assert np.all(np.asarray(turbulence_range.cell_data["turb_rms"]) >= 1.0)
+
+
 def test_gui_module_imports():
     pytest.importorskip("PySide6")  # only when the gui extra is installed
     from sillage.app.main_window import MainWindow  # noqa: F401
@@ -276,6 +320,7 @@ def test_prepare_dem_ign_decodes(tmp_path, monkeypatch):
 
     from sillage.terrain import acquire
     from sillage.terrain.dem import load_dem
+    from sillage.terrain.dem import load_dem
 
     class _Resp:
         def __init__(self, content):
@@ -294,6 +339,36 @@ def test_prepare_dem_ign_decodes(tmp_path, monkeypatch):
     dem = load_dem(str(p), max_domain_km=200.0)
     assert dem.crs.is_projected
     assert 1150 < float(np.nanmean(dem.elevation)) < 1250  # ~1200 m preserved
+
+
+def test_prepare_dem_ign_one_meter_keeps_native_fetch(tmp_path, monkeypatch):
+    import requests
+
+    from sillage.terrain import acquire
+    from sillage.terrain.dem import load_dem
+
+    class _Resp:
+        def __init__(self, content):
+            self.content = content
+            self.headers = {"Content-Type": "image/x-bil;bits=32"}
+
+        def raise_for_status(self):
+            pass
+
+    def fake_get(url, params=None, timeout=None):
+        w, h = int(params["WIDTH"]), int(params["HEIGHT"])
+        return _Resp(np.full((h, w), 1234.0, dtype="<f4").tobytes())
+
+    def fail_average(arr, factor):
+        raise AssertionError(f"1 m target should not average native IGN fetch (factor={factor})")
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(acquire, "_block_average", fail_average)
+    p = acquire.prepare_dem_ign((44.550, 6.150, 44.551, 6.151), tmp_path / "ign_1m.tif",
+                                target_res_m=1.0)
+    dem = load_dem(str(p), max_domain_km=200.0)
+    assert dem.crs.is_projected
+    assert dem.resolution_m <= 2.0
 
 
 def test_zoom_for_resolution_caps():

@@ -1,13 +1,14 @@
 """Save / open auto-run results as a single portable bundle (a ``.sillage`` zip).
 
-We persist **only the lee-zone meshes** (the small reversed-flow rotor ``.vtu`` per feature/hour —
-NOT the full OpenFOAM mesh field), plus the terrain DEM, the planned route, the per-hour date labels
-and the run parameters. That is everything the 3D scene needs to redraw the wake without recomputing.
+Compact bundles persist the already-thresholded lee-zone meshes. Re-analysable bundles additionally
+persist one threshold-independent ``source_XXX.vtu`` per case: clipped geometry + derived scalars,
+not the full OpenFOAM case. That lets the UI re-extract volumes with new thresholds after reopening.
 
 Bundle layout (inside the zip):
   manifest.json   — config, route (segments), hours + absolute-date labels, per-case metadata
   dem.tif         — the corridor terrain (drape + relief)
-  rotor_XXX.vtu   — one clipped rotor mesh per case (skipped when a case has no reversed flow)
+  source_XXX.vtu  — optional re-analysable source per case
+  rotor_XXX.vtu   — compact fallback: one clipped metric mesh per case
 """
 
 from __future__ import annotations
@@ -41,18 +42,26 @@ def _cfg_to_dict(cfg) -> dict:
     }
 
 
-def save_result(zip_path, result, *, cfg, hour_labels: dict, route_cells=None) -> str:
+def save_result(zip_path, result, *, cfg, hour_labels: dict, route_cells=None,
+                include_sources: bool = False, temp_dir=None) -> str:
     """Write an auto run to a ``.sillage`` bundle. ``hour_labels`` maps clock-hour offset → the
     absolute date label shown on the slider (kept so reopening shows the right day, not today's).
     ``route_cells`` is the **run's** AROME route wind (``[(lat, lon, series), …]``) — saved so the
-    reopened arrows match the computed lee zones, NOT today's forecast. Persists BOTH lee volumes
-    per case (rotor / horizontal / vertical / turbulence) so every view works on reopen."""
-    from .scene import extract_case_volumes
+    reopened arrows match the computed lee zones, NOT today's forecast.
+
+    ``include_sources=True`` stores a re-analysable source per case when the OpenFOAM case (or a
+    previous source) is available. If a source cannot be produced, the function falls back to the
+    compact metric volumes for that case. ``temp_dir`` keeps the staging directory under the
+    configured Sillage generated root instead of the OS-global temp.
+    """
+    from .scene import extract_case_source, extract_case_volumes
 
     zip_path = Path(zip_path)
     if zip_path.suffix != SUFFIX:
         zip_path = zip_path.with_suffix(SUFFIX)
-    tmp = Path(tempfile.mkdtemp(prefix="sillage_save_"))
+    temp_root = Path(temp_dir) if temp_dir is not None else zip_path.parent
+    temp_root.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix="sillage_save_", dir=str(temp_root)))
     try:
         if result.dem_path and Path(result.dem_path).exists():
             shutil.copyfile(result.dem_path, tmp / "dem.tif")
@@ -60,12 +69,29 @@ def save_result(zip_path, result, *, cfg, hour_labels: dict, route_cells=None) -
         cases_meta = []
         for i, c in enumerate(result.cases):
             files = {}
-            for metric, src in (getattr(c, "vtu_paths", {}) or {}).items():  # already persisted
+            source_file = ""
+            if include_sources:
+                src = getattr(c, "source_path", "")
                 if src and Path(src).exists():
-                    vtu = f"{metric}_{i:03d}.vtu"
-                    shutil.copyfile(src, tmp / vtu)
-                    files[metric] = vtu
-            if not files and c.case_dir:  # not compacted -> extract every metric from one read
+                    source_file = f"source_{i:03d}.vtu"
+                    shutil.copyfile(src, tmp / source_file)
+                elif c.case_dir:
+                    try:
+                        source = extract_case_source(
+                            c.case_dir, c.wind_from_deg, c.aoi_bounds,
+                            ref_speed_ms=c.wind_speed_ms)
+                        if source is not None and source.n_cells:
+                            source_file = f"source_{i:03d}.vtu"
+                            source.save(str(tmp / source_file))
+                    except Exception:
+                        source_file = ""
+            if not source_file:
+                for metric, src in (getattr(c, "vtu_paths", {}) or {}).items():  # already persisted
+                    if src and Path(src).exists():
+                        vtu = f"{metric}_{i:03d}.vtu"
+                        shutil.copyfile(src, tmp / vtu)
+                        files[metric] = vtu
+            if not source_file and not files and c.case_dir:
                 try:
                     for metric, vol in extract_case_volumes(
                             c.case_dir, c.wind_from_deg, c.aoi_bounds,
@@ -80,10 +106,12 @@ def save_result(zip_path, result, *, cfg, hour_labels: dict, route_cells=None) -
                 "wind_speed_ms": c.wind_speed_ms, "wind_from_deg": c.wind_from_deg,
                 "aoi_bounds": list(c.aoi_bounds), "elapsed_s": c.elapsed_s,
                 "vtu_files": files,
+                "source_file": source_file,
             })
 
         manifest = {
-            "format": _FORMAT, "version": 1,
+            "format": _FORMAT, "version": 2 if include_sources else 1,
+            "storage_mode": "reanalyzable" if include_sources else "compact",
             "crs": result.crs.to_wkt() if result.crs is not None else "",
             "dem": "dem.tif" if (tmp / "dem.tif").exists() else "",
             "hour_labels": {str(h): lbl for h, lbl in hour_labels.items()},
@@ -114,6 +142,7 @@ class LoadedResult:
     route_segments: list        # [[(lat, lon), ...], ...]
     route_cells: list           # the run's AROME route wind [(lat, lon, series), ...]
     config: dict                # the saved AutoConfig fields (for display / restore)
+    storage_mode: str           # "compact" or "reanalyzable"
 
 
 def load_result(zip_path, dest_dir) -> LoadedResult:
@@ -138,6 +167,7 @@ def load_result(zip_path, dest_dir) -> LoadedResult:
             wind_speed_ms=float(m["wind_speed_ms"]), wind_from_deg=float(m["wind_from_deg"]),
             crs=crs, aoi_bounds=tuple(m["aoi_bounds"]), elapsed_s=float(m.get("elapsed_s", 0.0)),
             vtu_paths={metric: str(dest / fn) for metric, fn in m.get("vtu_files", {}).items()},
+            source_path=str(dest / m["source_file"]) if m.get("source_file") else "",
         )
         for m in manifest["cases"]
     ]
@@ -155,4 +185,5 @@ def load_result(zip_path, dest_dir) -> LoadedResult:
                    for c in manifest.get("route_cells", [])]
     return LoadedResult(result=result, hours=result.hours, hour_labels=hour_labels,
                         route_segments=segments, route_cells=route_cells,
-                        config=manifest.get("config", {}))
+                        config=manifest.get("config", {}),
+                        storage_mode=manifest.get("storage_mode", "compact"))

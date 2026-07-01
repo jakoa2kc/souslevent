@@ -103,10 +103,11 @@ def prepare_dem_ign(bbox_latlon, out_path, target_res_m: float = 50.0,
                     on_progress=None, cancel=None, max_px: int = 2048, tile_cap: int = 4) -> Path:
     """Prepare a UTM DEM from IGN RGE ALTI for ``bbox_latlon`` = (south, west, north, east).
 
-    The Géoplateforme elevation WMS only returns artifact-free data at its **~5 m native
-    grid** (off-grid requests stripe vertically — duplicated rows that show as "steps" in the
-    hillshade and propagate to WindNinja). So we fetch at ~5 m (tiled if needed, ``tile_cap``
-    per axis), then **block-average** down to ``target_res_m`` — clean at any target.
+    The Géoplateforme elevation WMS only returns artifact-free data when fetched close to native
+    resolution (``IGN_NATIVE_M``; observed ~1 m on HIGHRES). Coarser direct WMS requests can stripe
+    vertically — duplicated rows that show as "steps" in the hillshade and propagate to WindNinja.
+    So we fetch close to native / ``target_res_m / 5`` (tiled if needed, ``tile_cap`` per axis), then
+    **block-average** down to ``target_res_m`` when averaging is actually useful.
     Reprojected to UTM north-up. Key-free. Raises if outside IGN coverage (dispatcher falls
     back to the worldwide source).
     """
@@ -133,7 +134,7 @@ def prepare_dem_ign(bbox_latlon, out_path, target_res_m: float = 50.0,
     # Fetch at ~target/5 (floored at the ~1 m native) and average ×5 ourselves: the WMS's own
     # nearest-neighbour downsample-to-target leaves horizontal "stair-step" striping that only a
     # ~×5 average removes (observed: clean from 25 m = 5 m fetch ×5; striped at 5/10 m when the
-    # factor was <5). So at 5 m we fetch ~1 m native (clean) and average 5×, at 10 m ~2 m, etc.
+    # factor was <5). At 1 m we keep the native fetch instead of forcing a fake 2 m average.
     fetch_res = max(IGN_NATIVE_M, target_res_m / 5.0)
     nat_w = max(2, round(w_m / fetch_res))
     nat_h = max(2, round(h_m / fetch_res))
@@ -161,7 +162,9 @@ def prepare_dem_ign(bbox_latlon, out_path, target_res_m: float = 50.0,
 
     prog(62, "Lissage vers la résolution cible…")
     cur_res = w_m / arr.shape[1]
-    arr = _block_average(arr, max(2, round(target_res_m / cur_res)))  # >=2 -> de-stripes
+    avg_factor = max(1, round(target_res_m / cur_res))
+    if avg_factor > 1:
+        arr = _block_average(arr, avg_factor)
     h, w = arr.shape
     transform = from_origin(west, north, (east - west) / w, (north - south) / h)
 

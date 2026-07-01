@@ -108,8 +108,8 @@ The libraries above are driven by **two desktop apps** that share every lower la
   **route** (multi-segment) + a window, then `run_auto` solves Pass-2 along the corridor — either on
   Pass-1 **features** or by **blind paving** — and aggregates per-hour 3D scenes. Submodules:
   `pipeline` (orchestrator), `partition` (feature/corridor domains), `wind` (AROME-HD + route arrows),
-  `arome` (forecast window), `scene` (`extract_volume` + aggregate), `store` (`.sillage` save/open),
-  `progress` (wave ETA), `window` (UI).
+  `arome` (forecast window), `scene` (`extract_volume` + aggregate), `store` (`.sillage` save/open:
+  compact thresholded volumes or re-analysable source meshes), `progress` (wave ETA), `window` (UI).
 - `app/map_tab.py` — the **Leaflet/QtWebEngine** map shared by both (rectangle AOI **or** multi-segment
   route + live corridor + wind arrows). `app/jobs.py` — the background `SolveJob` (progress/cancel).
 

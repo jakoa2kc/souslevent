@@ -38,6 +38,9 @@ from .wind import arrows_at_hour, route_wind_series
 GREEN = ("QPushButton { font-weight:bold; padding:8px 18px; border-radius:5px;"
          " background:#2d7d2d; color:white; } QPushButton:disabled { background:#a9c7a9; }")
 
+TOPO_PRESETS = (1.0, 5.0, 10.0, 25.0)
+TOPO_LABELS = ("1 m (IGN)", "5 m", "10 m", "25 m")
+
 
 class AutoWindow(QtWidgets.QMainWindow):
     METRICS = ("rotor", "horizontal", "vertical", "turbulence")
@@ -62,9 +65,14 @@ class AutoWindow(QtWidgets.QMainWindow):
         self._opacity = 0.5      # rotor volume opacity (slider-controlled, see inside the thickness)
         self._metric = "rotor"          # 3D colour metric (default rotor)
         self._height_max_m = 300.0      # top of the height colour scale (AGL, m) — 2-D metrics
-        # per-metric colour-scale max (display units) and volume floor (display units)
-        self._scale_max = {"rotor": 15.0, "horizontal": 100.0, "vertical": 3.0, "turbulence": 3.0}
-        self._vol_floor = {"horizontal": 50.0, "vertical": 1.0, "turbulence": 1.0}
+        # Display units. Ranges drive both extraction (min/max shown) and colour clamping.
+        self._metric_ranges = {
+            "rotor": (0.0, 15.0),             # km/h reversed-flow speed
+            "horizontal": (-100.0, 50.0),     # % upstream wind; values > max hidden
+            "vertical_sink": (-3.0, -1.0),    # m/s; values below min clamp red, > max hidden
+            "vertical_lift": (1.0, 3.0),      # m/s; values below min hidden, > max clamp green
+            "turbulence": (1.0, 3.0),         # rms m/s; values below min hidden
+        }
         self._tex_cache = {}     # cached basemap textures so re-renders don't re-fetch tiles
         self._last_cfg = None    # AutoConfig of the shown result (for save)
         self._hour_labels = None  # {hour: absolute-date label} — from the run day, kept for reopen
@@ -186,9 +194,11 @@ class AutoWindow(QtWidgets.QMainWindow):
         pr.addSpacing(12)
         pr.addWidget(QtWidgets.QLabel("Topo :"))
         self.topo_combo = QtWidgets.QComboBox()
-        self.topo_combo.addItems(["5 m", "10 m", "25 m"])
-        self.topo_combo.setToolTip("Résolution du MNT. 5 m = max détail mais fetch IGN plus lourd "
-                                   "(utilise des trajets courts pour les premiers tests).")
+        self.topo_combo.addItems(TOPO_LABELS)
+        self.topo_combo.setCurrentIndex(TOPO_PRESETS.index(10.0))
+        self.topo_combo.setToolTip(
+            "Résolution du MNT. 1 m utilise les données IGN haute résolution quand disponibles "
+            "et peut être très lourd : à réserver aux trajets courts.")
         pr.addWidget(self.topo_combo)
         pr.addStretch(1)
         lay.addLayout(pr)
@@ -232,6 +242,31 @@ class AutoWindow(QtWidgets.QMainWindow):
                              else QtCore.Qt.AlignRight if k == n - 1 else QtCore.Qt.AlignHCenter)
             row.addWidget(lab, 1)
         return w
+
+    def _add_range_slider(self, form, key: str, title: str, raw_min: int, raw_max: int,
+                          value: tuple[float, float], tooltip: str) -> None:
+        """Add one labelled range slider. Decimal sliders are stored as ints with a scale."""
+        scale = self._range_scales[key]
+        row = QtWidgets.QWidget()
+        lay = QtWidgets.QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        slider = QRangeSlider(QtCore.Qt.Horizontal)
+        slider.setRange(raw_min, raw_max)
+        slider.setValue((round(value[0] * scale), round(value[1] * scale)))
+        slider.setFixedWidth(190)
+        slider.setToolTip(tooltip)
+        slider.valueChanged.connect(lambda *_args, k=key: self._on_range_slider_change(k))
+        lab = QtWidgets.QLabel("")
+        lab.setMinimumWidth(86)
+        lay.addWidget(slider)
+        lay.addWidget(lab)
+        title_lab = QtWidgets.QLabel(title)
+        form.addRow(title_lab, row)
+        self._range_sliders[key] = slider
+        self._range_labels[key] = lab
+        self._range_rows[key] = row
+        self._range_row_labels[key] = title_lab
+        self._refresh_range_label(key)
 
     def _build_render_tab(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
@@ -286,8 +321,7 @@ class AutoWindow(QtWidgets.QMainWindow):
         lay.addLayout(srow)
         outer.addLayout(lay, stretch=1)
 
-        # Right panel: metric choice + the 2-D legend (height × intensity) + adjustable upper
-        # thresholds (applied on a button, so spinbox edits don't trigger a reload each step).
+        # Right panel: metric choice + legend + metric-specific range sliders.
         right = QtWidgets.QVBoxLayout()
         mrow = QtWidgets.QFormLayout()
         self.metric_combo = QtWidgets.QComboBox()
@@ -296,7 +330,7 @@ class AutoWindow(QtWidgets.QMainWindow):
         self.metric_combo.setToolTip(
             "Grandeur visualisée dans le volume sous le vent :\n"
             "• Rotor — flux inversé (recirculation)\n"
-            "• Vitesse horizontale — % du vent amont (rouge = rotor, bleu = plein vent)\n"
+            "• Vitesse horizontale — % du vent amont (rouge = flux inversé, vert = vent établi)\n"
             "• Vitesse verticale — m/s (vert = ascendance, rouge = dégueulante)\n"
             "• Turbulence — intensité de turbulence")
         self.metric_combo.currentIndexChanged.connect(self._on_metric_change)
@@ -306,25 +340,39 @@ class AutoWindow(QtWidgets.QMainWindow):
         self.legend_label.setFixedWidth(250)
         self.legend_label.setAlignment(QtCore.Qt.AlignTop | QtCore.Qt.AlignHCenter)
         right.addWidget(self.legend_label)
+
+        self._range_sliders = {}
+        self._range_labels = {}
+        self._range_rows = {}
+        self._range_row_labels = {}
+        self._range_scales = {
+            "rotor": 1.0, "horizontal": 1.0,
+            "vertical_sink": 10.0, "vertical_lift": 10.0, "turbulence": 10.0,
+        }
+        self._range_suffixes = {
+            "rotor": " km/h", "horizontal": " %",
+            "vertical_sink": " m/s", "vertical_lift": " m/s", "turbulence": " m/s",
+        }
         form = QtWidgets.QFormLayout()
-        self.height_max_spin = QtWidgets.QSpinBox()
-        self.height_max_spin.setRange(50, 3000)
-        self.height_max_spin.setSingleStep(50)
-        self.height_max_spin.setValue(int(self._height_max_m))
-        self.height_max_spin.setSuffix(" m")
-        self.height_max_spin.setToolTip("Hauteur sol au sommet de l'échelle de couleur (violet/bleu).")
-        self.height_max_spin.valueChanged.connect(self._on_spin_change)
-        self.intensity_max_spin = QtWidgets.QDoubleSpinBox()
-        self.intensity_max_spin.valueChanged.connect(self._on_spin_change)
-        self.ti_floor_spin = QtWidgets.QDoubleSpinBox()  # range/units set per metric below
-        self.ti_floor_spin.setValue(20.0)
-        self.ti_floor_spin.valueChanged.connect(self._on_floor_change)
-        form.addRow("Échelle max :", self.intensity_max_spin)
-        form.addRow("Seuil volume :", self.ti_floor_spin)
-        form.addRow("Hauteur max :", self.height_max_spin)
+        self._add_range_slider(form, "rotor", "Rotor :",
+                               0, 60, self._metric_ranges["rotor"],
+                               "Vitesse de flux inversé représentée. Sous le min : masqué; "
+                               "au-dessus du max : couleur max.")
+        self._add_range_slider(form, "horizontal", "Horizontale :",
+                               -100, 100, self._metric_ranges["horizontal"],
+                               "% du vent amont. Sous le min : rouge; au-dessus du max : masqué.")
+        self._add_range_slider(form, "vertical_sink", "Dégueulantes :",
+                               -100, 0, self._metric_ranges["vertical_sink"],
+                               "Vitesse verticale négative. Sous le min : rouge; au-dessus du max : masqué.")
+        self._add_range_slider(form, "vertical_lift", "Ascendances :",
+                               0, 100, self._metric_ranges["vertical_lift"],
+                               "Vitesse verticale positive. Sous le min : masqué; au-dessus du max : vert.")
+        self._add_range_slider(form, "turbulence", "Turbulence :",
+                               0, 150, self._metric_ranges["turbulence"],
+                               "Turbulence rms. Sous le min : masquée; au-dessus du max : couleur max.")
         right.addLayout(form)
-        self.btn_apply_scale = QtWidgets.QPushButton("Appliquer l'échelle")
-        self.btn_apply_scale.setToolTip("Recalcule le rendu 3D avec les seuils ci-dessus.")
+        self.btn_apply_scale = QtWidgets.QPushButton("Appliquer les sliders")
+        self.btn_apply_scale.setToolTip("Recalcule le rendu 3D avec les seuils et échelles affichés.")
         self.btn_apply_scale.clicked.connect(self._on_apply_scale)
         right.addWidget(self.btn_apply_scale)
         self.wind_legend_label = QtWidgets.QLabel()
@@ -332,7 +380,7 @@ class AutoWindow(QtWidgets.QMainWindow):
         right.addWidget(self.wind_legend_label)
         right.addStretch(1)
         outer.addLayout(right)
-        self._apply_metric_to_spin()  # set the intensity spin's units/range for the default metric
+        self._apply_metric_controls()
         return w
 
     # --- window helpers ------------------------------------------------------
@@ -508,7 +556,7 @@ class AutoWindow(QtWidgets.QMainWindow):
         bbox = bbox_from_route(flat, margin)
         wind_source = "arome" if self._fc.source == "AROME" else "open_meteo"
         pave = self.pave_check.isChecked()
-        topo_res = (5.0, 10.0, 25.0)[self.topo_combo.currentIndex()]
+        topo_res = TOPO_PRESETS[self.topo_combo.currentIndex()]
         cfg = AutoConfig(bbox_latlon=bbox, hours=tuple(range(lo, hi)),
                          route_latlon=tuple(flat), corridor_margin_km=margin,
                          route_segments=tuple(tuple(s) for s in segs),  # gaps between segs not paved
@@ -656,17 +704,30 @@ class AutoWindow(QtWidgets.QMainWindow):
             self, "Sauvegarder le résultat", "", "Résultat Sillage (*.sillage)")
         if not path:
             return
+        choice = QtWidgets.QMessageBox.question(
+            self, "Type de sauvegarde",
+            "Sauvegarde ré-analysable ?\n\n"
+            "Oui : stocke les valeurs sources compactes pour pouvoir changer les seuils volume "
+            "après réouverture (fichier plus lourd).\n"
+            "Non : sauvegarde compacte, les seuils volume restent figés.",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Yes)
+        if choice == QtWidgets.QMessageBox.Cancel:
+            return
+        include_sources = choice == QtWidgets.QMessageBox.Yes
         from .store import save_result
 
         labels = self._hour_labels or {h: self._label_for_hour(h) for h in self._result.hours}
         try:
             out = save_result(path, self._result, cfg=self._last_cfg, hour_labels=labels,
-                              route_cells=self._route_cells)
+                              route_cells=self._route_cells, include_sources=include_sources,
+                              temp_dir=self.cfg.temp_dir)
         except Exception as exc:  # pragma: no cover - surfaced to the UI
             QtWidgets.QMessageBox.critical(self, "Sauvegarde", str(exc))
             return
         self.statusBar().showMessage(f"Sauvegardé : {out}")
-        self._log(f"Résultat sauvegardé → {out}")
+        mode = "ré-analysable" if include_sources else "compact"
+        self._log(f"Résultat sauvegardé ({mode}) → {out}")
 
     def _on_open(self) -> None:
         if self._job is not None:
@@ -681,7 +742,9 @@ class AutoWindow(QtWidgets.QMainWindow):
         from .store import load_result
 
         self._cleanup_loaded()
-        dest = Path(tempfile.mkdtemp(prefix="sillage_open_"))
+        open_tmp = self.cfg.temp_dir / "sillage_open"
+        open_tmp.mkdir(parents=True, exist_ok=True)
+        dest = Path(tempfile.mkdtemp(prefix="sillage_open_", dir=str(open_tmp)))
         try:
             loaded = load_result(path, dest)
             self._dem = load_dem(loaded.result.dem_path, max_domain_km=200.0)
@@ -701,7 +764,12 @@ class AutoWindow(QtWidgets.QMainWindow):
         self._rendered = False  # fit the camera to the opened scene
         hours = loaded.result.hours
         self._log(f"Ouvert : {Path(path).name} — {len(loaded.result.cases)} cas, "
-                  f"{len(hours)} h, mode {loaded.config.get('domain_mode', '?')}")
+                  f"{len(hours)} h, mode {loaded.config.get('domain_mode', '?')}, "
+                  f"stockage {loaded.storage_mode}")
+        if any(getattr(c, "source_path", "") for c in loaded.result.cases):
+            self._log("Seuils volume ré-extractibles : les sources compactes sont présentes.")
+        else:
+            self._log("Seuils volume figés : ce fichier ne contient que des volumes déjà extraits.")
         self.statusBar().showMessage(f"Ouvert : {Path(path).name}")
         if hours:
             self._show_result_hours(hours)
@@ -732,8 +800,9 @@ class AutoWindow(QtWidgets.QMainWindow):
             self.features_spin.setValue(int(c.get("max_features", DEFAULT_MAX_FEATURES)))
             self.step_spin.setValue(float(c.get("tile_step_m", 1500.0)) / 1000.0)
             self.pave_check.setChecked(c.get("domain_mode") == "corridor")
-            self.topo_combo.setCurrentIndex({5.0: 0, 10.0: 1, 25.0: 2}.get(
-                float(c.get("target_res_m", 10.0)), 1))
+            target = float(c.get("target_res_m", 10.0))
+            self.topo_combo.setCurrentIndex(
+                min(range(len(TOPO_PRESETS)), key=lambda i: abs(TOPO_PRESETS[i] - target)))
         except Exception:
             pass
 
@@ -772,64 +841,99 @@ class AutoWindow(QtWidgets.QMainWindow):
     def _on_hour_change(self, idx: int) -> None:
         self._render_hour(int(idx))
 
-    def _native_intensity_max(self) -> float:
-        """Colour-scale max in the units ``_add_rotor`` expects for the active metric."""
-        m, v = self._metric, self._scale_max[self._metric]
-        return v / 3.6 if m == "rotor" else v  # rotor km/h→m/s; others (%, m/s) used directly
+    def _coerce_slider_range(self, key: str, raw: tuple[int, int]) -> tuple[int, int]:
+        lo, hi = sorted((int(raw[0]), int(raw[1])))
+        if key == "horizontal":
+            lo = min(lo, -1)
+            hi = max(hi, 1)
+        elif key == "vertical_sink":
+            hi = min(hi, 0)
+        elif key == "vertical_lift":
+            lo = max(lo, 0)
+        if lo == hi:
+            hi = min(hi + 1, self._range_sliders[key].maximum())
+            lo = min(lo, hi - 1)
+        return lo, hi
 
-    def _native_vol_floor(self) -> float:
-        """Volume threshold in native units for the active metric (0 for rotor — no floor)."""
-        return self._vol_floor.get(self._metric, 0.0)
+    def _range_value(self, key: str) -> tuple[float, float]:
+        return self._metric_ranges[key]
 
-    def _apply_metric_to_spin(self) -> None:
-        """Set the scale + volume-floor spinboxes' units/range/value for the active metric."""
-        m = self._metric
-        s = self.intensity_max_spin
-        s.blockSignals(True)
-        if m == "rotor":
-            s.setRange(2.0, 60.0), s.setSingleStep(1.0), s.setSuffix(" km/h")
-        elif m == "turbulence":
-            s.setRange(0.5, 15.0), s.setSingleStep(0.5), s.setSuffix(" m/s")
-        elif m == "horizontal":
-            s.setRange(20.0, 200.0), s.setSingleStep(10.0), s.setSuffix(" %")
-        else:  # vertical
-            s.setRange(0.5, 15.0), s.setSingleStep(0.5), s.setSuffix(" m/s")
-        s.setValue(self._scale_max[m])
-        s.blockSignals(False)
+    def _format_value(self, value: float, key: str) -> str:
+        if key in ("vertical_sink", "vertical_lift", "turbulence"):
+            return f"{value:+.1f}" if key.startswith("vertical") else f"{value:.1f}"
+        return f"{value:+.0f}" if key == "horizontal" else f"{value:.0f}"
 
-        f = self.ti_floor_spin
-        f.setEnabled(m != "rotor")  # rotor's volume = reversed flow (no floor)
-        f.blockSignals(True)
-        if m == "turbulence":
-            f.setRange(0.0, 10.0), f.setSingleStep(0.5), f.setSuffix(" m/s")
-            f.setToolTip("Seuil de turbulence rms (m/s) qui définit le VOLUME affiché.")
-        elif m == "horizontal":
-            f.setRange(-100.0, 100.0), f.setSingleStep(5.0), f.setSuffix(" %")
-            f.setToolTip("Affiche les cellules ralenties SOUS ce % du vent amont (incl. flux inversé).")
-        elif m == "vertical":
-            f.setRange(0.0, 10.0), f.setSingleStep(0.5), f.setSuffix(" m/s")
-            f.setToolTip("Affiche les cellules où |vitesse verticale| ≥ ce seuil.")
-        if m in self._vol_floor:
-            f.setValue(self._vol_floor[m])
-        f.blockSignals(False)
+    def _refresh_range_label(self, key: str) -> None:
+        if key not in getattr(self, "_range_labels", {}):
+            return
+        lo, hi = self._range_value(key)
+        suffix = self._range_suffixes[key]
+        self._range_labels[key].setText(
+            f"{self._format_value(lo, key)} → {self._format_value(hi, key)}{suffix}")
 
-        self.height_max_spin.setEnabled(m in ("rotor", "turbulence"))  # height axis = 2-D metrics
+    def _on_range_slider_change(self, key: str) -> None:
+        slider = self._range_sliders[key]
+        raw = self._coerce_slider_range(key, tuple(slider.value()))
+        if tuple(slider.value()) != raw:
+            slider.blockSignals(True)
+            slider.setValue(raw)
+            slider.blockSignals(False)
+        scale = self._range_scales[key]
+        self._metric_ranges[key] = (raw[0] / scale, raw[1] / scale)
+        self._refresh_range_label(key)
+        self._update_legend()
+
+    def _apply_metric_controls(self) -> None:
+        visible = {
+            "rotor": {"rotor"},
+            "horizontal": {"horizontal"},
+            "vertical": {"vertical_sink", "vertical_lift"},
+            "turbulence": {"turbulence"},
+        }.get(self._metric, {"rotor"})
+        for key, row in self._range_rows.items():
+            row.setVisible(key in visible)
+            self._range_row_labels[key].setVisible(key in visible)
+
+    def _native_metric_range(self) -> dict:
+        """Return the active slider ranges in the units stored in the VTK arrays."""
+        if self._metric == "rotor":
+            lo, hi = self._metric_ranges["rotor"]
+            return {"min": lo / 3.6, "max": hi / 3.6}  # UI km/h, array m/s
+        if self._metric == "horizontal":
+            lo, hi = self._metric_ranges["horizontal"]
+            return {"min": lo, "max": hi}
+        if self._metric == "vertical":
+            slo, shi = self._metric_ranges["vertical_sink"]
+            llo, lhi = self._metric_ranges["vertical_lift"]
+            return {"sink_min": slo, "sink_max": shi, "lift_min": llo, "lift_max": lhi}
+        lo, hi = self._metric_ranges["turbulence"]
+        return {"min": lo, "max": hi}
 
     def _legend_image(self):
-        from ..viz.volume3d import diverging_legend_image, rotor_legend_image
+        from ..viz.volume3d import (
+            _rotor_intensity_cmap,
+            _vertical_motion_cmap,
+            _wind_balance_cmap,
+            range_legend_image,
+        )
 
-        m, vmax = self._metric, self._scale_max[self._metric]
+        m = self._metric
         if m == "rotor":
-            return rotor_legend_image(self._height_max_m, vmax, ylabel="Intensité (km/h)",
-                                      title="Rotor : hauteur × intensité")
+            lo, hi = self._metric_ranges["rotor"]
+            return range_legend_image(lo, hi, _rotor_intensity_cmap(), "Intensité rotor (km/h)",
+                                      "Sous min masqué · au-dessus = max")
         if m == "turbulence":
-            return rotor_legend_image(self._height_max_m, vmax, ylabel="Turbulence rms (m/s)",
-                                      title="Turbulence : hauteur × rms")
+            lo, hi = self._metric_ranges["turbulence"]
+            return range_legend_image(lo, hi, _rotor_intensity_cmap(), "Turbulence rms (m/s)",
+                                      "Sous min masqué · au-dessus = max")
         if m == "horizontal":
-            return diverging_legend_image(vmax, "RdBu", "Vit. horizontale (% vent)",
-                                          "Rouge = rotor · bleu = plein vent")
-        return diverging_legend_image(vmax, "RdYlGn", "Vit. verticale (m/s)",
-                                      "Vert = ascendance · rouge = dégueulante")
+            lo, hi = self._metric_ranges["horizontal"]
+            return range_legend_image(lo, hi, _wind_balance_cmap(), "Vitesse horizontale (% vent)",
+                                      "Rouge · jaune = 0 · vert", center=0.0)
+        slo, _shi = self._metric_ranges["vertical_sink"]
+        _llo, lhi = self._metric_ranges["vertical_lift"]
+        return range_legend_image(slo, lhi, _vertical_motion_cmap(), "Vitesse verticale (m/s)",
+                                  "Rouge · jaune pâle = 0 · vert", center=0.0)
 
     def _update_legend(self) -> None:
         """Refresh the legend image for the active metric/scales."""
@@ -861,23 +965,13 @@ class AutoWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
-    def _on_spin_change(self, *_args) -> None:
-        """Spinbox edit: store + refresh the legend only (3D re-render waits for « Appliquer »)."""
-        self._height_max_m = float(self.height_max_spin.value())
-        self._scale_max[self._metric] = float(self.intensity_max_spin.value())
-        self._update_legend()
-
-    def _on_floor_change(self, val: float) -> None:
-        if self._metric in self._vol_floor:  # changes the VOLUME -> applied on « Appliquer »
-            self._vol_floor[self._metric] = float(val)
-
     def _on_apply_scale(self) -> None:
         if self._result is not None:  # recolour/re-extract at the new scales (texture cached)
             self._render_hour(self.hour_slider.value())
 
     def _on_metric_change(self, idx: int) -> None:
         self._metric = self.METRICS[idx] if 0 <= idx < len(self.METRICS) else "rotor"
-        self._apply_metric_to_spin()
+        self._apply_metric_controls()
         self._update_legend()
         if self._result is not None:
             self._render_hour(self.hour_slider.value())
@@ -940,8 +1034,7 @@ class AutoWindow(QtWidgets.QMainWindow):
                             route_winds=self._route_winds_utm(hour),
                             rotor_cache=self._rotor_cache, rotor_opacity=self._opacity,
                             height_clim=(0.0, self._height_max_m),
-                            intensity_max=self._native_intensity_max(), metric=self._metric,
-                            vol_floor=self._native_vol_floor(),
+                            metric=self._metric, metric_range=self._native_metric_range(),
                             texture_cache=self._tex_cache)
         if cam is not None:  # keep the viewpoint across hour scrubs
             self._plotter.camera_position = cam

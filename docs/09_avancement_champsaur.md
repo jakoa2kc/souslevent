@@ -362,6 +362,8 @@ Risques corriges:
   nouvelle route relise une ancienne grille vitesse.
 - Parallele momentum par defaut trop agressif: retour a un defaut prudent
   `min(4, coeurs detectes)`, avec slider UI jusqu'a tous les coeurs pour benchmarks.
+  Note 2026-07-01: ce point est historique et supersede; le defaut courant redemande tous les
+  coeurs detectes, avec plafonnement par le nombre de taches et plan CPU explicite.
 - Compactage disque: les cases sans rotor clippe sont maintenant supprimees comme les autres
   (pas de conservation d'un OpenFOAM complet pour afficher "rien").
 - Artefact de bord: le clip 3D manuel garde son comportement protecteur, mais le mode auto
@@ -406,8 +408,9 @@ Realise:
 - `_compact_case` reste disponible uniquement en mode optionnel
   `compact_cases_during_run=True`, pas active par defaut.
 - Ajout de `cleanup_auto_artifacts(cache_dir)`: supprime les artefacts temporaires auto
-  (`NINJAFOAM_*`, `z*_run`, `z*.tif`, `z*_rotor.vtu`) sous `<cache>/auto`, en gardant les
-  DEM reutilisables et le cache Pass-1 `screening/`.
+  (`NINJAFOAM_*`, `z*_run`, `z*.tif`, `z*.vtu`) sous `<cache>/auto`, en gardant les DEM
+  reutilisables et le cache Pass-1 `screening/`. Le glob `z*.vtu` couvre aussi les volumes
+  par metrique et les sources re-analysables `*_source.vtu`.
 - `AutoWindow.closeEvent`: nettoyage a la fermeture; si un calcul est en cours, demande
   d'abord l'annulation et ne supprime pas sous les pieds d'OpenFOAM.
 - Le meme nettoyage reste appele au demarrage du prochain run auto pour reparer les
@@ -443,4 +446,85 @@ Realise:
 Verification:
 - Tests cibles `tests/test_pass2.py` -> `33 passed`.
 - Suite complete `.\.venv\Scripts\python.exe -m pytest -q` -> `86 passed`.
+- `git diff --check` OK (warnings LF/CRLF Windows seulement).
+
+### 2026-06-30 — `.sillage` re-analysable: seuils volume modifiables apres ouverture (Codex)
+
+Contexte:
+- Retour Claude: les volumes sauvegardes dans un `.sillage` sont figes au seuil par defaut de
+  chaque metrique. Changer "Seuil volume" apres reouverture ne peut pas re-extraire sans le case
+  OpenFOAM.
+
+Realise:
+- Ajout d'un format optionnel `.sillage` v2 **re-analysable**: un `source_XXX.vtu` par cas contient
+  la geometrie clippee utile + les scalaires derives (`along_flow`, `along_pct`, `w_ms`, `w_abs`,
+  `turb_rms`), sans garder tout OpenFOAM.
+- Le rendu auto prefere `source_path` quand present et re-seuille rotor/horizontal/vertical/turbulence
+  au seuil courant de l'IHM. Les anciens/compacts `.sillage` restent lisibles mais leurs seuils
+  restent figes.
+- La sauvegarde demande maintenant le type: re-analysable (plus lourd, seuils modifiables) ou compact
+  (plus leger, seuils figes).
+- Les dossiers de staging sauvegarde/ouverture (`sillage_save_*`, `sillage_open_*`) sont crees sous
+  le `tmp` configure du projet, pas dans le temp Windows global.
+- Estimation mesuree sur les sauvegardes existantes: re-analysable probablement ~2.5x a 6x la taille
+  compacte, bien moins que conserver les `NINJAFOAM_*` complets.
+
+Verification:
+- Tests cibles `tests/test_auto.py tests/test_pass2.py` -> `59 passed`.
+- Suite complete `.\.venv\Scripts\python.exe -m pytest -q` -> `93 passed`.
+- `git diff --check` OK (warnings LF/CRLF Windows seulement).
+
+### 2026-06-30 — Sliders de plages pour la visu 3D auto (Codex)
+
+Contexte:
+- Les controles 3D etaient encore des spinboxes generiques et certains parametres restaient visibles
+  alors qu'ils ne servaient pas pour la representation active.
+
+Realise:
+- Remplacement par des range sliders masques/affiches selon la representation:
+  rotor min/max, horizontale min/max, verticale avec deux plages degueulantes/ascendances,
+  turbulence min/max.
+- Les sliders pilotent le filtrage reel des cellules via `metric_range`, puis la couleur:
+  horizontal centre sur 0 (jaune pale), vertical avec gap calme masque, rotor/turbulence masques sous
+  le min et satures au-dessus du max.
+- Les `.sillage` v2 re-analysables re-seuillent depuis les scalaires sauvegardes; les anciens compacts
+  restent bornes par leurs volumes deja extraits.
+
+Verification:
+- Couvert par la suite complete du 2026-07-01 ci-dessous.
+
+### 2026-07-01 — Rattrapage consignation: defaut CPU + nettoyage `.vtu` auto (Codex)
+
+Contexte:
+- Les modifs etaient deja dans le code ou dans des docs techniques, mais pas assez clairement dans
+  ce fichier de passation: Claude pouvait encore lire l'ancien defaut `min(4, coeurs)`.
+
+Etat consigne:
+- Defaut courant du slider **Calculs simultanes**: tous les coeurs physiques detectes.
+- Le nombre effectif de calculs reste plafonne par le nombre de taches `domaines x heures`; le meme
+  `momentum_parallel_plan(...)` alimente la ligne **Plan CPU** et les logs de lancement.
+- Le nettoyage auto cible maintenant `z*.vtu`, pas seulement `z*_rotor.vtu`, pour couvrir volumes
+  compacts rotor/horizontal/vertical/turbulence et sources `.sillage` v2 re-analysables.
+- L'entree "Revue/consolidation mode auto" du 2026-06-26 est annotee comme historique pour eviter
+  de reprendre l'ancien defaut prudent par erreur.
+
+Verification:
+- Rattrapage documentation uniquement; comportement couvert par les tests du 2026-07-01:
+  auto/pass2 `60 passed`, suite complete `94 passed`.
+
+### 2026-07-01 — Option topo 1 m IGN dans le mode auto (Codex)
+
+Contexte:
+- Demande: ajouter 1 m dans les possibilites topo du premier onglet si les donnees sont disponibles
+  via IGN.
+
+Realise:
+- Combo topo auto: `1 m (IGN)`, `5 m`, `10 m`, `25 m`.
+- `prepare_dem_ign` garde maintenant le fetch natif ~1 m pour une cible 1 m; avant, le lissage etait
+  force a x2 et aurait ressorti une grille ~2 m.
+- Les configs sauvegardees/restaurees choisissent le preset topo le plus proche.
+
+Verification:
+- Tests cibles `tests/test_auto.py tests/test_pass2.py` -> `60 passed`.
+- Suite complete `.\.venv\Scripts\python.exe -m pytest -q` -> `94 passed`.
 - `git diff --check` OK (warnings LF/CRLF Windows seulement).

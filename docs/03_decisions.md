@@ -732,9 +732,10 @@ across runs until it filled the disk (observed: 107 cases ≈ 23 GB, machine dow
 **Decision.** Treat auto outputs as **temporary session artifacts**. During a normal UI run, keep the
 full OpenFOAM cases, run dirs and crop DEMs so the 3D view can render/debug directly and no extra
 VTK extraction step can destabilize the run. On **window close**, `cleanup_auto_artifacts(...)`
-deletes `NINJAFOAM_*`, `z*_run`, `z*.tif` and `z*_rotor.vtu` under `<cache>/auto`; the same cleanup
-runs at the start of the next auto run. Reusable DEMs (`dem_*.tif`) and the keyed Pass-1 `screening/`
-cache are kept.
+deletes `NINJAFOAM_*`, `z*_run`, `z*.tif` and `z*.vtu` under `<cache>/auto`; the same cleanup runs
+at the start of the next auto run. The `z*.vtu` glob covers compact per-metric lee volumes and
+re-analysable `*_source.vtu` files produced by optional compaction. Reusable DEMs (`dem_*.tif`) and
+the keyed Pass-1 `screening/` cache are kept.
 
 The previous compact-to-`.vtu` path remains available as `compact_cases_during_run=True` for a future
 low-disk mode, but it is **not the default**. The disk guard remains only as a last-resort protection
@@ -831,13 +832,14 @@ result directly, accepting the cost.
 **Decision.** Add `AutoConfig.domain_mode="corridor"` (`partition.corridor_tiles`): **no Pass-1** —
 lay a square momentum domain every `tile_step_m` of route arc length, half-size `tile_half_m`
 (default = corridor half-width, ≥ 900 m), `step ≤ 2·half` so tiles overlap (no gaps). Each tile is
-solved on tile+buffer at `target_res_m` (UI: 5/10/25 m) with local AROME-HD wind, clipped to the
+solved on tile+buffer at `target_res_m` (UI: 1/5/10/25 m, 1 m only meaningful under IGN HIGHRES
+coverage) with local AROME-HD wind, clipped to the
 tile. UI: a "Pavage aveugle" checkbox + sector step + topo resolution; the CPU plan estimates the
 sector count from route length / step. `domain_mode="features"` keeps ADR-0023.
 
 **Consequences.** Full route coverage, trivially parallel (more, smaller solves — good for OpenFOAM
 threading). **Accepts the limits we documented:** independent tiles don't match at seams, and a tile
-can't be smaller than ~lee+buffer, so rotors straddling a tile may be split. 5 m topo over a long
+can't be smaller than ~lee+buffer, so rotors straddling a tile may be split. 1/5 m topo over a long
 corridor is a heavy IGN fetch → use short routes first. This is a deliberate cost/quality trade for
 guaranteed coverage; the feature-based mode remains the physically-cleaner default.
 
@@ -862,14 +864,17 @@ recomputing, but the full OpenFOAM field is far too big to keep.
 **each segment independently**, so the gaps between segments are never computed. `route_latlon`
 stays the flattened route (DEM extent + wind). (2) `auto.store` saves a run as a single
 **`.sillage` zip**: `manifest.json` (config, route segments, hours + absolute-date labels, per-case
-wind/aoi metadata) + `dem.tif` + one **clipped rotor `.vtu` per case** — i.e. only the reversed-flow
-lee meshes, never the full mesh field. `load_result` extracts to a temp dir and rebuilds an
-`AutoResult` whose cases point at the bundled `.vtu`, so the 3D scene redraws with no solve.
+wind/aoi metadata) + `dem.tif` + either compact per-metric `.vtu` volumes or, in v2
+**re-analysable** mode, one `source_XXX.vtu` per case (clipped geometry + derived lee scalars,
+not the full OpenFOAM case). `load_result` extracts to a temp dir and rebuilds an `AutoResult`
+whose cases point at the bundled source/volumes, so the 3D scene redraws with no solve.
 
 **Consequences.** Disjoint corridors skip transition zones (less compute, the pilot's intent). A
-result file is small (lee meshes only) and portable; reopening restores the wake, route, per-day
-hour labels and parameters. Saved labels are kept so a reopened result shows its **run day**, not
-today. The bundle omits the full field, so it can't be re-solved at higher mesh — recompute for that.
+result file is portable; reopening restores the wake, route, per-day hour labels and parameters.
+Saved labels are kept so a reopened result shows its **run day**, not today. Compact bundles are
+small but volume thresholds are fixed at save-time. Re-analysable bundles are larger (roughly
+2.5×–6× on observed files) but can re-threshold metrics after reopening. Both omit the full
+OpenFOAM field, so higher mesh still requires recompute.
 
 ---
 
@@ -894,9 +899,40 @@ upstream wind, so equal turbulence read differently per domain. The absolute rms
 comparable across domains regardless of wind. (Remaining inter-domain differences are then the
 *physical* ones — independent RANS solves have genuinely different k at the seams; ADR-0029.)
 
-**Persistence.** `CaseResult.vtu_paths` is a `{metric: .vtu}` dict; `extract_case_volumes` reads a
-case ONCE and writes every non-empty volume, so a reopened `.sillage` supports all four views (at the
-save-time floors). Bigger bundles than rotor-only — the cost of full reopenable analysis.
+**Persistence.** `CaseResult.vtu_paths` is a `{metric: .vtu}` dict for compact bundles;
+`CaseResult.source_path` points at a threshold-independent `source_XXX.vtu` for re-analysable
+bundles. `extract_case_volumes` writes every non-empty volume for compact reopen; `extract_case_source`
+writes clipped geometry + `along_flow`, `along_pct`, `w_ms`, `w_abs`, `turb_rms` so a reopened
+`.sillage` can rebuild metric volumes at new floors without the OpenFOAM case.
+
+---
+
+## ADR-0032 — Continuous rendering across sectors: feathered weighted-average blend
+
+**Status.** Accepted (2026-06-29), replaces the nearest-sector (winner-take-all) display of ADR-0029.
+
+**Context.** Independent momentum solves have different wind BCs + turbulence per sub-domain, so the
+coloured value jumps at the sector boundary. Nearest-sector display made that a hard **diagonal
+vertical plane** (the perpendicular bisector between two sector centres). The pilot wants a smooth
+transition — a weighted average of the overlapping sectors.
+
+**Decision.** Keep drawing each space point **once** (nearest sector centre → no alpha-stacking), but
+colour each drawn cell by a **distance-weighted average of the metric's field across all overlapping
+sectors** (`auto.scene.populate_auto_scene`). Per cell at `p`, weight from sector `j` is a feather
+`(1 − clamp(‖p−centre_j‖ / half_j, 0, 1))²` (1 at the sector centre, 0 at its edge), counted only
+where `p` is actually covered by `j` (nearest-cell distance ≤ a few cell sizes). The blended value is
+`Σ w_j v_j / Σ w_j`. Both sides of a boundary compute the same blend, so the seam disappears while
+each point is still drawn once. Blended draws are cached per `(zone, hour, metric, floor)`.
+
+**Consequences.** Continuous colour across sectors, no alpha-stacking. From the **audit** of other
+inter-zone value sources: (1) **fixed** — the horizontal metric's `along_pct` is now normalised by the
+hour's **global** wind (median of the sectors' upstream winds), so the % means the same in every zone
+(threshold + colour on the live path; colour on reopened bundles). (2) **known, offered** —
+`_clip_domain_boundary` cuts the top `lid_frac` of *each* mesh's height, so the volume top sits at a
+different absolute altitude per zone (a horizontal-extent step, not the diagonal seam); a fixed
+AGL/absolute lid would remove it. Colour scale (`intensity_max`, `metric_range`), `vol_floor` and
+`height_clim` are all shared across sectors, so they are **not** a source of the differences. The
+dominant remaining cause is physical: independent RANS solves with per-zone wind BCs.
 
 ---
 
