@@ -928,7 +928,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pass2_view = None      # (case_dir, wind_spd, wind_dir, crs, aoi_bounds)
         self._p2_metric = "rotor"
         self._p2_opacity = 0.5
-        self._p2_height_max_m = 300.0
         self._p2_scale_max = {"rotor": 15.0, "horizontal": 100.0, "vertical": 3.0, "turbulence": 3.0}
         self._p2_vol_floor = {"horizontal": 50.0, "vertical": 1.0, "turbulence": 1.0}
         ctl = QtWidgets.QHBoxLayout()
@@ -963,32 +962,35 @@ class MainWindow(QtWidgets.QMainWindow):
         return self._p2_vol_floor.get(self._p2_metric, 0.0)
 
     def _p2_legend_image(self):
-        from ..viz.volume3d import diverging_legend_image, rotor_legend_image
+        # Same builders + colormaps as _add_rotor and the auto app, so the legend matches the render
+        # (1-D intensity ramp for rotor/turbulence; diverging red→yellow→green for horiz/vertical).
+        from ..viz.volume3d import (
+            _rotor_intensity_cmap,
+            _vertical_motion_cmap,
+            _wind_balance_cmap,
+            range_legend_image,
+        )
 
         m, vmax = self._p2_metric, self._p2_scale_max[self._p2_metric]
         if m == "rotor":
-            return rotor_legend_image(self._p2_height_max_m, vmax, ylabel="Intensité (km/h)",
-                                      title="Rotor : hauteur × intensité")
+            return range_legend_image(0.0, vmax, _rotor_intensity_cmap(), "Intensité rotor (km/h)",
+                                      "Sous min masqué · au-dessus = max")
         if m == "turbulence":
-            return rotor_legend_image(self._p2_height_max_m, vmax, ylabel="Turbulence rms (m/s)",
-                                      title="Turbulence : hauteur × rms")
+            return range_legend_image(0.0, vmax, _rotor_intensity_cmap(), "Turbulence rms (m/s)",
+                                      "Sous min masqué · au-dessus = max")
         if m == "horizontal":
-            return diverging_legend_image(vmax, "RdBu", "Vit. horizontale (% vent)",
-                                          "Rouge = rotor · bleu = plein vent")
-        return diverging_legend_image(vmax, "RdYlGn", "Vit. verticale (m/s)",
-                                      "Vert = ascendance · rouge = dégueulante")
+            return range_legend_image(-vmax, vmax, _wind_balance_cmap(), "Vit. horizontale (% vent)",
+                                      "Rouge · jaune = 0 · vert", center=0.0)
+        return range_legend_image(-vmax, vmax, _vertical_motion_cmap(), "Vit. verticale (m/s)",
+                                  "Rouge · jaune pâle = 0 · vert", center=0.0)
 
     def _update_p2_legends(self) -> None:
         try:
-            from PySide6.QtGui import QImage, QPixmap
-
             from ..viz.volume3d import wind_legend_image
+            from .qt_image import set_label_image
 
-            for label, buf in ((self.p2_rotor_legend, self._p2_legend_image()),
-                               (self.p2_wind_legend, wind_legend_image())):
-                h, w = buf.shape[:2]
-                img = QImage(bytes(buf.data), w, h, 4 * w, QImage.Format_RGBA8888)
-                label.setPixmap(QPixmap.fromImage(img))
+            set_label_image(self.p2_rotor_legend, self._p2_legend_image())
+            set_label_image(self.p2_wind_legend, wind_legend_image())
         except Exception:
             pass
 
@@ -999,17 +1001,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_p2_opacity_change(self, val: int) -> None:
         self._p2_opacity = max(0.02, val / 100.0)
-        actors = getattr(self.plotter, "_rotor_actors", None) if self.plotter is not None else None
-        if actors:  # live actor-level update, no rebuild
-            for a in actors:
-                try:
-                    a.GetProperty().SetOpacity(self._p2_opacity)
-                except Exception:
-                    pass
-            try:
-                self.plotter.render()
-            except Exception:
-                pass
+        if self.plotter is not None:  # live actor-level update, no rebuild
+            from ..viz.volume3d import set_rotor_opacity
+            set_rotor_opacity(self.plotter, self._p2_opacity)
 
     def _render_pass2_3d(self) -> None:
         if self._pass2_view is None or not self._ensure_plotter():
@@ -1023,8 +1017,7 @@ class MainWindow(QtWidgets.QMainWindow):
             crs=crs, basemap_source=self.basemap_combo.currentText(),
             wind_speed_ms=wind_spd, wind_from_deg=wind_dir, aoi_bounds=aoi_bounds,
             zoom_boost=2, opacity=self._p2_opacity,
-            intensity_max=self._p2_native_intensity_max(),
-            height_clim=(0.0, self._p2_height_max_m))
+            intensity_max=self._p2_native_intensity_max())
         if cam is not None:
             self.plotter.camera_position = cam
         else:

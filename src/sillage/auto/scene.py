@@ -20,7 +20,7 @@ def extract_volume(case_dir: str, wind_from_deg: float, aoi_bounds, *, metric: s
 
     Every volume carries ALL the cell scalars so ``_add_rotor`` can colour by any field without
     re-reading: ``along_flow`` (m/s), ``along_pct`` (% of upstream wind, signed: −100 reversal →
-    +100 free-stream), ``w_ms`` (vertical velocity, signed), ``turb_intensity`` (√(2k/3)/U_ref).
+    +100 free-stream), ``w_ms`` (vertical velocity, signed), ``turb_rms`` = √(2k/3) [m/s].
     Returns ``None`` if empty/unavailable. ``vol_floor`` is in the metric's native unit.
 
     Thin wrapper over ``viz.volume3d.extract_lee_volume`` (shared with the manual app)."""
@@ -75,9 +75,9 @@ def _add_domain_box(plotter, terrain, aoi_bounds, color: str = "#10c0ff") -> Non
 
 def populate_auto_scene(plotter, dem, cases, crs=None, basemap_source: str = "IGN plan",
                         route_winds=None, basemap_zoom_boost: int = 2, rotor_cache=None,
-                        rotor_opacity: float = 0.5, height_clim=None, intensity_max=None,
+                        rotor_opacity: float = 0.5, intensity_max=None,
                         metric: str = "rotor", vol_floor: float = 0.20, texture_cache=None,
-                        metric_range=None):
+                        metric_range=None, terrain_cache=None):
     """Add the global wake scene for one hour to ``plotter``.
 
     ``dem`` is the full fine zone DEM (terrain), ``cases`` the :class:`auto.pipeline.CaseResult`
@@ -88,7 +88,13 @@ def populate_auto_scene(plotter, dem, cases, crs=None, basemap_source: str = "IG
     caller sets the camera (no view reset here)."""
     from ..viz import volume3d as v3
 
-    terrain = v3._terrain_mesh(dem)
+    # The terrain StructuredGrid is geometry-only (independent of hour/metric/opacity); building it
+    # from a fine corridor DEM is costly, so reuse it across scrubs when a cache dict is provided.
+    terrain = terrain_cache.get(id(dem)) if terrain_cache is not None else None
+    if terrain is None:
+        terrain = v3._terrain_mesh(dem)
+        if terrain_cache is not None:
+            terrain_cache[id(dem)] = terrain
     if not (crs is not None
             and v3._drape_basemap(plotter, terrain, crs, basemap_source, basemap_zoom_boost,
                                   texture_cache=texture_cache)):
@@ -114,57 +120,70 @@ def populate_auto_scene(plotter, dem, cases, crs=None, basemap_source: str = "IG
     centers = np.array([[(c.aoi_bounds[0] + c.aoi_bounds[1]) / 2.0,
                          (c.aoi_bounds[2] + c.aoi_bounds[3]) / 2.0] for c in cases]) \
         if cases else np.zeros((0, 2))
-    ctree = cKDTree(centers) if (cKDTree is not None and len(centers) > 1) else None
 
     range_key = tuple(sorted((k, round(float(v), 3)) for k, v in (metric_range or {}).items()))
     floor_key = range_key or (round(float(vol_floor), 3) if metric != "rotor" else 0)
 
     # Global reference wind for THIS hour (median of the sectors' upstream winds): the horizontal
     # metric shows the along-wind speed as a % of THIS single wind, so both the threshold and the
-    # colour mean the same thing in every sector (instead of each zone's own wind).
+    # colour mean the same thing in every sector (instead of each zone's own wind) — on EVERY path
+    # (live, saved source, compact). global_wind is deterministic per hour (cases fixed), so it need
+    # not enter the cache key as long as the caller always renders the whole hour (it does).
     winds = [float(c.wind_speed_ms) for c in cases if getattr(c, "wind_speed_ms", 0)]
     global_wind = max(float(np.median(winds)) if winds else 1.0, 0.1)
+
+    def _global_horizontal(mesh):
+        """Express along_pct as % of the hour's GLOBAL wind (not each zone's own), so threshold AND
+        colour are comparable across sectors regardless of which path produced the mesh."""
+        if metric == "horizontal" and mesh is not None and "along_flow" in mesh.array_names:
+            mesh["along_pct"] = np.asarray(mesh["along_flow"], dtype="float64") / global_wind * 100.0
+        return mesh
+
+    def _source_for(case):
+        """The threshold-independent lee source for a case, cached in RAM: read from a saved
+        ``source_path`` or by reading the OpenFOAM case ONCE. Re-thresholding on metric/floor change
+        is then instant (no OpenFOAM re-read per metric)."""
+        skey = (case.zone_index, case.hour, "source", 0)
+        src = rotor_cache.get(skey) if rotor_cache is not None else None
+        if src is None:
+            try:
+                sp = getattr(case, "source_path", "")
+                if sp:
+                    import pyvista as pv
+                    src = pv.read(sp)
+                elif case.case_dir:
+                    src = extract_case_source(case.case_dir, case.wind_from_deg, case.aoi_bounds,
+                                              ref_speed_ms=case.wind_speed_ms)
+            except Exception:
+                src = None
+            if src is not None and rotor_cache is not None:
+                rotor_cache[skey] = src
+        return src
 
     def _rev_for(case):
         key = (case.zone_index, case.hour, metric, floor_key)
         rev = rotor_cache.get(key) if rotor_cache is not None else None
         if rev is not None:
             return rev
-        source_path = getattr(case, "source_path", "")
-        if source_path:  # re-analysable .sillage: threshold the saved source at the live floor
+        src = _source_for(case)  # live case (read once) OR saved re-analysable source
+        if src is not None:
             try:
-                import pyvista as pv
-
-                source_key = (case.zone_index, case.hour, "source", 0)
-                source = rotor_cache.get(source_key) if rotor_cache is not None else None
-                if source is None:
-                    source = pv.read(source_path)
-                    if rotor_cache is not None:
-                        rotor_cache[source_key] = source
-                rev = v3.threshold_lee_source(source, metric=metric, vol_floor=vol_floor,
-                                              metric_range=metric_range)
+                rev = v3.threshold_lee_source(_global_horizontal(src), metric=metric,
+                                              vol_floor=vol_floor, metric_range=metric_range)
             except Exception:
                 rev = None
-        path = getattr(case, "vtu_paths", {}).get(metric, "")
-        if rev is None and path:  # compact .sillage: read the persisted volume for this metric
-            try:
-                import pyvista as pv
+        if rev is None:  # compact .sillage: a pre-thresholded per-metric volume (can only narrow)
+            path = getattr(case, "vtu_paths", {}).get(metric, "")
+            if path:
+                try:
+                    import pyvista as pv
 
-                rev = pv.read(path)
-                if metric_range:
-                    rev = v3.threshold_lee_source(rev, metric=metric, vol_floor=vol_floor,
-                                                  metric_range=metric_range)
-            except Exception:
-                rev = None
-        if rev is None and case.case_dir:  # not compacted: extract from the OpenFOAM case
-            # horizontal % uses the GLOBAL hour wind so threshold + colour are comparable per zone
-            ref = global_wind if metric == "horizontal" else case.wind_speed_ms
-            try:
-                rev = extract_volume(case.case_dir, case.wind_from_deg, case.aoi_bounds,
-                                     metric=metric, ref_speed_ms=ref,
-                                     vol_floor=vol_floor, metric_range=metric_range)
-            except Exception:
-                rev = None  # a missing/failed case shouldn't blank the whole scene
+                    rev = _global_horizontal(pv.read(path))
+                    if metric_range:
+                        rev = v3.threshold_lee_source(rev, metric=metric, vol_floor=vol_floor,
+                                                      metric_range=metric_range)
+                except Exception:
+                    rev = None  # a missing/failed case shouldn't blank the whole scene
         if rotor_cache is not None and rev is not None:
             rotor_cache[key] = rev
         return rev
@@ -176,8 +195,6 @@ def populate_auto_scene(plotter, dem, cases, crs=None, basemap_source: str = "IG
         if rev is None or not rev.n_cells or cKDTree is None:
             sectors.append(None)
             continue
-        if metric == "horizontal" and "along_flow" in rev.array_names:  # re-% to the global wind
-            rev["along_pct"] = np.asarray(rev["along_flow"], dtype="float64") / global_wind * 100.0
         cc = np.asarray(rev.cell_centers().points)[:, :2]
         fld = rev.cell_data.get(field_name)
         half = max((case.aoi_bounds[1] - case.aoi_bounds[0]) / 2.0,
@@ -197,6 +214,11 @@ def populate_auto_scene(plotter, dem, cases, crs=None, basemap_source: str = "IG
                       and abs(s["center"][0] - t["center"][0]) < s["half"] + t["half"]
                       and abs(s["center"][1] - t["center"][1]) < s["half"] + t["half"]]
 
+    # Ownership tree over LIVE sectors only: a failed/empty sector must not "own" (and thus blank)
+    # overlap cells a valid neighbour could draw. Query indices map back to sector ids via `live`.
+    live = np.array([i for i, s in enumerate(sectors) if s is not None], dtype=int)
+    owntree = cKDTree(centers[live]) if (cKDTree is not None and len(live) > 1) else None
+
     def _blend(pts, i):
         wsum = np.zeros(len(pts))
         vsum = np.zeros(len(pts))
@@ -204,10 +226,14 @@ def populate_auto_scene(plotter, dem, cases, crs=None, basemap_source: str = "IG
             t = sectors[j]
             if t is None or t["fvals"] is None:
                 continue
-            d, idx = t["tree"].query(pts)
+            # distance_upper_bound lets the tree prune points outside the overlap band early; beyond
+            # it, query returns d=inf and idx=n_cells (out of range) → clamp idx before indexing.
+            d, idx = t["tree"].query(pts, distance_upper_bound=t["cover"])
+            covered = np.isfinite(d)
+            idx = np.where(covered, idx, 0)
             dc = np.hypot(pts[:, 0] - t["center"][0], pts[:, 1] - t["center"][1])
             w = np.clip(1.0 - np.clip(dc / t["half"], 0.0, 1.0), 0.0, 1.0) ** 2  # feather to edge
-            w = np.where(d <= t["cover"], w, 0.0)                                # only where covered
+            w = np.where(covered, w, 0.0)                                        # only where covered
             vsum += w * t["fvals"][idx]
             wsum += w
         return wsum, vsum
@@ -220,7 +246,7 @@ def populate_auto_scene(plotter, dem, cases, crs=None, basemap_source: str = "IG
         s = sectors[i]
         if s is None:
             continue
-        owned = (np.nonzero(ctree.query(s["cc"])[1] == i)[0] if ctree is not None
+        owned = (np.nonzero(live[owntree.query(s["cc"])[1]] == i)[0] if owntree is not None
                  else np.arange(len(s["cc"])))
         if not len(owned):
             continue
@@ -236,8 +262,8 @@ def populate_auto_scene(plotter, dem, cases, crs=None, basemap_source: str = "IG
             if rotor_cache is not None:
                 rotor_cache[bkey] = draw
         if draw.n_cells:
-            actor = v3._add_rotor(plotter, draw, terrain, show_legend=False, opacity=rotor_opacity,
-                                  clim=height_clim, intensity_max=intensity_max, metric=metric,
+            actor = v3._add_rotor(plotter, draw, terrain, opacity=rotor_opacity,
+                                  intensity_max=intensity_max, metric=metric,
                                   metric_range=metric_range)
             if actor is not None:
                 rotor_actors.append(actor)

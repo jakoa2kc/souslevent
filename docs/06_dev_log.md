@@ -1655,6 +1655,59 @@ solves with per-zone wind BCs.
 
 ---
 
+## Entry 66 — Code-review fix batch (correctness + cleanup + efficiency)  (2026-07-02)
+
+An xhigh multi-agent review of `46e55ee..HEAD` (10 finder angles → verify → sweep) surfaced 15
+findings + cleanup/efficiency items. All addressed:
+
+**Correctness.**
+- **AROME hour alignment** (`auto/wind.py`): `_parse_arome_hd` dropped all-null hours, so positional
+  indexing fed the **wrong hour's wind** to the solver BC (`local_wind_provider`) and the arrows.
+  Now aligned to the `time` array with `(t, None, None)` placeholders + a `_series_at` helper that
+  skips nulls / clamps to the horizon.
+- **Horizontal % on saved bundles** (`auto/scene.py`): threshold used per-zone `along_pct` while the
+  colour used the hour's global wind → per-sector seams on reopen. Now `_global_horizontal` re-bases
+  `along_pct` to the global wind on EVERY path (live/source/compact) before threshold + colour.
+- **`.sillage` save/load**: re-saving a reopened source-only bundle as compact wrote **zero meshes**
+  (silent data loss) → now derives compact volumes from the source (or copies it). Old
+  `rotor_file`/`turb_file` bundles now load (back-compat in `load_result`).
+- **Run start** (`auto/window.py`): a new run's cleanup deletes the previous result's case dirs →
+  the displayed result is now invalidated (save/scrub disabled) so nothing reads deleted paths.
+- **Restored winds** (`auto/window.py`): opening a bundle no longer lets the `margin_spin.setValue`
+  chain or a stale in-flight fetch overwrite the run's saved winds with today's (`_restoring` flag +
+  `_route_gen` token).
+- **Manual app**: opacity slider was a no-op (`populate_plotter` never published `_rotor_actors`) —
+  fixed; legends now match the actual 1-D ramps/cmaps (were 2-D height×intensity + RdBu).
+- **Legacy turbulence** (`viz/volume3d.populate_plotter`): coloured by a missing `turb_rms` (all
+  zeros) → now computes it.
+- **De-striping** (`terrain/acquire.py`): the `if avg_factor>1` guard skipped block-averaging on
+  tile-capped large zones → striping in the DEM; keyed the skip on `target_res_m` (~1 m native) instead.
+- **QImage use-after-free**: legends built a `QImage` over a freed temporary buffer → shared
+  `app/qt_image.set_label_image` with `.copy()`.
+- **Others**: dead sector no longer "owns" (blanks) overlap cells; `corridor_tiles` clamps pixel
+  windows (no negative-index wrap north/west of the DEM); `CaseResult` is `eq=False` (a frozen
+  dataclass with a dict field was unhashable); `SolveJob.shutdown()` stops a blocked wind fetch at
+  close (no more freeze/click-twice); WindNinja cancel is polled during silent phases and kills the
+  **process tree** (orphaned OpenFOAM children); `_safe_p95` guards all-NaN colour scales; leaked
+  `sillage_open_*` dirs are swept on open.
+
+**Cleanup / efficiency.** Read each OpenFOAM case ONCE per hour (cached lee source, re-thresholded in
+ms on metric/floor change) instead of per (metric, floor); cache the terrain mesh across scrubs;
+prune the blend KDTree with `distance_upper_bound`; reset `_tex_cache`/`_terrain_cache` per result;
+debounce the range-slider legend; drop `cell_centers()` waste in `_add_rotor`; remove dead
+`clim`/`height_clim`/`show_legend`/`rotor_legend_image`/`diverging_legend_image`/`DIVERGING`/warm+cool
+cmaps; shared `_fig_to_rgba`, `set_rotor_opacity`, `set_label_image`; `bbox_from_route` reuses
+`_expand_bbox` (one km/deg constant). CLAUDE.md network-module convention made honest (auto/wind.py,
+basemap fetch).
+
+**Deferred (documented, low value / higher risk):** unifying the two windows' metric/scale/legend
+model into one class; the two polyline resamplers; `save_result` zip-streaming (double I/O); the
+per-zone lid (kept on purpose — a fixed AGL lid over-cuts given large inter-zone height differences).
+
+**Result.** `pytest -q` → **94 passed**; both apps import clean.
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

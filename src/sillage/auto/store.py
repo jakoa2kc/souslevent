@@ -101,6 +101,32 @@ def save_result(zip_path, result, *, cfg, hour_labels: dict, route_cells=None,
                         files[metric] = vtu
                 except Exception:
                     pass
+            if not source_file and not files:
+                # No case_dir and no persisted volumes, but a re-analysable source exists (e.g. a
+                # reopened v2 bundle re-saved as compact): derive the compact metric volumes from the
+                # source so we NEVER write a case with zero meshes (silent data loss). If even that
+                # fails, copy the source itself so nothing is lost.
+                src = getattr(c, "source_path", "")
+                if src and Path(src).exists():
+                    try:
+                        import pyvista as pv
+
+                        from ..viz import volume3d as v3
+
+                        source = pv.read(src)
+                        for metric in v3.LEE_METRICS:
+                            vol = v3.threshold_lee_source(
+                                source, metric=metric,
+                                vol_floor=v3.DEFAULT_VOL_FLOORS.get(metric, 0.0))
+                            if vol is not None and vol.n_cells:
+                                vtu = f"{metric}_{i:03d}.vtu"
+                                vol.save(str(tmp / vtu))
+                                files[metric] = vtu
+                    except Exception:
+                        files = {}
+                    if not files:  # last resort: keep the source so the case is not lost
+                        source_file = f"source_{i:03d}.vtu"
+                        shutil.copyfile(src, tmp / source_file)
             cases_meta.append({
                 "zone_index": c.zone_index, "hour": c.hour,
                 "wind_speed_ms": c.wind_speed_ms, "wind_from_deg": c.wind_from_deg,
@@ -161,12 +187,24 @@ def load_result(zip_path, dest_dir) -> LoadedResult:
         raise ValueError("Fichier non reconnu (format Sillage attendu).")
 
     crs = CRS.from_wkt(manifest["crs"]) if manifest.get("crs") else None
+
+    def _vtu_files(m: dict) -> dict:
+        vf = m.get("vtu_files")
+        if vf:
+            return vf
+        legacy = {}  # bundles from the intermediate build stored per-metric rotor_file / turb_file
+        if m.get("rotor_file"):
+            legacy["rotor"] = m["rotor_file"]
+        if m.get("turb_file"):
+            legacy["turbulence"] = m["turb_file"]
+        return legacy
+
     cases = [
         CaseResult(
             zone_index=int(m["zone_index"]), hour=int(m["hour"]), case_dir="",
             wind_speed_ms=float(m["wind_speed_ms"]), wind_from_deg=float(m["wind_from_deg"]),
             crs=crs, aoi_bounds=tuple(m["aoi_bounds"]), elapsed_s=float(m.get("elapsed_s", 0.0)),
-            vtu_paths={metric: str(dest / fn) for metric, fn in m.get("vtu_files", {}).items()},
+            vtu_paths={metric: str(dest / fn) for metric, fn in _vtu_files(m).items()},
             source_path=str(dest / m["source_file"]) if m.get("source_file") else "",
         )
         for m in manifest["cases"]

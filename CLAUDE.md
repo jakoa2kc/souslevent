@@ -128,6 +128,10 @@ disk-safe case handling, a time slider over absolute dates, rotor **and** turbul
 
 - Wind direction follows the **meteorological convention**: the direction the wind
   comes *from*, in degrees, 0° = North. (Same as WindNinja.)
-- All internal lengths in **meters**, speeds in **m/s**. Convert at the edges only.
-- Functions that shell out to WindNinja or hit a network API are isolated in
-  `flow/windninja.py` and `wind/forecast.py` so they are easy to mock in tests.
+- All internal lengths in **meters**, speeds in **m/s**. Convert at the edges only. (Display-edge
+  helpers may take km/h — e.g. `viz.volume3d.wind_color(speed_kmh)` — since km/h is the shown unit.)
+- Functions that shell out to WindNinja or hit a network API live in a small set of clearly-named
+  modules so they are easy to mock: `flow/windninja.py` (solver), `wind/forecast.py` +
+  `wind/meteofrance.py` (forecast APIs), `auto/wind.py` (AROME-HD local/route wind, ADR-0031-era),
+  and the basemap tile fetch in `viz/volume3d._drape_basemap` (contextily). Keep new network calls
+  inside these; don't scatter them.

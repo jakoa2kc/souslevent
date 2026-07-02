@@ -177,8 +177,13 @@ def corridor_tiles(
     zones: list[SubZone] = []
     for cx, cy in _resample_polyline(list(route_xy), max(50.0, step_m)):
         bbox = (cx - half_m, cy - half_m, cx + half_m, cy + half_m)
-        pr0, pr1 = max(0, int((top - (cy + half_m)) / res)), min(h_px, int((top - (cy - half_m)) / res))
-        pc0, pc1 = max(0, int((cx - half_m - left) / res)), min(w_px, int((cx + half_m - left) / res))
+        # Clamp BOTH ends to the DEM (0..dim). A tile north/west of the DEM otherwise yields a
+        # negative index (e.g. cy-half_m > top) → elev[pr0:pr1] wraps to a huge wrong window instead
+        # of an empty one, silently mixing far-away terrain into the tile's crest/relief.
+        pr0 = min(max(0, int((top - (cy + half_m)) / res)), h_px)
+        pr1 = min(max(0, int((top - (cy - half_m)) / res)), h_px)
+        pc0 = min(max(0, int((cx - half_m - left) / res)), w_px)
+        pc1 = min(max(0, int((cx + half_m - left) / res)), w_px)
         dsub = elev[pr0:pr1, pc0:pc1]
         dfin = dsub[np.isfinite(dsub)]
         zones.append(SubZone(

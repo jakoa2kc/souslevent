@@ -151,6 +151,20 @@ def _run(cmd, cwd, dry_run, on_progress=None, cancel=None, tmp_dir=None):
     et = threading.Thread(target=_drain_err, daemon=True)
     et.start()
 
+    # Watcher: poll cancel() even during SILENT phases (NinjaFOAM meshing/iterating writes to log
+    # files, not stdout, so the readline loop below would never notice a cancel until the next line).
+    stop_watch = threading.Event()
+
+    def _watch_cancel():
+        while not stop_watch.wait(0.4):
+            if cancel is not None and cancel():
+                _terminate_tree(popen)
+                return
+
+    wt = threading.Thread(target=_watch_cancel, daemon=True)
+    if cancel is not None:
+        wt.start()
+
     out_chunks: list[str] = []
     cancelled = False
     last_pct = 0
@@ -167,19 +181,39 @@ def _run(cmd, cwd, dry_run, on_progress=None, cancel=None, tmp_dir=None):
                 on_progress(last_pct, line.strip())
         if cancel is not None and cancel():
             cancelled = True
-            popen.terminate()
-            try:
-                popen.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                popen.kill()
+            _terminate_tree(popen)
             break
 
+    stop_watch.set()
+    if cancel is not None:
+        wt.join(timeout=1)
     rc = popen.wait()
     et.join(timeout=2)
+    if cancel is not None and cancel():
+        cancelled = True
     err = "".join(err_chunks)
     if cancelled:
         err = (err + "\n[cancelled by user]").strip()
     return rc, "".join(out_chunks), err
+
+
+def _terminate_tree(popen) -> None:
+    """Kill the WindNinja process AND its children. WindNinja spawns the OpenFOAM (NinjaFOAM)
+    solvers as child processes; a plain ``terminate()`` kills only the parent on Windows, orphaning
+    the solvers so they keep burning every allocated core and writing case files that the next run's
+    cleanup then races with."""
+    try:
+        if os.name == "nt":  # /T = whole tree, /F = force
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(popen.pid)],
+                           capture_output=True, timeout=10)
+        else:
+            popen.terminate()
+        popen.wait(timeout=5)
+    except Exception:
+        try:
+            popen.kill()
+        except Exception:
+            pass
 
 
 def run_mass(

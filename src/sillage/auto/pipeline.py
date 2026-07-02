@@ -158,11 +158,8 @@ def bbox_from_route(route_latlon, margin_km: float):
         raise ValueError("route vide")
     lats = [p[0] for p in route_latlon]
     lons = [p[1] for p in route_latlon]
-    s, n = min(lats), max(lats)
-    w, e = min(lons), max(lons)
-    dlat = margin_km / 111.0
-    dlon = margin_km / (111.0 * max(0.05, math.cos(math.radians((s + n) / 2.0))))
-    return (s - dlat, w - dlon, n + dlat, e + dlon)
+    # reuse the single km-per-degree expansion (accurate 111.32) instead of a second 111.0 copy
+    return _expand_bbox((min(lats), min(lons), max(lats), max(lons)), margin_km * 1000.0)
 
 
 def detect_cores(fallback: int = 14) -> int:
@@ -259,9 +256,13 @@ class AutoConfig:
     wind_source: str = "open_meteo"                 # "arome" falls back to Open-Meteo for now
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class CaseResult:
-    """One solved (feature, hour): the OpenFOAM case + the wind + the zone bounds to clip to."""
+    """One solved (feature, hour): the OpenFOAM case + the wind + the zone bounds to clip to.
+
+    ``eq=False`` (identity equality/hash): a frozen dataclass with value-eq would auto-generate
+    ``__hash__`` over all fields — including the mutable ``vtu_paths`` dict — which raises
+    ``TypeError: unhashable type: dict`` the moment an instance is hashed (set/dict key)."""
 
     zone_index: int
     hour: int

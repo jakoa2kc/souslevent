@@ -320,24 +320,15 @@ def wind_color(speed_kmh: float) -> str:
 
 def wind_legend_image(vmax: float = WIND_VMAX_KMH, n: int = 256):
     """Horizontal continuous wind-speed colourbar (0→``vmax`` km/h) as an RGBA uint8 array."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
     grad = _wind_cmap()(np.linspace(0.0, 1.0, n))[:, :3]
     img = np.tile(grad[None, :, :], (8, 1, 1))
-    fig = plt.figure(figsize=(2.5, 0.8), dpi=100)
+    fig = _agg_pyplot().figure(figsize=(2.5, 0.8), dpi=100)
     ax = fig.add_axes([0.08, 0.42, 0.88, 0.30])
     ax.imshow(img, origin="lower", aspect="auto", extent=[0.0, float(vmax), 0.0, 1.0])
     ax.set_yticks([])
     ax.set_xlabel("Vent (km/h)", fontsize=8)
     ax.tick_params(labelsize=7)
-    fig.canvas.draw()
-    w, h = fig.canvas.get_width_height()
-    buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4).copy()
-    plt.close(fig)
-    return buf
+    return _fig_to_rgba(fig)
 
 
 def _add_wind_arrows_3d(plotter, terrain, winds):
@@ -463,22 +454,10 @@ def populate_pass1_3d(plotter, dem, hazard=None, winds=None, crs=None,
     return plotter
 
 
-def _rotor_warm_cmap():
-    from matplotlib.colors import LinearSegmentedColormap
-
-    return LinearSegmentedColormap.from_list("rotor_warm", ["#ffff00", "#ff8c00", "#7a00b0"])
-
-
 def _rotor_intensity_cmap():
     from matplotlib.colors import LinearSegmentedColormap
 
     return LinearSegmentedColormap.from_list("rotor_intensity", ["#ffff66", "#ff8c00", "#7a00b0"])
-
-
-def _rotor_cool_cmap():
-    from matplotlib.colors import LinearSegmentedColormap
-
-    return LinearSegmentedColormap.from_list("rotor_cool", ["#2ca02c", "#1f77b4"])
 
 
 def _wind_balance_cmap():
@@ -493,47 +472,10 @@ def _vertical_motion_cmap():
     return LinearSegmentedColormap.from_list("vertical_motion", ["#b2182b", "#fff7bc", "#1a9850"])
 
 
-def rotor_legend_image(height_max_m: float, intensity_max_display: float,
-                       ylabel: str = "Intensité (km/h)", title: str = "Rotor : hauteur × intensité",
-                       n: int = 64):
-    """Render the **2-D colormap** (x = height above ground [m], y = intensity in the metric's
-    display units) to an RGBA uint8 array for an on-screen legend. Matches ``_add_rotor``'s blend:
-    cool green→blue (faint) warming to yellow→orange→purple (strong) as intensity rises."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    warm = _rotor_warm_cmap()
-    cool = _rotor_cool_cmap()
-    hn = np.linspace(0.0, 1.0, n)
-    sn = np.linspace(0.0, 1.0, n)
-    warm_rgb = warm(hn)[:, :3]
-    cool_rgb = cool(hn)[:, :3]
-    img = cool_rgb[None] * (1.0 - sn[:, None, None]) + warm_rgb[None] * sn[:, None, None]  # (n,n,3)
-
-    fig = plt.figure(figsize=(2.5, 2.1), dpi=100)
-    ax = fig.add_axes([0.24, 0.22, 0.72, 0.66])
-    ax.imshow(img, origin="lower", aspect="auto",
-              extent=[0.0, float(height_max_m), 0.0, float(intensity_max_display)])
-    ax.set_xlabel("Hauteur sol (m)", fontsize=8)
-    ax.set_ylabel(ylabel, fontsize=8)
-    ax.set_title(title, fontsize=8)
-    ax.tick_params(labelsize=7)
-    fig.canvas.draw()
-    w, h = fig.canvas.get_width_height()
-    buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4).copy()
-    plt.close(fig)
-    return buf
-
-
 def range_legend_image(vmin: float, vmax: float, cmap, label: str, title: str,
                        *, center: float | None = None, n: int = 256):
     """Horizontal scalar colourbar. If ``center`` is given, it stays at the middle colour."""
     import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
     from matplotlib.colors import Normalize, TwoSlopeNorm
 
     cm = matplotlib.colormaps[cmap] if isinstance(cmap, str) else cmap
@@ -549,6 +491,8 @@ def range_legend_image(vmin: float, vmax: float, cmap, label: str, title: str,
     vals = np.linspace(vmin, vmax, n)
     grad = cm(np.clip(norm(vals), 0.0, 1.0))[:, :3]
     img = np.tile(grad[None, :, :], (10, 1, 1))
+
+    plt = _agg_pyplot()
     fig = plt.figure(figsize=(2.5, 0.95), dpi=100)
     ax = fig.add_axes([0.10, 0.42, 0.86, 0.26])
     ax.imshow(img, origin="lower", aspect="auto", extent=[vmin, vmax, 0.0, 1.0])
@@ -556,35 +500,23 @@ def range_legend_image(vmin: float, vmax: float, cmap, label: str, title: str,
     ax.set_xlabel(label, fontsize=8)
     ax.set_title(title, fontsize=8)
     ax.tick_params(labelsize=7)
-    fig.canvas.draw()
-    w, h = fig.canvas.get_width_height()
-    buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4).copy()
-    plt.close(fig)
-    return buf
+    return _fig_to_rgba(fig)
 
 
-DIVERGING = {  # metric -> (matplotlib cmap, default ±range, unit label)
-    "horizontal": ("RdBu", 100.0, "Vitesse horizontale (% vent)"),   # red reversed → blue free-stream
-    "vertical": ("RdYlGn", 3.0, "Vitesse verticale (m/s)"),          # red sink → green lift
-}
-
-
-def diverging_legend_image(vmax: float, cmap_name: str, label: str, title: str, n: int = 256):
-    """Horizontal **diverging** colourbar (−vmax→+vmax) as an RGBA uint8 array (velocity fields)."""
+def _agg_pyplot():
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    grad = matplotlib.colormaps[cmap_name](np.linspace(0.0, 1.0, n))[:, :3]
-    img = np.tile(grad[None, :, :], (10, 1, 1))
-    fig = plt.figure(figsize=(2.5, 0.95), dpi=100)
-    ax = fig.add_axes([0.10, 0.42, 0.86, 0.26])
-    ax.imshow(img, origin="lower", aspect="auto", extent=[-float(vmax), float(vmax), 0.0, 1.0])
-    ax.set_yticks([])
-    ax.set_xlabel(label, fontsize=8)
-    ax.set_title(title, fontsize=8)
-    ax.tick_params(labelsize=7)
+    return plt
+
+
+def _fig_to_rgba(fig):
+    """Render a matplotlib figure to an ``(H, W, 4)`` uint8 RGBA array and close it (one place, so
+    the DPI/backend/close-on-exit handling can't drift between the several legend builders)."""
+    import matplotlib.pyplot as plt
+
     fig.canvas.draw()
     w, h = fig.canvas.get_width_height()
     buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4).copy()
@@ -592,19 +524,45 @@ def diverging_legend_image(vmax: float, cmap_name: str, label: str, title: str, 
     return buf
 
 
-def _add_rotor(plotter, rev, terrain, show_legend: bool = True, clim=None, opacity: float = 0.5,
+def _safe_p95(field) -> float:
+    """95th percentile ignoring NaNs; a safe positive fallback when the field is empty/all-NaN (so
+    the colour Normalize never gets a NaN vmax → grey/garbage volume)."""
+    f = np.asarray(field, dtype="float64")
+    f = f[np.isfinite(f)]
+    return float(np.percentile(f, 95)) if f.size else 1.0
+
+
+def set_rotor_opacity(plotter, alpha: float) -> bool:
+    """Set the opacity of the lee-volume actors published on ``plotter._rotor_actors`` (live, no
+    rebuild). Returns True if any actor exists. Both apps' opacity sliders call this, so the
+    actor-opacity protocol lives in one place next to where ``_rotor_actors`` is created."""
+    actors = getattr(plotter, "_rotor_actors", None)
+    if not actors:
+        return False
+    a = float(np.clip(alpha, 0.02, 1.0))
+    for act in actors:
+        try:
+            act.GetProperty().SetOpacity(a)
+        except Exception:
+            pass
+    try:
+        plotter.render()
+    except Exception:
+        pass
+    return True
+
+
+def _add_rotor(plotter, rev, terrain, opacity: float = 0.5,
                intensity_max: float | None = None, metric: str = "rotor", metric_range=None):
-    """Colour the lee volume and add it.
+    """Colour the lee volume and add it. Returns the actor.
 
-    The auto app uses scalar colour ramps controlled by metric-specific sliders:
-    rotor/turbulence min→max (upper values clamp), horizontal red→yellow→green centred on 0,
-    and vertical red→pale-yellow→green centred on 0 with a hidden calm gap.
-
-    Opacity is uniform + adjustable (actor-level, so a slider changes it live). Returns the actor.
-    ``clim`` is kept for the legacy/manual height-colour path compatibility."""
+    Both apps use scalar colour ramps controlled by metric-specific sliders: rotor/turbulence
+    min→max (upper values clamp), horizontal red→yellow→green centred on 0, and vertical
+    red→pale-yellow→green centred on 0 with a hidden calm gap. Opacity is uniform + adjustable
+    (actor-level, so a slider changes it live)."""
     from matplotlib.colors import Normalize, TwoSlopeNorm
 
-    centers = rev.cell_centers().points
+    n_cells = rev.n_cells
     alpha = float(np.clip(opacity, 0.02, 1.0))
     metric_range = metric_range or {}
 
@@ -625,36 +583,31 @@ def _add_rotor(plotter, rev, terrain, show_legend: bool = True, clim=None, opaci
 
     if metric == "horizontal":
         field = rev.cell_data.get("along_pct")
-        field = np.asarray(field, dtype="float64") if field is not None else np.zeros(len(centers))
+        field = np.asarray(field, dtype="float64") if field is not None else np.zeros(n_cells)
         vmin = metric_range.get("min", -(float(intensity_max) if intensity_max else 100.0))
         vmax = metric_range.get("max", float(intensity_max) if intensity_max else 100.0)
         actor = _paint(field, _wind_balance_cmap(), vmin, vmax, center=0.0)
     elif metric == "vertical":
         field = rev.cell_data.get("w_ms")
-        field = np.asarray(field, dtype="float64") if field is not None else np.zeros(len(centers))
+        field = np.asarray(field, dtype="float64") if field is not None else np.zeros(n_cells)
         vmax = float(intensity_max) if intensity_max else 3.0
         vmin = metric_range.get("sink_min", -vmax)
         vmax = metric_range.get("lift_max", vmax)
         actor = _paint(field, _vertical_motion_cmap(), vmin, vmax, center=0.0)
     elif metric == "turbulence":
         field = rev.cell_data.get("turb_rms")
-        field = np.asarray(field, dtype="float64") if field is not None else np.zeros(len(centers))
+        field = np.asarray(field, dtype="float64") if field is not None else np.zeros(n_cells)
         vmin = metric_range.get("min", 0.0)
         vmax = metric_range.get(
-            "max",
-            float(intensity_max) if intensity_max else float(np.nanpercentile(field, 95)))
+            "max", float(intensity_max) if intensity_max else _safe_p95(field))
         actor = _paint(field, _rotor_intensity_cmap(), vmin, vmax)
     else:
         along = rev.cell_data.get("along_flow")
-        field = np.clip(-np.asarray(along), 0.0, None) if along is not None else np.ones(len(centers))
+        field = np.clip(-np.asarray(along), 0.0, None) if along is not None else np.ones(n_cells)
         vmin = metric_range.get("min", 0.0)
         vmax = metric_range.get(
-            "max",
-            float(intensity_max) if intensity_max else float(np.nanpercentile(field, 95)))
+            "max", float(intensity_max) if intensity_max else _safe_p95(field))
         actor = _paint(field, _rotor_intensity_cmap(), vmin, vmax)
-    if not show_legend:
-        return actor
-
     return actor
 
 
@@ -898,7 +851,6 @@ def populate_plotter(
     zoom_boost: int = 0,
     opacity: float = 0.5,
     intensity_max=None,
-    height_clim=None,
     metric=None,
     vol_floor: float = 0.20,
 ):
@@ -929,48 +881,56 @@ def populate_plotter(
                              color="white", opacity=0.5)
 
     captions = {
-        "rotor": "Couleur = hauteur sol (jaune→violet) × intensité du rotor · opacité réglable",
-        "turbulence": "Couleur = hauteur sol × intensité de turbulence · opacité réglable",
-        "horizontal": "Couleur = vitesse horizontale (% vent) · rouge = rotor, bleu = plein vent",
+        "rotor": "Couleur = intensité du rotor (vitesse de flux inversé, m/s) · opacité réglable",
+        "turbulence": "Couleur = turbulence rms √(2k/3) (m/s) · opacité réglable",
+        "horizontal": "Couleur = vitesse horizontale (% vent) · rouge = rotor, vert = plein vent",
         "vertical": "Couleur = vitesse verticale · vert = ascendance, rouge = dégueulante",
     }
+    rotor_actors = []  # published on the plotter so the app's opacity slider can update them live
     if metric is not None:  # unified metric path — shared with the auto app (identical rendering)
         vol = extract_lee_volume(mesh, mean_flow_dir, metric=metric, ref_speed_ms=wind_speed_ms,
                                  vol_floor=vol_floor, aoi_bounds=aoi_bounds)
         if vol is not None and vol.n_cells:
             if has_terrain:
-                _add_rotor(plotter, vol, terrain, show_legend=False, opacity=opacity,
-                           intensity_max=intensity_max, metric=metric, clim=height_clim)
+                a = _add_rotor(plotter, vol, terrain, opacity=opacity,
+                               intensity_max=intensity_max, metric=metric)
+                if a is not None:
+                    rotor_actors.append(a)
             else:
-                plotter.add_mesh(vol, color=REVERSED_COLOR, opacity=opacity)
+                rotor_actors.append(plotter.add_mesh(vol, color=REVERSED_COLOR, opacity=opacity))
         caption = captions.get(metric, "")
     else:  # legacy boolean path (build_scene / CLI snapshots): reversed-flow + optional turbulence
         mesh["along_flow"] = ofr.along_flow_component(mesh, mean_flow_dir)
-        ti = ofr.turbulence_intensity(mesh, reference_speed=wind_speed_ms)
-        if ti is not None:
-            mesh["turb_intensity"] = np.asarray(ti)
+        rms = ofr.turbulence_intensity(mesh, reference_speed=1.0)  # √(2k/3) m/s (what _add_rotor reads)
+        if rms is not None:
+            mesh["turb_rms"] = np.asarray(rms)
         if show_reversed_flow:
             rev = mesh.threshold(value=0.0, scalars="along_flow", invert=True)
             rev = _clip_domain_boundary(rev, mesh, aoi_bounds=aoi_bounds)
             if rev.n_cells and has_terrain:
-                _add_rotor(plotter, rev, terrain, opacity=opacity, intensity_max=intensity_max,
-                           metric="rotor", clim=height_clim)
+                a = _add_rotor(plotter, rev, terrain, opacity=opacity, intensity_max=intensity_max,
+                               metric="rotor")
+                if a is not None:
+                    rotor_actors.append(a)
             elif rev.n_cells:
-                plotter.add_mesh(rev, color=REVERSED_COLOR, opacity=opacity)
-        if show_turbulence and ti is not None:
-            turb = mesh.threshold(value=turbulence_threshold, scalars="turb_intensity")
+                rotor_actors.append(plotter.add_mesh(rev, color=REVERSED_COLOR, opacity=opacity))
+        if show_turbulence and "turb_rms" in mesh.array_names:
+            turb = mesh.threshold(value=turbulence_threshold, scalars="turb_rms")
             turb = _clip_domain_boundary(turb, mesh, aoi_bounds=aoi_bounds)
             if turb.n_cells and has_terrain:
-                _add_rotor(plotter, turb, terrain, opacity=opacity, intensity_max=intensity_max,
-                           metric="turbulence", clim=height_clim)
+                a = _add_rotor(plotter, turb, terrain, opacity=opacity, intensity_max=intensity_max,
+                               metric="turbulence")
+                if a is not None:
+                    rotor_actors.append(a)
             elif turb.n_cells:
-                plotter.add_mesh(turb, color=TURB_COLOR, opacity=0.35)
+                rotor_actors.append(plotter.add_mesh(turb, color=TURB_COLOR, opacity=0.35))
         caption = captions["rotor"]
 
     plotter.add_text(SCENE_TEXT, font_size=9)
     plotter.add_text(caption, position="lower_left", font_size=8)
     plotter.show_axes()
     plotter.view_isometric()
+    plotter._rotor_actors = rotor_actors  # the manual app updates their opacity live (no rebuild)
     return plotter
 
 

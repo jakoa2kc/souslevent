@@ -78,6 +78,42 @@ def test_parse_arome_hd_picks_highest_available_height():
     assert out[1] == ("2026-06-26T01:00", 12.0, 270.0)  # 120 m present -> highest
 
 
+def test_parse_arome_hd_keeps_null_hour_placeholder():
+    # A fully-null hour must keep a placeholder (aligned to `time`), not be dropped — dropping it
+    # shifted every later hour, feeding the wrong hour's wind to the solver BC / arrows.
+    from sillage.auto.wind import _parse_arome_hd, _series_at
+
+    hourly = {
+        "time": ["t0", "t1", "t2"],
+        "wind_speed_120m": [5.0, None, 7.0], "wind_direction_120m": [90.0, None, 100.0],
+        "wind_speed_80m": [None, None, None], "wind_direction_80m": [None, None, None],
+        "wind_speed_10m": [None, None, None], "wind_direction_10m": [None, None, None],
+    }
+    out = _parse_arome_hd(hourly)
+    assert len(out) == 3 and out[1] == ("t1", None, None)   # index still matches the clock hour
+    assert _series_at(out, 2) == ("t2", 7.0, 100.0)         # hour 2 is itself
+    assert _series_at(out, 1)[0] in ("t0", "t2")            # null hour falls back to a neighbour
+
+
+def test_load_result_reads_legacy_rotor_turb_files(tmp_path):
+    import json
+    import zipfile
+
+    from sillage.auto.store import _FORMAT, load_result
+
+    zpath = tmp_path / "old.sillage"
+    with zipfile.ZipFile(zpath, "w") as z:
+        z.writestr("r.vtu", b"<VTKFile/>")
+        z.writestr("manifest.json", json.dumps({
+            "format": _FORMAT, "version": 1, "crs": "",
+            "cases": [{"zone_index": 0, "hour": 9, "wind_speed_ms": 8.0, "wind_from_deg": 270.0,
+                       "aoi_bounds": [0, 1, 0, 1], "elapsed_s": 1.0,
+                       "rotor_file": "r.vtu", "turb_file": ""}],
+            "config": {}, "route_cells": [], "hour_labels": {}}))
+    loaded = load_result(zpath, tmp_path / "open")               # legacy keys -> vtu_paths
+    assert loaded.result.cases[0].vtu_paths.get("rotor", "").endswith("r.vtu")
+
+
 def test_forecast_window_fallback_and_absolute_labels():
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -163,7 +199,7 @@ def test_bbox_from_route():
 
     s, w, n, e = bbox_from_route([(44.6, 6.1), (44.7, 6.3)], margin_km=2.0)
     assert s < 44.6 and n > 44.7 and w < 6.1 and e > 6.3
-    assert (44.6 - s) == pytest.approx(2.0 / 111.0, rel=1e-3)
+    assert (44.6 - s) == pytest.approx(2000.0 / 111_320.0, rel=1e-3)  # unified km/deg (accurate)
     with pytest.raises(ValueError, match="route vide"):
         bbox_from_route([], margin_km=2.0)
 

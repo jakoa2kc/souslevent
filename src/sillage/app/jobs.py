@@ -77,6 +77,24 @@ class SolveJob(QtCore.QObject):
             return self._thread.wait()
         return self._thread.wait(msecs)
 
+    def shutdown(self, msecs: int = 1000) -> None:
+        """Best-effort stop for app shutdown. ``wait()`` alone deadlocks when called from the GUI
+        thread: ``_teardown`` (which quits the QThread) is a queued slot delivered to that same GUI
+        thread — blocked in ``wait`` — so the thread never quits and ``wait`` times out every time.
+        Here we disconnect the callbacks (so a late finish can't touch a dying window), quit the
+        thread, and if a blocking call (e.g. an in-flight network fetch) keeps it alive, terminate
+        it. Only use for read-only jobs — never for a solve that may be mid-write."""
+        for sig in (self._worker.progress, self._worker.finished, self._worker.failed):
+            try:
+                sig.disconnect()
+            except Exception:
+                pass
+        self.cancel()
+        self._thread.quit()
+        if not self._thread.wait(msecs):
+            self._thread.terminate()
+            self._thread.wait(500)
+
     @QtCore.Slot(object)
     def _on_finished(self, result) -> None:
         self._teardown()

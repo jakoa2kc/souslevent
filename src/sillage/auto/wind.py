@@ -47,14 +47,31 @@ def local_wind_provider(dem, crest_alt_m: float, n_hours: int, source: str = "op
     def make(absolute_hour: int):
         def wind_at_center(x: float, y: float) -> tuple[float, float]:
             s = series_at(x, y)
-            if not s:
+            v = _series_at(s, absolute_hour)
+            if v is None:
                 raise RuntimeError("vent local (AROME HD / Open-Meteo) indisponible à ce point")
-            _t, spd, drc = s[min(int(absolute_hour), len(s) - 1)]
-            return spd, drc
+            return v[1], v[2]
 
         return wind_at_center
 
     return make
+
+
+def _series_at(series, hour: int):
+    """Pick the entry for clock-hour ``hour`` from a per-hour series, falling back to the NEAREST
+    hour that actually carries data. Series are aligned to the forecast ``time`` array (position =
+    clock-hour offset) and may hold ``(time, None, None)`` placeholders for hours the model left
+    null — indexing must therefore skip those, not shift past them. Returns ``(time, spd, drc)`` or
+    ``None`` if the series is empty / all-null."""
+    if not series:
+        return None
+    n = len(series)
+    h = min(max(0, int(hour)), n - 1)
+    for off in range(n):                       # search outward from the requested hour
+        for j in (h - off, h + off):
+            if 0 <= j < n and series[j][1] is not None and series[j][2] is not None:
+                return series[j]
+    return None
 
 
 def _fetch_arome_hd(lat: float, lon: float, n_hours: int, heights=AROME_HD_HEIGHTS):
@@ -80,17 +97,25 @@ def _fetch_arome_hd(lat: float, lon: float, n_hours: int, heights=AROME_HD_HEIGH
 
 
 def _parse_arome_hd(hourly: dict, heights=AROME_HD_HEIGHTS):
-    """Pick, per hour, the wind at the highest height with a non-null value. Pure (testable)."""
+    """Per hour, the wind at the highest height with a non-null value. Pure (testable).
+
+    Returns ONE entry per forecast hour, **aligned to the ``time`` array** so that positional
+    indexing matches the pipeline's clock-hour offsets. Hours where every height is null keep a
+    ``(time, None, None)`` placeholder instead of being dropped — dropping them shifted every later
+    hour by one (wrong wind fed to the solver BC / arrows). Returns ``[]`` only if NO hour has data."""
     times = hourly.get("time", [])
-    out = []
+    out, any_data = [], False
     for i, t in enumerate(times):
+        spd_i = drc_i = None
         for h in heights:  # highest first
             spd = hourly.get(f"wind_speed_{h}m", [])
             drc = hourly.get(f"wind_direction_{h}m", [])
             if i < len(spd) and spd[i] is not None and i < len(drc) and drc[i] is not None:
-                out.append((t, float(spd[i]), float(drc[i])))
+                spd_i, drc_i = float(spd[i]), float(drc[i])
+                any_data = True
                 break
-    return out
+        out.append((t, spd_i, drc_i))
+    return out if any_data else []
 
 
 # --- AROME wind along a route (for the on-map / in-3D wind arrows) -----------------------------
@@ -163,8 +188,7 @@ def arrows_at_hour(cells, hour: int):
     """``[(lat, lon, speed_ms, from_deg), …]`` for a given hour from a ``route_wind_series`` list."""
     out = []
     for lat, lon, series in cells:
-        if series:
-            idx = min(max(0, int(hour)), len(series) - 1)
-            _t, spd, drc = series[idx]
-            out.append((lat, lon, spd, drc))
+        v = _series_at(series, hour)           # skips null-hour placeholders, clamps to the horizon
+        if v is not None:
+            out.append((lat, lon, v[1], v[2]))
     return out

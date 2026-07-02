@@ -64,7 +64,6 @@ class AutoWindow(QtWidgets.QMainWindow):
         self._rendered = False  # first 3D render resets the camera; later ones keep it
         self._opacity = 0.5      # rotor volume opacity (slider-controlled, see inside the thickness)
         self._metric = "rotor"          # 3D colour metric (default rotor)
-        self._height_max_m = 300.0      # top of the height colour scale (AGL, m) — 2-D metrics
         # Display units. Ranges drive both extraction (min/max shown) and colour clamping.
         self._metric_ranges = {
             "rotor": (0.0, 15.0),             # km/h reversed-flow speed
@@ -74,9 +73,12 @@ class AutoWindow(QtWidgets.QMainWindow):
             "turbulence": (1.0, 3.0),         # rms m/s; values below min hidden
         }
         self._tex_cache = {}     # cached basemap textures so re-renders don't re-fetch tiles
+        self._terrain_cache = {}  # cached terrain mesh (id(dem)->mesh) so scrubs don't rebuild it
         self._last_cfg = None    # AutoConfig of the shown result (for save)
         self._hour_labels = None  # {hour: absolute-date label} — from the run day, kept for reopen
         self._loaded_dir = None   # temp dir holding an opened .sillage bundle (cleaned on close)
+        self._restoring = False   # True while restoring an opened bundle: don't refetch route winds
+        self._route_gen = 0       # bumped on every route change / open → stale wind fetches are dropped
         # Available forecast window (absolute dates) + whether the run will use AROME.
         self._fc = forecast_window(self.cfg.meteofrance_api_key)
         self._cores = detect_cores()
@@ -93,6 +95,12 @@ class AutoWindow(QtWidgets.QMainWindow):
         self._wind_timer.setSingleShot(True)
         self._wind_timer.setInterval(600)
         self._wind_timer.timeout.connect(self._fetch_route_winds)
+        # Debounce the legend redraw: a range slider fires many valueChanged/s while dragging and
+        # each redraw builds a matplotlib figure — coalesce them so the slider doesn't stutter.
+        self._legend_timer = QtCore.QTimer(self)
+        self._legend_timer.setSingleShot(True)
+        self._legend_timer.setInterval(120)
+        self._legend_timer.timeout.connect(self._update_legend)
 
         self.progress = QtWidgets.QProgressBar()
         self.progress.setMaximumWidth(260)
@@ -420,12 +428,13 @@ class AutoWindow(QtWidgets.QMainWindow):
                 self._wind_timer.start()  # a fetch is in flight — try again shortly
             return
         n_hours = self._fc.end_offset_h + 1
+        gen = self._route_gen  # tag this fetch; if the route changes / a bundle opens, drop the result
 
         def fn(on_progress, cancel):
             cells = []
             for s in segs:  # one wind series per segment so gaps carry no arrows
                 cells += route_wind_series(s, n_hours)
-            return segs, cells
+            return gen, cells
 
         job = SolveJob(fn, self)
         job.finished.connect(self._on_winds_fetched)
@@ -435,14 +444,10 @@ class AutoWindow(QtWidgets.QMainWindow):
 
     def _on_winds_fetched(self, payload) -> None:
         self._wind_job = None
-        segs, cells = payload
-
-        def _norm(ss):
-            return tuple(tuple(map(tuple, s)) for s in ss)
-
-        current = [list(s) for s in (self._route or []) if len(s) >= 2]
-        if _norm(current) != _norm(segs):  # route changed while fetching -> refetch
-            self._wind_timer.start()
+        gen, cells = payload
+        if gen != self._route_gen:  # route changed / bundle opened while fetching -> stale, drop it
+            if any(len(s) >= 2 for s in (self._route or [])) and self._loaded_dir is None:
+                self._wind_timer.start()  # refetch for the current route (unless a bundle is shown)
             return
         self._route_cells = cells or []
         lo, _hi = self._window_hours()
@@ -502,17 +507,20 @@ class AutoWindow(QtWidgets.QMainWindow):
 
     def _on_route(self, segments) -> None:
         self._route = [list(s) for s in segments]  # list of segments [(lat, lon), ...]
-        self._route_cells = []
-        self.map_tab.show_wind([])
         nseg = len(self._route)
         npts = sum(len(s) for s in self._route)
         ready = "" if any(len(s) >= 2 for s in self._route) else "  (ajoute au moins 2 points)"
         self.info.setText(
             f"Parcours : {nseg} segment(s), {npts} point(s) · "
             f"corridor {self.margin_spin.value():.1f} km{ready}")
+        self._refresh_cpu_plan()
+        if self._restoring:  # restoring an opened bundle: keep the RUN's saved winds, don't refetch
+            return
+        self._route_gen += 1          # invalidate any wind fetch in flight for the old route
+        self._route_cells = []
+        self.map_tab.show_wind([])
         if any(len(s) >= 2 for s in self._route):
             self._wind_timer.start()  # (re)fetch AROME along the route once drawing pauses
-        self._refresh_cpu_plan()
 
     def _on_margin_change(self, val: float) -> None:
         self.map_tab.set_margin_km(val)  # redraw the live corridor
@@ -578,6 +586,9 @@ class AutoWindow(QtWidgets.QMainWindow):
                   f"sur {self._cores} cœurs; effectif plafonné par features × heures après criblage.")
         self._run_started = time.monotonic()
         self._last_pct = 0
+        # run_auto's start-cleanup deletes the PREVIOUS run's case dirs; drop the now-stale result
+        # from the UI so the user can't scrub/save a result whose backing files are about to vanish.
+        self._invalidate_shown_result()
         self._set_running(True)
         job = SolveJob(fn, self)
         job.progress.connect(self._on_progress)
@@ -640,12 +651,7 @@ class AutoWindow(QtWidgets.QMainWindow):
             return
         self._wind_timer.stop()
         if self._wind_job is not None:
-            self._wind_job.cancel()
-            if self._wind_job.is_running() and not self._wind_job.wait(3000):
-                self.statusBar().showMessage(
-                    "Fermeture en attente : récupération du vent en cours…")
-                event.ignore()
-                return
+            self._wind_job.shutdown(1000)  # read-only fetch: stop it (terminate if blocked) & close
             self._wind_job = None
         if self._plotter is not None:
             try:
@@ -680,10 +686,26 @@ class AutoWindow(QtWidgets.QMainWindow):
         self._hour_labels = {h: self._fc.label_at(h) for h in hours}  # keep this day's labels
         self._show_result_hours(hours)
 
+    def _invalidate_shown_result(self) -> None:
+        """Drop the currently displayed result from the UI (used when a new run starts, since its
+        backing case files are about to be deleted). Save/scrub are disabled until a result exists."""
+        self._result = None
+        self._rotor_cache = {}
+        self.btn_save.setEnabled(False)
+        self.hour_slider.setEnabled(False)
+        if self._plotter is not None:
+            try:
+                self._plotter.clear()
+                self._plotter.render()
+            except Exception:
+                pass
+
     def _show_result_hours(self, hours) -> None:
         """Set up the hour slider (absolute-date labels, disabled for a single créneau) and render
         the first hour. Shared by a finished run and an opened ``.sillage`` result."""
-        self._rotor_cache = {}
+        self._rotor_cache = {}          # new result → different cases/DEM: drop the per-render caches
+        self._tex_cache = {}            # (also avoids unbounded growth across runs/opens)
+        self._terrain_cache = {}
         self.hour_slider.blockSignals(True)
         self.hour_slider.setMinimum(0)
         self.hour_slider.setMaximum(max(0, len(hours) - 1))
@@ -741,16 +763,18 @@ class AutoWindow(QtWidgets.QMainWindow):
 
         from .store import load_result
 
+        import shutil
+
         self._cleanup_loaded()
         open_tmp = self.cfg.temp_dir / "sillage_open"
         open_tmp.mkdir(parents=True, exist_ok=True)
+        for stale in open_tmp.glob("sillage_open_*"):  # sweep dirs leaked by crashed/killed sessions
+            shutil.rmtree(str(stale), ignore_errors=True)
         dest = Path(tempfile.mkdtemp(prefix="sillage_open_", dir=str(open_tmp)))
         try:
             loaded = load_result(path, dest)
             self._dem = load_dem(loaded.result.dem_path, max_domain_km=200.0)
         except Exception as exc:
-            import shutil
-
             shutil.rmtree(str(dest), ignore_errors=True)
             QtWidgets.QMessageBox.critical(self, "Ouverture", str(exc))
             return
@@ -759,8 +783,13 @@ class AutoWindow(QtWidgets.QMainWindow):
         self._hour_labels = loaded.hour_labels
         self._route = [list(s) for s in loaded.route_segments]
         self._route_cells = loaded.route_cells or []  # the RUN's winds (not today's) for the arrows
+        self._route_gen += 1  # any wind fetch in flight is now stale (keep the bundle's saved winds)
         self._last_cfg = self._cfg_from_dict(loaded.config, loaded.result.hours)
-        self._restore_controls(loaded.config)
+        self._restoring = True  # restore controls WITHOUT the setValue chain refetching today's wind
+        try:
+            self._restore_controls(loaded.config)
+        finally:
+            self._restoring = False
         self._rendered = False  # fit the camera to the opened scene
         hours = loaded.result.hours
         self._log(f"Ouvert : {Path(path).name} — {len(loaded.result.cases)} cas, "
@@ -881,7 +910,7 @@ class AutoWindow(QtWidgets.QMainWindow):
         scale = self._range_scales[key]
         self._metric_ranges[key] = (raw[0] / scale, raw[1] / scale)
         self._refresh_range_label(key)
-        self._update_legend()
+        self._legend_timer.start()  # debounced legend redraw (coalesce drag ticks)
 
     def _apply_metric_controls(self) -> None:
         visible = {
@@ -940,12 +969,8 @@ class AutoWindow(QtWidgets.QMainWindow):
         if not hasattr(self, "legend_label"):
             return
         try:
-            from PySide6.QtGui import QImage, QPixmap
-
-            buf = self._legend_image()
-            h, w = buf.shape[:2]
-            img = QImage(bytes(buf.data), w, h, 4 * w, QImage.Format_RGBA8888)
-            self.legend_label.setPixmap(QPixmap.fromImage(img))
+            from ..app.qt_image import set_label_image
+            set_label_image(self.legend_label, self._legend_image())
         except Exception:
             pass
 
@@ -954,14 +979,9 @@ class AutoWindow(QtWidgets.QMainWindow):
         if not hasattr(self, "wind_legend_label"):
             return
         try:
-            from PySide6.QtGui import QImage, QPixmap
-
+            from ..app.qt_image import set_label_image
             from ..viz.volume3d import wind_legend_image
-
-            buf = wind_legend_image()
-            h, w = buf.shape[:2]
-            img = QImage(bytes(buf.data), w, h, 4 * w, QImage.Format_RGBA8888)
-            self.wind_legend_label.setPixmap(QPixmap.fromImage(img))
+            set_label_image(self.wind_legend_label, wind_legend_image())
         except Exception:
             pass
 
@@ -979,18 +999,9 @@ class AutoWindow(QtWidgets.QMainWindow):
     def _on_opacity_change(self, val: int) -> None:
         """Set the rotor volumes' opacity live (actor-level, no scene rebuild / basemap refetch)."""
         self._opacity = max(0.02, val / 100.0)
-        actors = getattr(self._plotter, "_rotor_actors", None) if self._plotter is not None else None
-        if not actors:
-            return
-        for a in actors:
-            try:
-                a.GetProperty().SetOpacity(self._opacity)
-            except Exception:
-                pass
-        try:
-            self._plotter.render()
-        except Exception:
-            pass
+        if self._plotter is not None:
+            from ..viz.volume3d import set_rotor_opacity
+            set_rotor_opacity(self._plotter, self._opacity)
 
     def _label_for_hour(self, hour: int) -> str:
         """Absolute date label for an hour offset — the saved labels for an opened result (its run
@@ -1033,9 +1044,8 @@ class AutoWindow(QtWidgets.QMainWindow):
                             crs=self._dem.crs, basemap_source="IGN plan",
                             route_winds=self._route_winds_utm(hour),
                             rotor_cache=self._rotor_cache, rotor_opacity=self._opacity,
-                            height_clim=(0.0, self._height_max_m),
                             metric=self._metric, metric_range=self._native_metric_range(),
-                            texture_cache=self._tex_cache)
+                            texture_cache=self._tex_cache, terrain_cache=self._terrain_cache)
         if cam is not None:  # keep the viewpoint across hour scrubs
             self._plotter.camera_position = cam
         else:

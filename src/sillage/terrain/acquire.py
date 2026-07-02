@@ -162,9 +162,12 @@ def prepare_dem_ign(bbox_latlon, out_path, target_res_m: float = 50.0,
 
     prog(62, "Lissage vers la résolution cible…")
     cur_res = w_m / arr.shape[1]
-    avg_factor = max(1, round(target_res_m / cur_res))
-    if avg_factor > 1:
-        arr = _block_average(arr, avg_factor)
+    # De-stripe by block-averaging, EXCEPT at the ~1 m native target (no fake ×2 average there).
+    # Keying the skip on target_res_m — not on round(target/cur_res) — matters for LARGE zones whose
+    # fetch got tile-capped: there cur_res ≈ target, so the factor rounds to 1 and the old guard
+    # skipped averaging, leaving the WMS stair-step striping in the DEM (fake ridges for WindNinja).
+    if target_res_m > 1.5 * IGN_NATIVE_M:
+        arr = _block_average(arr, max(2, round(target_res_m / cur_res)))
     h, w = arr.shape
     transform = from_origin(west, north, (east - west) / w, (north - south) / h)
 
