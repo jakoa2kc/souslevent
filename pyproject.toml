@@ -41,7 +41,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.4"]
+dev = ["pytest>=8.0", "ruff>=0.4", "build>=1.2", "wheel>=0.43", "pyinstaller>=6.6"]
 gui = []  # back-compat alias: GUI deps are now in the base install (see above)
 # Optional integrations, added as they land:
 # arome = []      # Meteo-France AROME client deps
