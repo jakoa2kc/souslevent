@@ -38,7 +38,16 @@ from ..auto.pipeline import (
     screen_candidates,
 )
 from ..auto.partition import SubZone, estimate_cells
-from ..auto.window import AutoWindow, GREEN, NO_BASEMAP, TOPO_LABELS, TOPO_PRESETS
+from ..auto.window import (
+    GREEN,
+    NO_BASEMAP,
+    PASS2_MESH_DEFAULT,
+    PASS2_MESH_PRESETS,
+    TOPO_LABELS,
+    TOPO_PRESETS,
+    AutoWindow,
+    pass2_estimate_minutes,
+)
 from ..terrain.dem import load_dem
 from ..viz import map2d
 from ..wind.directions import direction_label
@@ -60,6 +69,8 @@ class SousLeVentWindow(AutoWindow):
         self._candidate_ax = None
         self._candidate_syncing = False
         self._candidate_auto_count = 0
+        self._candidate_hour = 0          # index into the screening hazard stack being displayed
+        self._screening_auto_select = False  # features-auto mode preselects the top-N candidates
         self._candidate_press = None
         self._candidate_drag_patch = None
         super().__init__()
@@ -159,7 +170,7 @@ class SousLeVentWindow(AutoWindow):
         calc_row.addWidget(QtWidgets.QLabel("Calcul :"))
         self.calc_combo = QtWidgets.QComboBox()
         self.calc_combo.addItem("Pass-1 seul puis sélection manuelle", self.CALC_PASS1_MANUAL)
-        self.calc_combo.addItem("Pass-1 + candidats multiples auto", self.CALC_FEATURES_AUTO)
+        self.calc_combo.addItem("Pass-1 + candidats auto (pré-cochés)", self.CALC_FEATURES_AUTO)
         self.calc_combo.addItem("Pass-2 partout", self.CALC_PASS2_EVERYWHERE)
         self.calc_combo.currentIndexChanged.connect(self._on_calc_mode_change)
         calc_row.addWidget(self.calc_combo, stretch=1)
@@ -186,6 +197,16 @@ class SousLeVentWindow(AutoWindow):
             "Résolution du MNT. 1 m utilise les données IGN haute résolution quand disponibles "
             "et peut être très lourd : à réserver aux trajets courts.")
         wr.addWidget(self.topo_combo)
+        wr.addSpacing(16)
+        wr.addWidget(QtWidgets.QLabel("Maillage Pass-2 :"))
+        self.mesh_combo = QtWidgets.QComboBox()
+        self.mesh_combo.addItems(list(PASS2_MESH_PRESETS))
+        self.mesh_combo.setCurrentText(PASS2_MESH_DEFAULT)
+        self.mesh_combo.setToolTip(
+            "Finesse du maillage momentum (qualité/temps, ADR-0008). Plus fin = plus précis mais "
+            "beaucoup plus lent, par calcul Pass-2. « Affiner en cas de doute ».")
+        self.mesh_combo.currentIndexChanged.connect(lambda *_: self._refresh_cpu_plan())
+        wr.addWidget(self.mesh_combo)
         wr.addStretch(1)
         lay.addWidget(self.common_params_widget)
 
@@ -283,6 +304,21 @@ class SousLeVentWindow(AutoWindow):
         header.addWidget(self.candidate_basemap_combo)
         lay.addLayout(header)
 
+        # Browse the Pass-1 hazard hour by hour (or scenario by scenario) — hidden for a single one.
+        self.candidate_hour_row = QtWidgets.QWidget()
+        chr_lay = QtWidgets.QHBoxLayout(self.candidate_hour_row)
+        chr_lay.setContentsMargins(0, 0, 0, 0)
+        chr_lay.addWidget(QtWidgets.QLabel("Heure / scénario :"))
+        self.candidate_hour_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.candidate_hour_slider.setMinimum(0)
+        self.candidate_hour_slider.setMaximum(0)
+        self.candidate_hour_slider.valueChanged.connect(self._on_candidate_hour_change)
+        chr_lay.addWidget(self.candidate_hour_slider, stretch=1)
+        self.candidate_hour_label = QtWidgets.QLabel("")
+        chr_lay.addWidget(self.candidate_hour_label)
+        self.candidate_hour_row.setVisible(False)
+        lay.addWidget(self.candidate_hour_row)
+
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         self.candidate_fig = Figure(figsize=(7, 5), tight_layout=True)
         self.candidate_canvas = FigureCanvasQTAgg(self.candidate_fig)
@@ -372,7 +408,7 @@ class SousLeVentWindow(AutoWindow):
             self.step_row_widget.setVisible(is_pass2_everywhere)
         labels = {
             self.CALC_PASS1_MANUAL: "✓  Valider — lancer Pass-1",
-            self.CALC_FEATURES_AUTO: "✓  Valider — Pass-1 + Pass-2 auto",
+            self.CALC_FEATURES_AUTO: "✓  Valider — Pass-1 (candidats auto à revoir)",
             self.CALC_PASS2_EVERYWHERE: "✓  Valider — Pass-2 partout",
         }
         self.btn_validate.setText(labels.get(calc, "✓  Valider"))
@@ -524,11 +560,18 @@ class SousLeVentWindow(AutoWindow):
         estimate = momentum_parallel_plan(requested, cores=self._cores, task_count=max_tasks)
         perfect = ", ".join(str(w) for w in requested_plan.perfect_workers) or "aucune"
         idle = "" if estimate.idle_cores == 0 else f", {estimate.idle_cores} au repos"
+        mesh_txt = ""
+        if calc != self.CALC_PASS1_MANUAL:  # Pass-2 mesh only matters when a Pass-2 will run
+            mc, _it = self._mesh_preset()
+            per = pass2_estimate_minutes(mc)
+            waves = max(1, math.ceil(max_tasks / max(1, estimate.workers)))
+            mesh_txt = (f" Maillage {self.mesh_combo.currentText()} (~{mc // 1000}k mailles, "
+                        f"~{per} min/calcul ⇒ ~{per * waves} min au total, indicatif).")
         self.cpu_plan_label.setText(
             f"Plan CPU : demandé {requested_plan.workers} calcul(s) max. {tasks} ⇒ "
             f"estimation {estimate.workers} en parallèle × {estimate.threads_per_worker} thread(s) "
             f"= {estimate.used_cores}/{estimate.cores} cœurs{idle}. "
-            f"Divisions parfaites : {perfect}.")
+            f"Divisions parfaites : {perfect}.{mesh_txt}")
 
     # --- run ----------------------------------------------------------------
     def _build_cfg(self, *, domain_mode: str) -> AutoConfig | None:
@@ -551,6 +594,7 @@ class SousLeVentWindow(AutoWindow):
             hours = self._wind_case_ids()
             wind_source = "arome" if self._fc.source == "AROME" else "open_meteo"
             window_start_iso = self._fc.at(lo).isoformat()
+        mesh_count, iterations = self._mesh_preset()
         return AutoConfig(
             bbox_latlon=bbox, hours=hours,
             route_latlon=tuple(flat), route_segments=tuple(tuple(s) for s in segs),
@@ -559,8 +603,13 @@ class SousLeVentWindow(AutoWindow):
             manual_wind_speeds_kmh=speeds, manual_wind_dirs_deg=dirs,
             max_features=self.features_spin.value(), domain_mode=domain_mode,
             target_res_m=TOPO_PRESETS[self.topo_combo.currentIndex()],
-            tile_step_m=self.step_spin.value() * 1000.0,
+            tile_step_m=self.step_spin.value() * 1000.0, mesh_count=mesh_count, iterations=iterations,
             momentum_workers=self.workers_slider.value())
+
+    def _mesh_preset(self) -> tuple[int, int]:
+        """(mesh_count, iterations) for the selected Pass-2 mesh quality preset (ADR-0008)."""
+        return PASS2_MESH_PRESETS.get(self.mesh_combo.currentText(),
+                                      PASS2_MESH_PRESETS[PASS2_MESH_DEFAULT])
 
     def on_validate(self) -> None:
         if self._job is not None:
@@ -575,13 +624,14 @@ class SousLeVentWindow(AutoWindow):
             self._fetch_route_winds()
         self._last_cfg = cfg
         cli, cache = self.cfg.windninja_cli, self.cfg.cache_dir
-        if calc == self.CALC_PASS1_MANUAL:
-            def fn(on_progress, cancel):
-                return screen_candidates(
-                    cfg, cli=cli, cache_dir=cache, on_progress=on_progress, cancel=cancel)
-        else:
+        if calc == self.CALC_PASS2_EVERYWHERE:
             def fn(on_progress, cancel):
                 return run_auto(
+                    cfg, cli=cli, cache_dir=cache, on_progress=on_progress, cancel=cancel)
+        else:  # PASS1_MANUAL or FEATURES_AUTO: screen (hourly hazard) → review → Pass-2
+            self._screening_auto_select = calc == self.CALC_FEATURES_AUTO  # preselect top-N features
+            def fn(on_progress, cancel):
+                return screen_candidates(
                     cfg, cli=cli, cache_dir=cache, on_progress=on_progress, cancel=cancel)
 
         self.log.clear()
@@ -619,6 +669,7 @@ class SousLeVentWindow(AutoWindow):
         self._candidate_auto_count = len(result.partition)
         self._candidate_press = None
         self._candidate_drag_patch = None
+        self._candidate_hour = 0
         self._candidate_syncing = True
         try:
             self.candidate_list.clear()
@@ -626,6 +677,15 @@ class SousLeVentWindow(AutoWindow):
                 self._add_candidate_item(i, z)
         finally:
             self._candidate_syncing = False
+        # hazard hour/scenario slider (hidden when there is a single Pass-1 map)
+        stack = getattr(result, "hazard_stack", None)
+        has_stack = bool(stack) and len(stack) > 1
+        self.candidate_hour_slider.blockSignals(True)
+        self.candidate_hour_slider.setMaximum(max(0, len(stack) - 1) if stack else 0)
+        self.candidate_hour_slider.setValue(0)
+        self.candidate_hour_slider.blockSignals(False)
+        self.candidate_hour_row.setVisible(has_stack)
+        self.candidate_hour_label.setText(self._candidate_hour_text(0) if has_stack else "")
         self.candidate_summary.setText(
             f"{len(result.partition)} candidat(s) Pass-1. Clique les rectangles sur la carte "
             "ou trace un nouveau rectangle manuel, puis lance Pass-2.")
@@ -636,7 +696,27 @@ class SousLeVentWindow(AutoWindow):
             self._candidate_dem = None
             self._draw_candidate_placeholder(f"MNT illisible pour la carte candidats : {exc}")
             return
+        if self._screening_auto_select and result.partition:  # features-auto: preselect the top-N
+            self._candidate_syncing = True
+            try:
+                for r in range(min(self.features_spin.value(), self.candidate_list.count())):
+                    self.candidate_list.item(r).setSelected(True)
+            finally:
+                self._candidate_syncing = False
         self._draw_candidate_map()
+        self._on_candidate_selection()  # refresh the Pass-2 button + summary for any preselection
+
+    def _on_candidate_hour_change(self, value: int) -> None:
+        self._candidate_hour = int(value)
+        self.candidate_hour_label.setText(self._candidate_hour_text(self._candidate_hour))
+        self._draw_candidate_map()
+
+    def _candidate_hour_text(self, idx: int) -> str:
+        result = self._screening_result
+        if result is None or not result.hours or not (0 <= idx < len(result.hours)):
+            return ""
+        hour = result.hours[idx]
+        return self._labels_for_cfg(self._screening_cfg, result.hours).get(hour, str(hour))
 
     def _candidate_label(self, idx: int) -> str:
         if idx < self._candidate_auto_count:
@@ -742,7 +822,11 @@ class SousLeVentWindow(AutoWindow):
         self.candidate_fig.clear()
         ax = self.candidate_fig.add_subplot(111)
         self._candidate_ax = ax
-        hazard = result.hazard
+        stack = getattr(result, "hazard_stack", None)  # browse per hour/scenario when available
+        if stack and 0 <= self._candidate_hour < len(stack):
+            hazard = stack[self._candidate_hour]
+        else:
+            hazard = result.hazard
         valid_hazard = hazard is not None and getattr(hazard, "shape", None) == dem.shape
         source = (
             self.candidate_basemap_combo.currentText()
@@ -967,7 +1051,9 @@ class SousLeVentWindow(AutoWindow):
             QtWidgets.QMessageBox.information(self, "Candidats", "Sélectionne au moins un candidat.")
             return
         zones = tuple(self._screening_result.partition[i] for i in rows)
+        mesh_count, iterations = self._mesh_preset()  # mesh is a Pass-2 knob (screening ignores it)
         cfg = replace(self._screening_cfg, domain_mode="manual", manual_zones=zones,
+                      mesh_count=mesh_count, iterations=iterations,
                       momentum_workers=self.workers_slider.value())
         self._last_cfg = cfg
         cli, cache = self.cfg.windninja_cli, self.cfg.cache_dir
@@ -1018,6 +1104,9 @@ class SousLeVentWindow(AutoWindow):
             target = float(c.get("target_res_m", 10.0))
             self.topo_combo.setCurrentIndex(
                 min(range(len(TOPO_PRESETS)), key=lambda i: abs(TOPO_PRESETS[i] - target)))
+            mc = int(c.get("mesh_count", PASS2_MESH_PRESETS[PASS2_MESH_DEFAULT][0]))
+            self.mesh_combo.setCurrentText(  # nearest preset to the saved mesh_count
+                min(PASS2_MESH_PRESETS, key=lambda k: abs(PASS2_MESH_PRESETS[k][0] - mc)))
             wind_mode = c.get("wind_mode", WIND_MODE_FORECAST)
             wind_idx = 1 if wind_mode == WIND_MODE_MANUAL_GRID else 0
             self.wind_mode_combo.setCurrentIndex(wind_idx)

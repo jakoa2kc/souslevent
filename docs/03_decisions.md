@@ -987,6 +987,52 @@ never feed `manual_wind_speeds_kmh` to the solver as m/s (a 3.6× error in a saf
 
 ---
 
+## ADR-0035 — Pass-2 mesh-quality preset in the unified app (feature parity)
+
+**Status.** Accepted (2026-07-05). Extends ADR-0008.
+
+**Context.** The unified `SousLeVentWindow` is to become the sole published app (the two old UIs stay
+as local backups). The manual app's **Pass-2 mesh quality/time knob** (ADR-0008: Grossier / Moyen /
+Fin / Max = `(mesh_count, iterations)` + a rough minutes estimate) was the one Pass-2 control missing
+from the auto/unified app, which always solved at a fixed 300 k mesh.
+
+**Decision.** Move `PASS2_MESH_PRESETS` / `PASS2_MESH_DEFAULT` / `pass2_estimate_minutes` into
+`auto/window.py` (the non-legacy base module, so the unified app doesn't depend on `app.main_window`)
+and add a **"Maillage Pass-2"** combo to the unified select tab. `_build_cfg` sets `AutoConfig.mesh_count`
+/`iterations` from it; `_on_run_selected_candidates` re-applies the *current* preset (Pass-1 screening
+ignores the mesh); `_restore_controls` maps a reopened `mesh_count` back to the nearest preset; the CPU
+plan shows `~min/calcul ⇒ ~min total`. Mesh is persisted already (`store` saves `mesh_count`/`iterations`).
+
+**Consequences.** Full Pass-2 parity with the manual app; a quick coarse preview or a max-refined solve
+is one combo away. The estimate is indicative (CPU-bound, ADR-0006).
+
+---
+
+## ADR-0036 — Hourly Pass-1 hazard stack, browsable in the candidates tab
+
+**Status.** Accepted (2026-07-05).
+
+**Context.** The manual app browsed the Pass-1 hazard **hour by hour** (danger zones shift through the
+day) before committing to Pass-2. The unified app's screening (`screen_candidates`) collapsed the
+window to a single representative-wind hazard, losing that view — the second manual-app feature gap.
+
+**Decision.** `_prepare_domain_plan` gains `hourly_hazard`; when set (only `screen_candidates` passes
+it), the feature branch screens **every hour/scenario** via `hourly_indicator_stack` and detects
+candidates on the **element-wise-max aggregate** (so candidates cover the whole window, not one hour).
+`ScreeningResult`/`_DomainPlan` carry a `hazard_stack` aligned to `hours`. The candidates tab gets an
+**hour/scenario slider** (`_draw_candidate_map` renders `hazard_stack[i]`), hidden for a single map.
+Both Pass-1 workflows now route through this tab: *Pass-1 seul* (manual pick) and *Pass-1 + candidats
+auto* (the top-N are **pre-selected** so it's one extra click to launch Pass-2). `run_auto` keeps its
+single-wind feature detection — the extra N mass solves happen only in the review workflow.
+
+**Consequences.** The hourly hazard view is back and available to both Pass-1 modes; candidates are
+more robust (aggregate over the window). Cost: the review path runs one Pass-1 mass solve per
+hour/scenario (fast, capped at 4 concurrent). The auto-features mode is no longer strictly one-click —
+it stops at the candidate review — which is the manual app's philosophy and lets the pilot see the
+hazard before spending on Pass-2.
+
+---
+
 ## Open questions tracked as future ADRs
 
 - **Stability / diurnal winds on the momentum solver.** Available on the mass solver

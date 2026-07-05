@@ -49,6 +49,21 @@ TOPO_PRESETS = (1.0, 5.0, 10.0, 25.0)
 TOPO_LABELS = ("1 m (IGN)", "5 m", "10 m", "25 m")
 NO_BASEMAP = "Aucun"
 
+# ADR-0008 / ADR-0035: Pass-2 momentum mesh as a quality/time knob. Each preset = (mesh_count,
+# iterations); finer is heavier. Ported from the manual app so the unified app has the same control.
+PASS2_MESH_PRESETS: dict[str, tuple[int, int]] = {
+    "Grossier — rapide": (20_000, 100),
+    "Moyen — défaut": (50_000, 200),
+    "Fin — lent": (150_000, 300),
+    "Max — très lent": (400_000, 400),
+}
+PASS2_MESH_DEFAULT = "Moyen — défaut"
+
+
+def pass2_estimate_minutes(mesh_count: int) -> int:
+    """Rough per-solve runtime proxy (CPU-bound), ~25k cells → ~2 min. Indicative only (ADR-0008)."""
+    return max(1, round(mesh_count / 12_000))
+
 
 class AutoWindow(QtWidgets.QMainWindow):
     METRICS = ("rotor", "horizontal", "vertical", "turbulence")

@@ -423,6 +423,60 @@ def test_souslevent_manual_wind_grid_config_offscreen():
     w.deleteLater()
 
 
+def test_souslevent_mesh_preset_feeds_cfg():
+    pytest.importorskip("PySide6")
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    from sillage.souslevent.window import SousLeVentWindow
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    w = SousLeVentWindow()
+    w._selection_mode = "rectangle"
+    w._on_rectangle(44.0, 6.0, 44.1, 6.1)
+    w.mesh_combo.setCurrentText("Fin — lent")          # (150_000, 300)
+    cfg = w._build_cfg(domain_mode="corridor")
+    assert cfg.mesh_count == 150_000 and cfg.iterations == 300  # Pass-2 mesh knob (ADR-0008/0035)
+    w.deleteLater()
+
+
+def test_souslevent_candidate_hour_slider_browses_hazard_stack(monkeypatch):
+    pytest.importorskip("PySide6")
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    from sillage.auto.pipeline import AutoConfig, ScreeningResult, WIND_MODE_MANUAL_GRID
+    from sillage.souslevent import window as slv_window
+    from sillage.souslevent.window import SousLeVentWindow
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    w = SousLeVentWindow()
+    dem = Dem(elevation=np.arange(400, dtype="float32").reshape(20, 20),
+              transform=from_origin(600000.0, 4900000.0, 50.0, 50.0),
+              crs=CRS.from_epsg(32631), resolution_m=50.0)
+    monkeypatch.setattr(slv_window, "load_dem", lambda *a, **k: dem)
+    w._screening_cfg = AutoConfig(
+        bbox_latlon=(44.0, 6.0, 44.1, 6.1), hours=(0, 1, 2), wind_mode=WIND_MODE_MANUAL_GRID,
+        manual_wind_speeds_kmh=(10,), manual_wind_dirs_deg=(270, 315, 0))
+    stack = [np.full(dem.shape, v) for v in (0.1, 0.5, 0.9)]
+    result = ScreeningResult(dem_path="x.tif", crs=dem.crs, partition=[], hours=[0, 1, 2],
+                             hazard=np.maximum.reduce(stack), hazard_stack=stack)
+    w._screening_result = result  # _on_finished normally sets this before _populate_candidates
+    drawn = []
+    monkeypatch.setattr(w, "_draw_candidate_map", lambda: drawn.append(w._candidate_hour))
+    w._populate_candidates(result)
+    assert not w.candidate_hour_row.isHidden()         # 3-map stack → slider shown
+    assert w.candidate_hour_slider.maximum() == 2
+    w.candidate_hour_slider.setValue(2)                # browse to the last scenario
+    assert w._candidate_hour == 2 and drawn[-1] == 2
+    assert w.candidate_hour_label.text() == "10 km/h · Nord"  # hours[2] → dir 0° = Nord
+    w.deleteLater()
+
+
 def test_souslevent_manual_wind_result_uses_two_render_sliders():
     pytest.importorskip("PySide6")
     import os

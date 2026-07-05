@@ -2054,10 +2054,25 @@ dropped `sys.exit(app.exec())`.
 
 ---
 
-<!-- TEMPLATE for new entries — copy below the line
-## Entry N — <short title>  (YYYY-MM-DD)
-**What changed / what I tried.**
-**Why.**
-**Result / decision.** (link any new ADR)
-**Open questions raised.**
--->
+## Entry 83 — Manual-app feature parity in the unified app (mesh preset + hourly hazard)  (2026-07-05)
+
+**Why.** SousLeVent becomes the sole published app (git public + exe); the two old UIs stay as local
+backups. So the two manual-app features it was missing (Entry 82 audit) had to be ported into the
+Pass-1-based modes.
+
+**1 — Pass-2 mesh preset (ADR-0035).** Moved `PASS2_MESH_PRESETS`/`PASS2_MESH_DEFAULT`/
+`pass2_estimate_minutes` into `auto/window.py` (non-legacy base) and added a "Maillage Pass-2" combo
+(Grossier/Moyen/Fin/Max) to the unified select tab. Feeds `AutoConfig.mesh_count`/`iterations` in
+`_build_cfg` + `_on_run_selected_candidates` (current preset; screening ignores mesh); restored from a
+reopened `mesh_count`; CPU plan shows the ~minutes estimate. The old app always solved at a fixed 300 k.
+
+**2 — Hourly Pass-1 hazard (ADR-0036).** `_prepare_domain_plan(hourly_hazard=True)` (only from
+`screen_candidates`) screens EVERY hour/scenario via `hourly_indicator_stack` and detects candidates on
+the max-aggregate; `ScreeningResult.hazard_stack` carries the per-hour maps. The candidates tab gained
+an hour/scenario slider (`_draw_candidate_map` renders the selected map, hidden for a single one). Both
+Pass-1 modes now go through this tab: *Pass-1 seul* (manual pick) and *Pass-1 + candidats auto* (top-N
+pre-cochés → one click to launch Pass-2). `run_auto` unchanged (single-wind detection; the extra N mass
+solves only happen in the review workflow). Labels updated so "candidats auto" reads as "à revoir".
+
+**Result.** 2 new tests (mesh preset → cfg; hour slider browses the stack). `pytest -q` → **109 passed**.
+The manual app (`sillage-gui`) now has no feature the unified app lacks; it can be retired once field-tested.

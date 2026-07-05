@@ -373,7 +373,8 @@ class ScreeningResult:
     crs: object
     partition: list[SubZone]
     hours: list[int]
-    hazard: np.ndarray | None = None
+    hazard: np.ndarray | None = None            # aggregate (max over hours) hazard, for candidates
+    hazard_stack: list | None = None            # per-hour hazard arrays aligned to `hours` (browse)
     timings_summary: str = ""
 
 
@@ -385,6 +386,7 @@ class _DomainPlan:
     zones: list[SubZone]
     timings: RunTimings
     hazard: np.ndarray | None = None
+    hazard_stack: list | None = None
 
 
 def _expand_bbox(bbox_latlon, buffer_m):
@@ -402,6 +404,7 @@ def _prepare_domain_plan(
     on_progress=None,
     cancel=None,
     cleanup: bool = True,
+    hourly_hazard: bool = False,
 ) -> _DomainPlan:
     """Prepare the fine DEM, wind provider, and momentum domains for any unified workflow.
 
@@ -450,6 +453,7 @@ def _prepare_domain_plan(
 
     zones: list[SubZone]
     hazard_map: np.ndarray | None = None
+    hazard_stack: list | None = None
     if cfg.domain_mode == "manual" and cfg.manual_zones:
         with timings.measure("features"):
             zones = list(cfg.manual_zones)
@@ -488,24 +492,44 @@ def _prepare_domain_plan(
     else:
         # FEATURE-BASED domains (ADR-0023): screen the WHOLE zone once (continuous Pass-1 mass) to
         # find the relief features, then place ONE momentum domain per feature.
+        from ..screening.pass1 import hourly_indicator, hourly_indicator_stack
         with timings.measure("criblage"):
             if on_progress is not None:
                 on_progress(0, "Criblage Pass-1 sur toute la zone (détection des reliefs)…")
-            from ..screening.pass1 import hourly_indicator
 
-            try:
-                rep_spd, rep_dir = make(cfg.hours[0])(cx0, cy0)  # representative screening wind
-            except Exception:
-                rep_spd, rep_dir = 8.0, 270.0  # geometry-driven screening if the forecast is down
-            if on_progress is not None:
-                on_progress(
-                    0, f"Criblage : vent {rep_spd * 3.6:.0f} km/h de {direction_label(rep_dir)}")
-            screen_work = _screening_work_dir(work_root, dem_path, rep_spd, rep_dir, 150.0)
-            hazard, _vel = hourly_indicator(
-                dem=dem, cli=cli, dem_path=str(dem_path), work_dir=screen_work,
-                wind_speed_ms=rep_spd, wind_from_deg=rep_dir, resolution_m=150.0,
-                edge_buffer_m=300.0, force_run=False, cancel=cancel,
-                on_progress=lambda p, m: on_progress(0, f"Criblage : {m}") if on_progress else None)
+            def _wind_at(h):
+                try:
+                    return make(h)(cx0, cy0)  # representative screening wind for hour/scenario h
+                except Exception:
+                    return 8.0, 270.0  # geometry-driven screening if the forecast is down
+
+            if hourly_hazard and len(cfg.hours) > 1:
+                # Screen EVERY hour/scenario so the map can be browsed; detect features on the
+                # element-wise-max AGGREGATE so candidates cover the whole window (ADR-0036).
+                series = [(wind_label_for_case(cfg, h), *_wind_at(h)) for h in cfg.hours]
+                results = hourly_indicator_stack(
+                    dem=dem, cli=cli, dem_path=str(dem_path), series=series,
+                    work_dir_for=(lambda i, label, spd, drc:
+                                  _screening_work_dir(work_root, dem_path, spd, drc, 150.0)),
+                    resolution_m=150.0, edge_buffer_m=300.0, force_run=False,
+                    max_workers=min(len(series), 4), cancel=cancel,
+                    on_progress=(lambda p, m: on_progress(p, f"Criblage horaire : {m}")
+                                 if on_progress else None))
+                hazard_stack = [r.hazard for r in results]
+                hazard = (np.maximum.reduce(hazard_stack) if hazard_stack
+                          else np.zeros(dem.shape, dtype="float64"))
+            else:
+                rep_spd, rep_dir = _wind_at(cfg.hours[0])
+                if on_progress is not None:
+                    on_progress(0, f"Criblage : vent {rep_spd * 3.6:.0f} km/h de "
+                                   f"{direction_label(rep_dir)}")
+                screen_work = _screening_work_dir(work_root, dem_path, rep_spd, rep_dir, 150.0)
+                hazard, _vel = hourly_indicator(
+                    dem=dem, cli=cli, dem_path=str(dem_path), work_dir=screen_work,
+                    wind_speed_ms=rep_spd, wind_from_deg=rep_dir, resolution_m=150.0,
+                    edge_buffer_m=300.0, force_run=False, cancel=cancel,
+                    on_progress=(lambda p, m: on_progress(0, f"Criblage : {m}")
+                                 if on_progress else None))
 
         if segments_ll:  # keep only features within the corridor around each route segment
             mask = np.zeros(dem.shape, dtype=bool)
@@ -513,6 +537,8 @@ def _prepare_domain_plan(
                 if len(seg) >= 1:
                     mask |= corridor_mask(dem, _seg_xy(seg), cfg.corridor_margin_km * 1000.0)
             hazard = np.where(mask, hazard, 0.0)
+            if hazard_stack is not None:
+                hazard_stack = [np.where(mask, hz, 0.0) for hz in hazard_stack]
             if on_progress is not None:
                 on_progress(0, f"Corridor : marge {cfg.corridor_margin_km:.1f} km autour du parcours")
 
@@ -529,7 +555,7 @@ def _prepare_domain_plan(
 
     return _DomainPlan(
         dem_path=str(dem_path), dem=dem, wind_provider=make, zones=zones, timings=timings,
-        hazard=hazard_map)
+        hazard=hazard_map, hazard_stack=hazard_stack)
 
 
 def screen_candidates(
@@ -545,12 +571,14 @@ def screen_candidates(
         return ScreeningResult(dem_path="", crs=None, partition=[], hours=[],
                                timings_summary="aucune heure sélectionnée")
     plan = _prepare_domain_plan(cfg, cli=cli, cache_dir=cache_dir,
-                                on_progress=on_progress, cancel=cancel, cleanup=True)
+                                on_progress=on_progress, cancel=cancel, cleanup=True,
+                                hourly_hazard=True)
     if on_progress is not None:
         on_progress(100, f"Criblage terminé : {len(plan.zones)} candidat(s).")
     return ScreeningResult(
         dem_path=plan.dem_path, crs=plan.dem.crs, partition=plan.zones,
-        hours=list(cfg.hours), hazard=plan.hazard, timings_summary=plan.timings.summary())
+        hours=list(cfg.hours), hazard=plan.hazard, hazard_stack=plan.hazard_stack,
+        timings_summary=plan.timings.summary())
 
 
 def run_auto(
