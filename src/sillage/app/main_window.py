@@ -1375,7 +1375,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 provider = make(h)
                 geo_dir = provider(cx, cy)[1]
             except Exception:
-                provider = lambda x, y: (s_spd, s_drc)
+                def provider(_x, _y):
+                    return (s_spd, s_drc)
                 geo_dir = s_drc
             field = subzone_speed_field(
                 dem=dem, cli=cli, wind_at_center=provider, nx=nx, ny=ny,

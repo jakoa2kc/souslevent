@@ -65,23 +65,26 @@ python scripts/demo_pass1.py --dem path/to/dem.tif --run-windninja --fetch-forec
 Desktop apps (need WindNinja installed + a display):
 
 ```bash
-python scripts/souslevent.py       # unified: rectangle or route, then one of the 3 workflows
+python scripts/souslevent.py       # unified: rectangle or route, then one of the 2 workflows
 python scripts/sillage_gui.py     # manual: draw a zone, Pass-1 map, draw a Pass-2 rectangle → 3D
 python scripts/sillage_auto.py    # automatic: draw a flight route + window → corridor wake (3D)
 ```
 
-After `pip install -e .[gui]`, the new command is `souslevent`. The two older commands
-`sillage-gui` and `sillage-auto` remain as legacy backups.
+After `pip install .`, the console command is `souslevent` (the Qt/VTK GUI stack ships in the base
+install). The two older apps stay runnable locally via `python scripts/sillage_gui.py` /
+`scripts/sillage_auto.py` as legacy backups.
 
 You also need **WindNinja** installed separately (provides `WindNinja_cli` and the
 momentum solver). See `docs/support/environment.md`.
 
 ## Status
 
-The new **SousLeVent** app is the global UI: select a rectangle or route, then choose between
-Pass-1-only/manual candidate selection, Pass-1 + automatic candidates, or direct Pass-2 everywhere.
-The two older desktop apps are kept as backups. Roadmap in `docs/07_roadmap.md`; the chronological
-reasoning trail in `docs/06_dev_log.md`; the automatic mode in `docs/10_auto_pipeline.md`.
+The **SousLeVent** app is the global UI: select a **rectangle or a route**, then choose one of two
+workflows — **Pass-1 then manual candidate selection** (browse the hourly hazard, pick the zones worth
+solving, Pass-2 on all hours for them), or **Pass-2 everywhere** (blind corridor paving, no Pass-1).
+Wind is the hourly AROME forecast **or** a manual homogeneous speed × direction grid. The two older
+desktop apps are kept as backups. Roadmap in `docs/07_roadmap.md`; the chronological reasoning trail
+in `docs/06_dev_log.md`; the automatic mode in `docs/10_auto_pipeline.md`.
 
 ## For AI tools / new contributors
 

@@ -47,18 +47,19 @@ def import_contextily():
     except Exception:
         pass
     candidates.append(Path(__file__).resolve().parents[3] / ".tmp" / "contextily")
-    tmp = None
+    tmp = session_tmp = None
     for candidate in candidates:
         try:
+            # Require the WHOLE tree (dir + session/joblib) so a candidate whose parent is writable
+            # but whose subdirs are not falls through to the next one instead of raising.
             candidate.mkdir(parents=True, exist_ok=True)
-            tmp = candidate
+            (candidate / "session" / "joblib").mkdir(parents=True, exist_ok=True)
+            tmp, session_tmp = candidate, candidate / "session"
             break
         except OSError:
             continue
     if tmp is None:
         raise PermissionError("Aucun dossier temporaire accessible pour contextily/joblib.")
-    session_tmp = tmp / "session"
-    (session_tmp / "joblib").mkdir(parents=True, exist_ok=True)
     keys = ("TMP", "TEMP", "TMPDIR")
     old = {k: os.environ.get(k) for k in keys}
     old_tempdir = tempfile.tempdir

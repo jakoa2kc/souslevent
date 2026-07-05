@@ -2093,3 +2093,32 @@ preselect block + routing + the dead `_refresh_cpu_plan` branch + label). Two ca
 updated (`calc_combo.count()` 3 → 2). ADR-0036 amended.
 
 **Result.** `pytest -q` → **109 passed**.
+
+---
+
+## Entry 85 — Release-hardening pass (packaging, security, install, lint)  (2026-07-05)
+
+Acting on a release-readiness review before public git + exe. Fixed:
+
+- **Wheel entry point.** `souslevent` pointed at `scripts.souslevent:main`, but `scripts/` is not a
+  distributed package (only `src` is) — a wheel install would ship a broken command. Now
+  `souslevent = "sillage.souslevent.window:main"` (packaged). The legacy `sillage-gui`/`sillage-auto`
+  console entries were dropped from pyproject (they stay runnable as `python scripts/*.py`); the manual
+  app has no `main()` and the scripts aren't packaged, so keeping them as console commands was broken too.
+- **Zip Slip.** `load_result` did `z.extractall` on an untrusted `.sillage`. Added `_safe_extract`:
+  per-member extraction rejecting absolute paths, Windows drive letters and `..`, plus an 8 GB
+  uncompressed ceiling (zip bomb). Regression test added.
+- **GUI deps in the base install.** PySide6 / pyvistaqt / superqt / contextily moved from the `[gui]`
+  extra into `dependencies` so `pip install souslevent` yields a working GUI (the product IS the GUI);
+  `[gui]` kept as a no-op back-compat alias.
+- **`.env` for installed/frozen use.** `config._load_dotenv` now searches, in order: next to a frozen
+  exe (`sys.frozen`), the project root (dev), then `%APPDATA%\SousLeVent` / `~/.config/souslevent` —
+  so a packaged app finds its config outside the relocated source tree.
+- **contextily temp fallback.** The `session/joblib` mkdir was outside the candidate loop, so a
+  writable parent with unwritable subdirs raised instead of trying the workspace fallback. Moved inside.
+- **Lint green.** Fixed the 4 ruff errors (3 unused `numpy` imports in scripts; one `E731` lambda in
+  the legacy manual app). `ruff check src scripts tests` → clean.
+
+**Still open (owner decision):** the **license** (`pyproject`/README say TBD). For a public repo we
+must pick one + add `LICENSE`, and state that WindNinja / IGN RGE ALTI / Météo-France AROME / Open-Meteo
+remain separately-licensed tools/data. **Result:** `ruff` clean, `pytest -q` → **110 passed**.

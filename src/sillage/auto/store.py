@@ -163,6 +163,33 @@ def save_result(zip_path, result, *, cfg, hour_labels: dict, route_cells=None,
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+_MAX_UNCOMPRESSED_BYTES = 8 * 1024 ** 3  # generous zip-bomb ceiling for a legit .sillage (DEM+meshes)
+
+
+def _safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
+    """Extract a ``.sillage`` zip safely — it is UNTRUSTED user input. Guards against Zip Slip
+    (absolute paths, Windows drive letters, ``..`` escaping ``dest``) and against zip bombs
+    (a total uncompressed-size ceiling). Extracts member by member instead of ``extractall``."""
+    dest = dest.resolve()
+    total = 0
+    for member in zf.infolist():
+        name = member.filename
+        if not name or name.endswith("/"):
+            continue  # directory entry — created implicitly below
+        p = Path(name)
+        if p.is_absolute() or p.drive or ".." in p.parts:
+            raise ValueError(f"Archive Sillage refusée (chemin hors dossier) : {name!r}")
+        target = (dest / p).resolve()
+        if target != dest and dest not in target.parents:
+            raise ValueError(f"Archive Sillage refusée (chemin hors dossier) : {name!r}")
+        total += int(getattr(member, "file_size", 0) or 0)
+        if total > _MAX_UNCOMPRESSED_BYTES:
+            raise ValueError("Archive Sillage refusée (taille décompressée excessive).")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with zf.open(member) as src, open(target, "wb") as out:
+            shutil.copyfileobj(src, out)
+
+
 @dataclass
 class LoadedResult:
     result: object              # auto.pipeline.AutoResult (cases point at the extracted .vtu)
@@ -184,7 +211,7 @@ def load_result(zip_path, dest_dir) -> LoadedResult:
     dest = Path(dest_dir)
     dest.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(str(zip_path), "r") as z:
-        z.extractall(str(dest))
+        _safe_extract(z, dest)
     manifest = json.loads((dest / "manifest.json").read_text(encoding="utf-8"))
     if manifest.get("format") != _FORMAT:
         raise ValueError("Fichier non reconnu (format Sillage attendu).")

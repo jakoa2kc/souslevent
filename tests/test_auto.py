@@ -114,6 +114,21 @@ def test_load_result_reads_legacy_rotor_turb_files(tmp_path):
     assert loaded.result.cases[0].vtu_paths.get("rotor", "").endswith("r.vtu")
 
 
+def test_load_result_rejects_zip_slip(tmp_path):
+    # A .sillage is untrusted input: a member escaping the extraction dir must be refused, not written.
+    import zipfile
+
+    from sillage.auto.store import load_result
+
+    zpath = tmp_path / "evil.sillage"
+    with zipfile.ZipFile(zpath, "w") as z:
+        z.writestr("manifest.json", "{}")
+        z.writestr("../escape.txt", b"pwned")     # path traversal outside dest
+    with pytest.raises(ValueError, match="hors dossier"):
+        load_result(zpath, tmp_path / "open")
+    assert not (tmp_path / "escape.txt").exists()  # nothing written outside the extraction dir
+
+
 def test_forecast_window_fallback_and_absolute_labels():
     from datetime import datetime
     from zoneinfo import ZoneInfo

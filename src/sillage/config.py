@@ -14,17 +14,42 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _load_dotenv() -> None:
-    """Load the project-root ``.env`` into the environment, if python-dotenv is present.
+def _user_config_dir() -> Path:
+    """Stable per-user config dir (survives installs / PyInstaller exe): ``%APPDATA%\\SousLeVent``
+    on Windows, ``~/.config/souslevent`` elsewhere."""
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+        return Path(base) / "SousLeVent"
+    return Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "souslevent"
 
-    Kept optional so the package still imports without the dependency. Real environment
-    variables always win (``override=False``), so CI / shell exports take precedence.
+
+def _dotenv_candidates() -> list[Path]:
+    """.env locations in priority order: next to a frozen exe, the project root (dev), the user dir."""
+    import sys
+
+    cands: list[Path] = []
+    if getattr(sys, "frozen", False):  # PyInstaller / frozen build
+        cands.append(Path(sys.executable).resolve().parent / ".env")
+    cands.append(_PROJECT_ROOT / ".env")
+    cands.append(_user_config_dir() / ".env")
+    return cands
+
+
+def _load_dotenv() -> None:
+    """Load a ``.env`` into the environment, if python-dotenv is present.
+
+    Searches, in priority order, next to a frozen exe, the project root (dev checkout), then the
+    per-user config dir — so an installed app / PyInstaller build finds its config outside the
+    (read-only, relocated) source tree. Kept optional so the package imports without the dependency.
+    Real environment variables always win (``override=False``), so CI / shell exports take precedence.
     """
     try:
         from dotenv import load_dotenv
     except ImportError:
         return
-    load_dotenv(_PROJECT_ROOT / ".env", override=False)
+    for env_path in _dotenv_candidates():
+        if env_path.is_file():
+            load_dotenv(env_path, override=False)
 
 
 def _get(name: str, default: str | None = None) -> str | None:

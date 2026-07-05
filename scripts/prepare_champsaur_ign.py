@@ -12,7 +12,6 @@ import re
 from pathlib import Path
 
 import click
-import numpy as np
 import py7zr
 import requests
 

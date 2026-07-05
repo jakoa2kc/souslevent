@@ -86,7 +86,7 @@ def main(dem_path, wind_from_deg, wind_speed_ms, resolution_m, run_windninja,
     click.echo("[4/4] Computing hazard indicator + candidates ...")
     indicator = ind.hazard_indicator(dem, wind_from_deg, speed_grid=speed_grid)
     candidates = ind.find_candidates(dem, indicator, n=10)
-    click.echo(f"      top candidates (x, y, score):")
+    click.echo("      top candidates (x, y, score):")
     for c in candidates[:10]:
         click.echo(f"        ({c.x:.0f}, {c.y:.0f})  score={c.score:.2f}")
 
@@ -116,7 +116,6 @@ def _center_lonlat(dem):
 
 def _load_speed_grid(asc_paths, shape):
     """Build a speed grid from WindNinja ASCII u,v outputs (best-effort)."""
-    import numpy as np
     import rasterio
     us = [p for p in asc_paths if "_vel" in p.name or "_spd" in p.name]
     if us:
