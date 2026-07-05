@@ -28,3 +28,7 @@ log.*
 .vscode/
 .idea/
 .claude/
+
+# PyInstaller build log
+build_pyinstaller.log
+*.log
