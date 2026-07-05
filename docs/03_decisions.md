@@ -1021,15 +1021,22 @@ it), the feature branch screens **every hour/scenario** via `hourly_indicator_st
 candidates on the **element-wise-max aggregate** (so candidates cover the whole window, not one hour).
 `ScreeningResult`/`_DomainPlan` carry a `hazard_stack` aligned to `hours`. The candidates tab gets an
 **hour/scenario slider** (`_draw_candidate_map` renders `hazard_stack[i]`), hidden for a single map.
-Both Pass-1 workflows now route through this tab: *Pass-1 seul* (manual pick) and *Pass-1 + candidats
-auto* (the top-N are **pre-selected** so it's one extra click to launch Pass-2). `run_auto` keeps its
-single-wind feature detection — the extra N mass solves happen only in the review workflow.
 
-**Consequences.** The hourly hazard view is back and available to both Pass-1 modes; candidates are
-more robust (aggregate over the window). Cost: the review path runs one Pass-1 mass solve per
-hour/scenario (fast, capped at 4 concurrent). The auto-features mode is no longer strictly one-click —
-it stops at the candidate review — which is the manual app's philosophy and lets the pilot see the
-hazard before spending on Pass-2.
+**Only two calc modes** (the auto-preselect "features" mode was dropped, see below): *Pass-1 puis
+sélection des candidats* (screen → the pilot picks the few zones worth solving → Pass-2 on **all**
+hours/scenarios for those zones) and *Pass-2 partout* (blind paving, no Pass-1). `run_auto` keeps its
+single-wind feature detection — the extra N mass solves happen only in the Pass-1 review path.
+
+**Why no auto-preselect mode.** Routing an "auto top-N" mode through the same review tab left it
+differing from manual pick only by a pre-check, while Pass-2 is the expensive step — so a pilot should
+consciously choose the handful of zones to solve. We removed it; the manual pick (with all hours
+computed per selected zone) is the single Pass-1 workflow. (An optional "pre-check top-N" button could
+return later purely as convenience.)
+
+**Consequences.** The hourly hazard view is back; candidates are more robust (aggregate over the
+window). Cost: the review path runs one Pass-1 mass solve per hour/scenario (fast, capped at 4
+concurrent), then Pass-2 runs `selected_zones × all_hours` momentum solves — the plan text spells out
+that count and the ~minutes estimate so the cost is explicit before launching.
 
 ---
 

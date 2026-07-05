@@ -56,9 +56,8 @@ from ..wind.directions import direction_label
 class SousLeVentWindow(AutoWindow):
     """New global window: one selection tab, three calculation workflows."""
 
-    CALC_PASS1_MANUAL = "pass1_manual"
-    CALC_FEATURES_AUTO = "features"
-    CALC_PASS2_EVERYWHERE = "corridor"
+    CALC_PASS1_MANUAL = "pass1_manual"     # Pass-1 → manually pick candidates → Pass-2 (all hours)
+    CALC_PASS2_EVERYWHERE = "corridor"     # blind paving, no Pass-1
 
     def __init__(self) -> None:
         self._selection_mode = "route"
@@ -70,7 +69,6 @@ class SousLeVentWindow(AutoWindow):
         self._candidate_syncing = False
         self._candidate_auto_count = 0
         self._candidate_hour = 0          # index into the screening hazard stack being displayed
-        self._screening_auto_select = False  # features-auto mode preselects the top-N candidates
         self._candidate_press = None
         self._candidate_drag_patch = None
         super().__init__()
@@ -169,9 +167,8 @@ class SousLeVentWindow(AutoWindow):
         calc_row = QtWidgets.QHBoxLayout()
         calc_row.addWidget(QtWidgets.QLabel("Calcul :"))
         self.calc_combo = QtWidgets.QComboBox()
-        self.calc_combo.addItem("Pass-1 seul puis sélection manuelle", self.CALC_PASS1_MANUAL)
-        self.calc_combo.addItem("Pass-1 + candidats auto (pré-cochés)", self.CALC_FEATURES_AUTO)
-        self.calc_combo.addItem("Pass-2 partout", self.CALC_PASS2_EVERYWHERE)
+        self.calc_combo.addItem("Pass-1 puis sélection des candidats", self.CALC_PASS1_MANUAL)
+        self.calc_combo.addItem("Pass-2 partout (pavage aveugle)", self.CALC_PASS2_EVERYWHERE)
         self.calc_combo.currentIndexChanged.connect(self._on_calc_mode_change)
         calc_row.addWidget(self.calc_combo, stretch=1)
         lay.addLayout(calc_row)
@@ -397,18 +394,16 @@ class SousLeVentWindow(AutoWindow):
         is_route = self._selection_mode == "route"
         is_pass2_everywhere = calc == self.CALC_PASS2_EVERYWHERE
         self.margin_spin.setEnabled(is_route)
-        self.features_spin.setEnabled(calc in (self.CALC_PASS1_MANUAL, self.CALC_FEATURES_AUTO))
+        self.features_spin.setEnabled(calc == self.CALC_PASS1_MANUAL)
         self.step_spin.setEnabled(is_pass2_everywhere)
         if hasattr(self, "margin_row_widget"):
             self.margin_row_widget.setVisible(is_route)
         if hasattr(self, "features_row_widget"):
-            self.features_row_widget.setVisible(
-                calc in (self.CALC_PASS1_MANUAL, self.CALC_FEATURES_AUTO))
+            self.features_row_widget.setVisible(calc == self.CALC_PASS1_MANUAL)
         if hasattr(self, "step_row_widget"):
             self.step_row_widget.setVisible(is_pass2_everywhere)
         labels = {
             self.CALC_PASS1_MANUAL: "✓  Valider — lancer Pass-1",
-            self.CALC_FEATURES_AUTO: "✓  Valider — Pass-1 (candidats auto à revoir)",
             self.CALC_PASS2_EVERYWHERE: "✓  Valider — Pass-2 partout",
         }
         self.btn_validate.setText(labels.get(calc, "✓  Valider"))
@@ -547,13 +542,10 @@ class SousLeVentWindow(AutoWindow):
                 domains = max(1, math.ceil(width / step) * math.ceil(height / step))
                 tasks = (f"pavage rectangle : ~{domains} secteurs "
                          f"({width:.1f} × {height:.1f} km) × {cases} {wind_unit}")
-        elif calc == self.CALC_FEATURES_AUTO:
-            domains = self.features_spin.value()
-            tasks = f"≤ {domains} candidats auto × {cases} {wind_unit}"
         else:
             domains = 1
             tasks = (f"Pass-1 seul : jusqu'à {self.features_spin.value()} candidats proposés. "
-                     f"Le Pass-2 manuel utilisera ensuite {cases} {wind_unit}.")
+                     f"Le Pass-2 calculera ensuite {cases} {wind_unit} par zone sélectionnée.")
         max_tasks = 1 if calc == self.CALC_PASS1_MANUAL else max(1, cases * max(1, int(domains)))
         requested = self.workers_slider.value()
         requested_plan = momentum_parallel_plan(requested, cores=self._cores)
@@ -628,8 +620,7 @@ class SousLeVentWindow(AutoWindow):
             def fn(on_progress, cancel):
                 return run_auto(
                     cfg, cli=cli, cache_dir=cache, on_progress=on_progress, cancel=cancel)
-        else:  # PASS1_MANUAL or FEATURES_AUTO: screen (hourly hazard) → review → Pass-2
-            self._screening_auto_select = calc == self.CALC_FEATURES_AUTO  # preselect top-N features
+        else:  # PASS1_MANUAL: screen (hourly hazard) → pick candidates → Pass-2 (all hours)
             def fn(on_progress, cancel):
                 return screen_candidates(
                     cfg, cli=cli, cache_dir=cache, on_progress=on_progress, cancel=cancel)
@@ -696,15 +687,8 @@ class SousLeVentWindow(AutoWindow):
             self._candidate_dem = None
             self._draw_candidate_placeholder(f"MNT illisible pour la carte candidats : {exc}")
             return
-        if self._screening_auto_select and result.partition:  # features-auto: preselect the top-N
-            self._candidate_syncing = True
-            try:
-                for r in range(min(self.features_spin.value(), self.candidate_list.count())):
-                    self.candidate_list.item(r).setSelected(True)
-            finally:
-                self._candidate_syncing = False
         self._draw_candidate_map()
-        self._on_candidate_selection()  # refresh the Pass-2 button + summary for any preselection
+        self._on_candidate_selection()  # refresh the Pass-2 button + summary
 
     def _on_candidate_hour_change(self, value: int) -> None:
         self._candidate_hour = int(value)
@@ -775,10 +759,14 @@ class SousLeVentWindow(AutoWindow):
                                       task_count=tasks)
         unit = "scénario(s) vent" if cfg.wind_mode == WIND_MODE_MANUAL_GRID else "h"
         idle = "" if plan.idle_cores == 0 else f", {plan.idle_cores} au repos"
+        per = pass2_estimate_minutes(self._mesh_preset()[0])  # per-solve minutes for the chosen mesh
+        waves = max(1, math.ceil(tasks / max(1, plan.workers)))
         return (
-            f"{selected_count} domaine(s) × {cases} {unit} = {tasks} calcul(s) Pass-2. "
-            f"{plan.workers} en parallèle × {plan.threads_per_worker} thread(s) "
-            f"= {plan.used_cores}/{plan.cores} cœurs{idle}.")
+            f"{selected_count} domaine(s) × {cases} {unit} (tous calculés) = {tasks} calcul(s) "
+            f"Pass-2. {plan.workers} en parallèle × {plan.threads_per_worker} thread(s) "
+            f"= {plan.used_cores}/{plan.cores} cœurs{idle}. "
+            f"Maillage {self.mesh_combo.currentText()} ≈ {per} min/calcul ⇒ ~{per * waves} min "
+            f"au total (indicatif).")
 
     def _draw_candidate_placeholder(self, text: str | None = None) -> None:
         if not hasattr(self, "candidate_fig"):

@@ -2076,3 +2076,20 @@ solves only happen in the review workflow). Labels updated so "candidats auto" r
 
 **Result.** 2 new tests (mesh preset → cfg; hour slider browses the stack). `pytest -q` → **109 passed**.
 The manual app (`sillage-gui`) now has no feature the unified app lacks; it can be retired once field-tested.
+
+---
+
+## Entry 84 — Drop the auto-preselect Pass-1 mode; keep manual pick (Pass-2 = all hours)  (2026-07-05)
+
+**Why.** After Entry 83 routed both Pass-1 modes through the candidates review, "Pass-1 + candidats
+auto" differed from manual pick only by pre-checking the top-N — redundant, and since Pass-2 is the
+costly step the pilot should deliberately choose the few zones to solve.
+
+**What.** Removed `CALC_FEATURES_AUTO` (combo entry, constant, `_screening_auto_select` field +
+preselect block + routing + the dead `_refresh_cpu_plan` branch + label). Two calc modes remain:
+**Pass-1 puis sélection des candidats** and **Pass-2 partout**. The manual Pass-2 launch already solves
+**all** `cfg.hours` for the selected zones (`run_auto` tasks = zones × hours); the plan text now reads
+"N domaine(s) × M créneaux (tous calculés) = T calculs Pass-2" + the mesh ~minutes estimate. Test
+updated (`calc_combo.count()` 3 → 2). ADR-0036 amended.
+
+**Result.** `pytest -q` → **109 passed**.

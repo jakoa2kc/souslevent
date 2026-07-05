@@ -291,7 +291,7 @@ def test_souslevent_window_builds_offscreen():
     w = SousLeVentWindow()
     assert w.windowTitle() == "SousLeVent"
     assert w.selection_combo.count() == 2
-    assert w.calc_combo.count() == 3
+    assert w.calc_combo.count() == 2  # Pass-1→sélection, Pass-2 partout (features-auto dropped)
     assert w.render_basemap_combo.currentText() == "IGN plan"
     assert w.candidate_basemap_combo.currentText() == "IGN plan"
     assert w.btn_apply_scale.text() == "Recalculer la vue 3D"
