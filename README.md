@@ -103,5 +103,13 @@ full context and the *why* behind every major decision.
 
 ## License
 
-TBD. Respect the licenses of IGN (RGE ALTI), Météo-France (AROME), Open-Meteo, and
-Copernicus/ERA5 as those integrations are used.
+**MIT** — see [`LICENSE`](LICENSE). The MIT terms cover *this* source code only.
+
+Third-party tools and data keep their own licenses/terms, which you must respect when you use
+them: **WindNinja** (the mass/momentum solver, installed separately), **IGN RGE ALTI** (DEM),
+**Météo-France AROME** (forecast, API key), **Open-Meteo**, and **Copernicus/ERA5** where used.
+
+> ⚠️ **Safety disclaimer.** SousLeVent is a decision-support and educational tool. Its output is a
+> steady-RANS *model* of the lee flow (Pass-1 flags candidates, not rotors), not a measurement or a
+> guarantee. It must **not** be used as the sole basis for a flight decision. Fly within your
+> judgement and training. The software is provided "AS IS", without warranty (see LICENSE).

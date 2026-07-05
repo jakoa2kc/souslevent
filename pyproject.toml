@@ -8,9 +8,16 @@ version = "0.0.1"
 description = "SousLeVent: leeward turbulence / rotor mapping for mountain paragliding."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "TBD" }
-authors = [{ name = "Sillage developer" }]
+license = { file = "LICENSE" }
+authors = [{ name = "Pierre-Jacques Font" }]
 keywords = ["paragliding", "wind", "cfd", "windninja", "openfoam", "terrain", "mountain", "rotor"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Operating System :: Microsoft :: Windows",
+  "Topic :: Scientific/Engineering :: Atmospheric Science",
+  "Intended Audience :: End Users/Desktop",
+]
 
 # SousLeVent is a desktop GUI product, so the Qt/VTK/basemap stack ships in the BASE install
 # (`pip install souslevent` must give a working `souslevent` command — not a broken entry point).
