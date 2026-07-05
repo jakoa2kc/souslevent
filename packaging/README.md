@@ -30,8 +30,8 @@ pyinstaller packaging\souslevent.spec --noconfirm
 
 - The spec collects VTK / GDAL (rasterio) / PROJ (pyproj) native data — required, or basemaps /
   DEM IO / 3D silently break.
-- First build keeps a **console** (`console=True` in the spec) so runtime import errors are visible.
-  Once it runs clean, set `console=False` and rebuild for the release.
+- The spec builds **windowed** (`console=False`) — no terminal window. If a first run on a new
+  machine misbehaves, temporarily set `console=True` in the spec to see import/DLL tracebacks.
 - **WindNinja is NOT bundled** — it is a separate install; point `WINDNINJA_CLI` at it (see below).
 
 ## Configuration on a user machine

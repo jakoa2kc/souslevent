@@ -58,7 +58,7 @@ exe = EXE(
     debug=False,
     strip=False,
     upx=False,
-    console=True,       # set False for the final release build
+    console=False,      # windowed release build; set True to debug first-run import errors
 )
 coll = COLLECT(
     exe,
