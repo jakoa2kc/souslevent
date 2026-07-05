@@ -2122,3 +2122,25 @@ Acting on a release-readiness review before public git + exe. Fixed:
 **Still open (owner decision):** the **license** (`pyproject`/README say TBD). For a public repo we
 must pick one + add `LICENSE`, and state that WindNinja / IGN RGE ALTI / Météo-France AROME / Open-Meteo
 remain separately-licensed tools/data. **Result:** `ruff` clean, `pytest -q` → **110 passed**.
+
+---
+
+## Entry 86 — First installers built: wheel + Windows exe  (2026-07-05)
+
+**License:** MIT chosen (owner) — `LICENSE` added, pyproject/README updated, safety disclaimer added.
+
+**Wheel.** `python -m build --wheel` → `dist/souslevent-0.0.1-py3-none-any.whl` (155 KB). Verified the
+console entry point is the packaged `souslevent = sillage.souslevent.window:main` and no `scripts/`
+leaked in — the earlier entry-point fix is proven. (The build venv needed `setuptools` installed; a
+Python-3.14 venv doesn't bundle it.)
+
+**Windows exe.** `pyinstaller packaging/souslevent.spec` → `dist/SousLeVent/SousLeVent.exe`, a **1.2 GB
+one-folder bundle**. PyInstaller 6.21 builds fine on **Python 3.14**. The spec's `collect_all` pulled
+the native data that matters — verified present in the bundle: rasterio `gdal_data`, pyproj proj data,
+`vtkmodules`, `xyzservices` provider data. Smoke test (`QT_QPA_PLATFORM=offscreen SousLeVent.exe`,
+30 s timeout): the app imports everything, builds the window and enters the Qt loop with **no
+traceback / DLL error** (timed out still-running = healthy).
+
+**Left for the release build:** flip `console=True → False` in the spec (windowed), test on a **clean**
+machine without Python, and ship `dist/SousLeVent/` zipped. WindNinja stays a separate install
+(`WINDNINJA_CLI` in the `.env` next to the exe). Packaging steps in `packaging/README.md`.
