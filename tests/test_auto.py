@@ -153,6 +153,24 @@ def test_feature_domains_places_one_domain_per_feature():
         assert abs((z.bbox[3] - z.bbox[1]) - width) < 1.0
 
 
+def test_feature_domains_coerces_candidate_indices(monkeypatch):
+    from sillage.auto.partition import feature_domains
+    from sillage.screening import indicator as ind
+
+    dem = _dem(np.zeros((40, 40)), res_m=50.0)
+    x, y = dem.transform * (20.5, 20.5)
+    monkeypatch.setattr(
+        ind,
+        "find_candidates",
+        lambda *_a, **_k: [ind.Candidate(row=20.0, col=20.0, x=float(x), y=float(y), score=1.0)],
+    )
+
+    zones = feature_domains(dem, np.ones(dem.shape), max_features=1, target_res_m=50.0)
+
+    assert len(zones) == 1
+    assert all(isinstance(v, int) for v in zones[0].pixel_window)
+
+
 def test_resample_polyline_spaces_and_keeps_endpoints():
     from sillage.auto.partition import _resample_polyline
 
@@ -352,6 +370,128 @@ def test_momentum_parallel_plan_integer_division():
     assert capped.threads_per_worker == 2
     assert capped.used_cores == 12
     assert capped.idle_cores == 2
+
+
+def test_manual_mode_config_carries_selected_zones():
+    from sillage.auto.partition import SubZone
+    from sillage.auto.pipeline import AutoConfig
+
+    zone = SubZone(
+        bbox=(0.0, 0.0, 1000.0, 1000.0), center=(500.0, 500.0),
+        crest_alt_m=1800.0, relief_m=300.0, est_cells=10_000,
+        pixel_window=(0, 10, 0, 10))
+    cfg = AutoConfig(bbox_latlon=(44.0, 6.0, 44.1, 6.1), hours=(9,),
+                     domain_mode="manual", manual_zones=(zone,))
+    assert cfg.domain_mode == "manual"
+    assert cfg.manual_zones[0].center == (500.0, 500.0)
+
+
+def test_manual_wind_grid_scenarios_and_provider():
+    from sillage.auto import pipeline
+    from sillage.auto.partition import SubZone
+    from sillage.auto.pipeline import AutoConfig, WIND_MODE_MANUAL_GRID
+
+    zone = SubZone(
+        bbox=(0.0, 0.0, 1000.0, 1000.0), center=(500.0, 500.0),
+        crest_alt_m=1800.0, relief_m=300.0, est_cells=10_000,
+        pixel_window=(0, 10, 0, 10))
+    cfg = AutoConfig(
+        bbox_latlon=(44.0, 6.0, 44.1, 6.1), hours=(0, 1, 2, 3),
+        domain_mode="manual", manual_zones=(zone,), wind_mode=WIND_MODE_MANUAL_GRID,
+        manual_wind_speeds_kmh=(10, 15), manual_wind_dirs_deg=(270, 315))
+
+    scenarios = pipeline.manual_wind_scenarios(cfg)
+    assert scenarios == [(0, 10, 270), (1, 15, 270), (2, 10, 315), (3, 15, 315)]
+    assert pipeline.wind_label_for_case(cfg, 0) == "10 km/h · Ouest"
+    assert pipeline.wind_label_for_case(cfg, 2) == "10 km/h · Nord-Ouest"
+
+    spd_ms, drc = pipeline.manual_wind_provider(cfg)(1)(123.0, 456.0)
+    assert spd_ms == pytest.approx(15.0 / 3.6)
+    assert drc == 270.0
+
+
+def test_run_auto_parallelizes_manual_wind_scenarios(monkeypatch):
+    import threading
+    import time
+    from types import SimpleNamespace
+
+    from sillage.auto import pipeline
+    from sillage.auto.partition import SubZone
+    from sillage.auto.pipeline import AutoConfig, WIND_MODE_MANUAL_GRID
+    from sillage.timing import RunTimings
+
+    zone = SubZone(
+        bbox=(0.0, 0.0, 1000.0, 1000.0), center=(500.0, 500.0),
+        crest_alt_m=1800.0, relief_m=300.0, est_cells=10_000,
+        pixel_window=(0, 10, 0, 10))
+    dem = SimpleNamespace(crs=CRS.from_epsg(32631))
+    cfg = AutoConfig(
+        bbox_latlon=(44.0, 6.0, 44.1, 6.1), hours=(0, 1, 2, 3),
+        domain_mode="manual", manual_zones=(zone,), wind_mode=WIND_MODE_MANUAL_GRID,
+        manual_wind_speeds_kmh=(10, 15), manual_wind_dirs_deg=(270, 315),
+        momentum_workers=4)
+    make = pipeline.manual_wind_provider(cfg)
+    monkeypatch.setattr(pipeline, "detect_cores", lambda: 4)
+    monkeypatch.setattr(
+        pipeline,
+        "_prepare_domain_plan",
+        lambda *_a, **_k: pipeline._DomainPlan(
+            dem_path="dem.tif", dem=dem, wind_provider=make, zones=[zone],
+            timings=RunTimings(), hazard=None),
+    )
+    monkeypatch.setattr(pipeline, "crop_dem", lambda *_a, **_k: dem)
+    monkeypatch.setattr(pipeline, "write_dem", lambda *_a, **_k: None)
+
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def fake_run_momentum(**_kwargs):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return SimpleNamespace(returncode=0, openfoam_case_dir="case")
+
+    monkeypatch.setattr(pipeline, "run_momentum", fake_run_momentum)
+
+    result = pipeline.run_auto(cfg, cli="WindNinja_cli", cache_dir="unused")
+
+    assert len(result.cases) == 4
+    assert max_active > 1
+
+
+def test_screen_candidates_builds_timing_summary(monkeypatch):
+    from types import SimpleNamespace
+
+    from sillage.auto import pipeline
+    from sillage.auto.partition import SubZone
+    from sillage.timing import RunTimings
+
+    zone = SubZone(
+        bbox=(0.0, 0.0, 1000.0, 1000.0), center=(500.0, 500.0),
+        crest_alt_m=1800.0, relief_m=300.0, est_cells=10_000,
+        pixel_window=(0, 10, 0, 10))
+    hazard = np.ones((4, 4), dtype="float64")
+    timings = RunTimings()
+    timings.add("criblage", 1.0)
+    plan = pipeline._DomainPlan(
+        dem_path="dem.tif", dem=SimpleNamespace(crs="EPSG:32631"),
+        wind_provider=lambda _h: None, zones=[zone], timings=timings, hazard=hazard)
+    monkeypatch.setattr(pipeline, "_prepare_domain_plan", lambda *_a, **_k: plan)
+    progress: list[tuple[int, str]] = []
+
+    result = pipeline.screen_candidates(
+        pipeline.AutoConfig(bbox_latlon=(44.0, 6.0, 44.1, 6.1), hours=(9,)),
+        cli="WindNinja_cli", cache_dir=".", on_progress=lambda p, m: progress.append((p, m)))
+
+    assert len(result.partition) == 1
+    assert result.hazard is hazard
+    assert "criblage" in result.timings_summary
+    assert progress[-1] == (100, "Criblage terminé : 1 candidat(s).")
 
 
 def test_store_save_load_roundtrip(tmp_path):

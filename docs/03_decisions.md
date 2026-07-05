@@ -936,6 +936,57 @@ dominant remaining cause is physical: independent RANS solves with per-zone wind
 
 ---
 
+## ADR-0033 — One unified app (`SousLeVentWindow`) subclassing the auto app; two legacy backups
+
+**Status.** Accepted (2026-07-05).
+
+**Context.** Two separate desktop apps had grown in parallel: `app.main_window` (manual: draw one
+feature → its precise rotor) and `auto.window` (automatic: draw a route/window → the whole corridor's
+wake). Users had to pick the app before knowing which workflow they needed, and every display fix had
+to be duplicated. We wanted a single entry point covering all workflows: route **or** rectangle
+selection × forecast **or** manual wind × features / blind-corridor / screen-then-pick domains.
+
+**Decision.** Add `sillage.souslevent.window.SousLeVentWindow`, which **subclasses**
+`auto.window.AutoWindow` and overrides only the selection/mode/run-launch surface, inheriting the 3D
+render loop, caches, wind-restore guards, close handling and opacity/legend machinery unchanged. It
+becomes the `souslevent` console entry point; `sillage-gui` (manual) and `sillage-auto` (automatic)
+remain as **legacy backups** so nothing is lost. A new `app/qt_image.py` (`set_label_image`) is shared
+by all windows.
+
+**Consequences.** One app to learn; the hard-won auto-app fixes (ADR-0025/0028/0030/0032 era:
+disk-safe cases, ETA, saved-wind restore, blend) are inherited, not re-implemented. **Debt (tracked,
+dev log):** the new app currently *copies* ~150+ lines of UI from `AutoWindow`/`main_window` (select-tab
+rows, rubber-band rectangle selector, hazard-map rendering, CPU-plan text, run-launch, `main()`), so a
+UI change may need to land in more than one window until shared row-builders/helpers are extracted.
+"Three windows, one engine" holds only by that discipline until then.
+
+---
+
+## ADR-0034 — Manual homogeneous wind grid (speed × direction scenarios)
+
+**Status.** Accepted (2026-07-05).
+
+**Context.** Beyond the AROME forecast, a pilot often wants to ask "what does the lee look like for a
+*chosen* wind" — e.g. 10/15/20 km/h from SW/W — to reason about a site independently of the day's
+forecast, or to explore a classic dangerous configuration.
+
+**Decision.** `AutoConfig` gains `wind_mode` (`forecast` | `manual_grid`) plus
+`manual_wind_speeds_kmh` / `manual_wind_dirs_deg`. `pipeline.manual_wind_scenarios(cfg)` expands the
+grid to `(case_id, speed_kmh, from_deg)` and `manual_wind_provider(cfg)` returns a homogeneous
+`(speed_ms, from_deg)` per scenario (km/h → m/s at that edge, `/3.6`). The scenario index **reuses the
+existing `hour` field** on `CaseResult`/results, so the whole solve/aggregate/save/slider machinery is
+unchanged — only the label differs (`wind_label_for_case`: "15 km/h · Sud-Ouest" vs "14h"). Speeds are
+deduped on a 5 km/h step, directions on a 45°/`%360` step, so the UI's `hours = range(n_speed×n_dir)`
+always matches the scenario count. New `wind/directions.py` gives the French octant labels.
+
+**Why reuse `hour`.** It keeps one code path for forecast and manual runs (tasks are still
+`(zone, case_id)`), and `.sillage` round-trips for free once `wind_mode` + the two grids are persisted
+in the manifest (they are). **Units caveat:** km/h lives in `AutoConfig`/UI (a display-edge unit) and
+is converted to m/s inside `manual_wind_provider`; any new consumer of the grid must convert there —
+never feed `manual_wind_speeds_kmh` to the solver as m/s (a 3.6× error in a safety tool).
+
+---
+
 ## Open questions tracked as future ADRs
 
 - **Stability / diurnal winds on the momentum solver.** Available on the mass solver

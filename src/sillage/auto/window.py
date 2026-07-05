@@ -24,22 +24,30 @@ from ..app.map_tab import MapTab
 from ..config import load_config
 from ..terrain.dem import load_dem
 from ..timing import format_seconds
+from ..viz import map2d
+from ..wind.directions import direction_label
 from . import AutoConfig, cleanup_auto_artifacts, run_auto
 from .arome import forecast_window
 from .pipeline import (
     DEFAULT_MAX_FEATURES,
+    WIND_MODE_MANUAL_GRID,
     bbox_from_route,
     default_momentum_workers,
     detect_cores,
+    manual_wind_scenarios,
     momentum_parallel_plan,
+    wind_label_for_case,
 )
-from .wind import arrows_at_hour, route_wind_series
+from .wind import _sample_route, arrows_at_hour, route_wind_series
 
 GREEN = ("QPushButton { font-weight:bold; padding:8px 18px; border-radius:5px;"
          " background:#2d7d2d; color:white; } QPushButton:disabled { background:#a9c7a9; }")
+RENDER_BUTTON_TEXT = "Recalculer la vue 3D"
+RENDER_BUSY_TEXT = "Calcul en cours..."
 
 TOPO_PRESETS = (1.0, 5.0, 10.0, 25.0)
 TOPO_LABELS = ("1 m (IGN)", "5 m", "10 m", "25 m")
+NO_BASEMAP = "Aucun"
 
 
 class AutoWindow(QtWidgets.QMainWindow):
@@ -62,6 +70,9 @@ class AutoWindow(QtWidgets.QMainWindow):
         self._plotter = None
         self._rotor_cache = {}   # (zone, hour) -> rotor mesh, so hour scrubs don't re-read cases
         self._rendered = False  # first 3D render resets the camera; later ones keep it
+        self._manual_render_speeds = []
+        self._manual_render_dirs = []
+        self._manual_render_case_by_pair = {}
         self._opacity = 0.5      # rotor volume opacity (slider-controlled, see inside the thickness)
         self._metric = "rotor"          # 3D colour metric (default rotor)
         # Display units. Ranges drive both extraction (min/max shown) and colour clamping.
@@ -75,7 +86,7 @@ class AutoWindow(QtWidgets.QMainWindow):
         self._tex_cache = {}     # cached basemap textures so re-renders don't re-fetch tiles
         self._terrain_cache = {}  # cached terrain mesh (id(dem)->mesh) so scrubs don't rebuild it
         self._last_cfg = None    # AutoConfig of the shown result (for save)
-        self._hour_labels = None  # {hour: absolute-date label} — from the run day, kept for reopen
+        self._hour_labels = None  # {hour/scenario: display label} — kept for reopen/save
         self._loaded_dir = None   # temp dir holding an opened .sillage bundle (cleaned on close)
         self._restoring = False   # True while restoring an opened bundle: don't refetch route winds
         self._route_gen = 0       # bumped on every route change / open → stale wind fetches are dropped
@@ -300,23 +311,7 @@ class AutoWindow(QtWidgets.QMainWindow):
         self.btn_save.setEnabled(False)
         self.btn_save.clicked.connect(self._on_save)
         srow.addWidget(self.btn_save)
-        srow.addSpacing(16)
-        srow.addWidget(QtWidgets.QLabel("Créneau :"))
-        self.hour_start_label = QtWidgets.QLabel("")
-        self.hour_start_label.setStyleSheet("color:#888; font-size:10px;")
-        srow.addWidget(self.hour_start_label)
-        self.hour_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.hour_slider.setEnabled(False)
-        self.hour_slider.valueChanged.connect(self._on_hour_change)
-        self.hour_end_label = QtWidgets.QLabel("")
-        self.hour_end_label.setStyleSheet("color:#888; font-size:10px;")
-        srow.addWidget(self.hour_slider, stretch=1)
-        srow.addWidget(self.hour_end_label)
-        self.hour_label = QtWidgets.QLabel("")
-        self.hour_label.setStyleSheet("font-weight:bold;")
-        self.hour_label.setMinimumWidth(150)
-        srow.addWidget(self.hour_label)
-        srow.addSpacing(16)
+        srow.addStretch(1)
         srow.addWidget(QtWidgets.QLabel("Opacité :"))
         self.opacity_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.opacity_slider.setRange(5, 100)
@@ -329,9 +324,78 @@ class AutoWindow(QtWidgets.QMainWindow):
         lay.addLayout(srow)
         outer.addLayout(lay, stretch=1)
 
-        # Right panel: metric choice + legend + metric-specific range sliders.
+        # Right panel: basemap, render case, metric legend/sliders, then the wind legend.
         right = QtWidgets.QVBoxLayout()
+        self._render_settings_layout = right
+
+        basemap_row = QtWidgets.QFormLayout()
+        self._basemap_form_layout = basemap_row
+        self.render_basemap_combo = QtWidgets.QComboBox()
+        self.render_basemap_combo.addItems([NO_BASEMAP, *map2d.BASEMAP_SOURCES.keys()])
+        self.render_basemap_combo.setCurrentText("IGN plan")
+        self.render_basemap_combo.setToolTip(
+            "Fond drapé sur le relief 3D pour se repérer. Si les tuiles réseau sont indisponibles, "
+            "le rendu retombe sur l'ombrage du relief.")
+        basemap_row.addRow("Fond :", self.render_basemap_combo)  # applied on "Appliquer le rendu"
+        right.addLayout(basemap_row)
+
+        self.forecast_render_widget = QtWidgets.QWidget()
+        forecast_form = QtWidgets.QFormLayout(self.forecast_render_widget)
+        forecast_form.setContentsMargins(0, 0, 0, 0)
+        forecast_row = QtWidgets.QWidget()
+        forecast_lay = QtWidgets.QHBoxLayout(forecast_row)
+        forecast_lay.setContentsMargins(0, 0, 0, 0)
+        self.hour_title_label = QtWidgets.QLabel("Créneau :")
+        self.hour_start_label = QtWidgets.QLabel("")
+        self.hour_start_label.setStyleSheet("color:#888; font-size:10px;")
+        forecast_lay.addWidget(self.hour_start_label)
+        self.hour_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.hour_slider.setEnabled(False)
+        self.hour_slider.valueChanged.connect(self._on_hour_change)
+        forecast_lay.addWidget(self.hour_slider, stretch=1)
+        self.hour_end_label = QtWidgets.QLabel("")
+        self.hour_end_label.setStyleSheet("color:#888; font-size:10px;")
+        forecast_lay.addWidget(self.hour_end_label)
+        forecast_form.addRow(self.hour_title_label, forecast_row)
+        right.addWidget(self.forecast_render_widget)
+
+        self.manual_render_widget = QtWidgets.QWidget()
+        manual_form = QtWidgets.QFormLayout(self.manual_render_widget)
+        manual_form.setContentsMargins(0, 0, 0, 0)
+        speed_row = QtWidgets.QWidget()
+        speed_lay = QtWidgets.QHBoxLayout(speed_row)
+        speed_lay.setContentsMargins(0, 0, 0, 0)
+        self.render_speed_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.render_speed_slider.setFixedWidth(150)
+        self.render_speed_slider.valueChanged.connect(self._on_manual_render_change)
+        speed_lay.addWidget(self.render_speed_slider)
+        self.render_speed_label = QtWidgets.QLabel("")
+        self.render_speed_label.setMinimumWidth(80)
+        speed_lay.addWidget(self.render_speed_label)
+        manual_form.addRow("Vitesse :", speed_row)
+        dir_row = QtWidgets.QWidget()
+        dir_lay = QtWidgets.QHBoxLayout(dir_row)
+        dir_lay.setContentsMargins(0, 0, 0, 0)
+        self.render_dir_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.render_dir_slider.setFixedWidth(150)
+        self.render_dir_slider.valueChanged.connect(self._on_manual_render_change)
+        dir_lay.addWidget(self.render_dir_slider)
+        self.render_dir_label = QtWidgets.QLabel("")
+        self.render_dir_label.setMinimumWidth(110)
+        dir_lay.addWidget(self.render_dir_label)
+        manual_form.addRow("Orientation :", dir_row)
+        self.manual_render_widget.setVisible(False)
+        right.addWidget(self.manual_render_widget)
+
+        self.hour_label = QtWidgets.QLabel("")
+        self.hour_label.setStyleSheet("font-weight:bold;")
+        self.hour_label.setWordWrap(True)
+        self.hour_label.setMinimumWidth(150)
+        right.addWidget(self.hour_label)
+        right.addSpacing(10)
+
         mrow = QtWidgets.QFormLayout()
+        self._metric_choice_layout = mrow
         self.metric_combo = QtWidgets.QComboBox()
         self.metric_combo.addItems(self.METRICS_LABELS)
         self.metric_combo.setCurrentIndex(self.METRICS.index(self._metric))
@@ -344,6 +408,7 @@ class AutoWindow(QtWidgets.QMainWindow):
         self.metric_combo.currentIndexChanged.connect(self._on_metric_change)
         mrow.addRow("Représentation :", self.metric_combo)
         right.addLayout(mrow)
+
         self.legend_label = QtWidgets.QLabel()
         self.legend_label.setFixedWidth(250)
         self.legend_label.setAlignment(QtCore.Qt.AlignTop | QtCore.Qt.AlignHCenter)
@@ -362,6 +427,7 @@ class AutoWindow(QtWidgets.QMainWindow):
             "vertical_sink": " m/s", "vertical_lift": " m/s", "turbulence": " m/s",
         }
         form = QtWidgets.QFormLayout()
+        self._metric_slider_layout = form
         self._add_range_slider(form, "rotor", "Rotor :",
                                0, 60, self._metric_ranges["rotor"],
                                "Vitesse de flux inversé représentée. Sous le min : masqué; "
@@ -379,14 +445,16 @@ class AutoWindow(QtWidgets.QMainWindow):
                                0, 150, self._metric_ranges["turbulence"],
                                "Turbulence rms. Sous le min : masquée; au-dessus du max : couleur max.")
         right.addLayout(form)
-        self.btn_apply_scale = QtWidgets.QPushButton("Appliquer les sliders")
-        self.btn_apply_scale.setToolTip("Recalcule le rendu 3D avec les seuils et échelles affichés.")
+        self.btn_apply_scale = QtWidgets.QPushButton(RENDER_BUTTON_TEXT)
+        self.btn_apply_scale.setStyleSheet(GREEN)
+        self.btn_apply_scale.setToolTip(
+            "Recalcule le rendu 3D avec le cas, la métrique, le fond et les seuils affichés.")
         self.btn_apply_scale.clicked.connect(self._on_apply_scale)
         right.addWidget(self.btn_apply_scale)
+        right.addStretch(1)
         self.wind_legend_label = QtWidgets.QLabel()
         self.wind_legend_label.setAlignment(QtCore.Qt.AlignHCenter)
         right.addWidget(self.wind_legend_label)
-        right.addStretch(1)
         outer.addLayout(right)
         self._apply_metric_controls()
         return w
@@ -519,6 +587,9 @@ class AutoWindow(QtWidgets.QMainWindow):
         self._route_gen += 1          # invalidate any wind fetch in flight for the old route
         self._route_cells = []
         self.map_tab.show_wind([])
+        if (hasattr(self, "_wind_mode")
+                and self._wind_mode() == WIND_MODE_MANUAL_GRID):
+            return
         if any(len(s) >= 2 for s in self._route):
             self._wind_timer.start()  # (re)fetch AROME along the route once drawing pauses
 
@@ -683,7 +754,7 @@ class AutoWindow(QtWidgets.QMainWindow):
         self.avancement.setText(f"Terminé — {result.timings_summary}")
         if not hours:
             return
-        self._hour_labels = {h: self._fc.label_at(h) for h in hours}  # keep this day's labels
+        self._hour_labels = self._labels_for_cfg(self._last_cfg, hours)
         self._show_result_hours(hours)
 
     def _invalidate_shown_result(self) -> None:
@@ -693,6 +764,11 @@ class AutoWindow(QtWidgets.QMainWindow):
         self._rotor_cache = {}
         self.btn_save.setEnabled(False)
         self.hour_slider.setEnabled(False)
+        if hasattr(self, "hour_label"):
+            self.hour_label.setText("")
+        if hasattr(self, "render_speed_slider"):
+            self.render_speed_slider.setEnabled(False)
+            self.render_dir_slider.setEnabled(False)
         if self._plotter is not None:
             try:
                 self._plotter.clear()
@@ -706,17 +782,23 @@ class AutoWindow(QtWidgets.QMainWindow):
         self._rotor_cache = {}          # new result → different cases/DEM: drop the per-render caches
         self._tex_cache = {}            # (also avoids unbounded growth across runs/opens)
         self._terrain_cache = {}
-        self.hour_slider.blockSignals(True)
-        self.hour_slider.setMinimum(0)
-        self.hour_slider.setMaximum(max(0, len(hours) - 1))
-        self.hour_slider.setValue(0)
-        self.hour_slider.setEnabled(len(hours) > 1)  # nothing to scrub for a single créneau
-        self.hour_slider.blockSignals(False)
-        self.hour_start_label.setText(self._label_for_hour(hours[0]))
-        self.hour_end_label.setText(self._label_for_hour(hours[-1]))
+        if self._is_manual_wind_result():
+            self._setup_manual_render_controls(hours)
+            self._set_forecast_render_controls_visible(False)
+        else:
+            self._set_forecast_render_controls_visible(True)
+            self.hour_slider.blockSignals(True)
+            self.hour_slider.setMinimum(0)
+            self.hour_slider.setMaximum(max(0, len(hours) - 1))
+            self.hour_slider.setValue(0)
+            self.hour_slider.setEnabled(len(hours) > 1)  # nothing to scrub for a single créneau
+            self.hour_slider.blockSignals(False)
+            self.hour_start_label.setText(self._label_for_hour(hours[0]))
+            self.hour_end_label.setText(self._label_for_hour(hours[-1]))
         self.btn_save.setEnabled(True)
         self.tabs.setCurrentWidget(self._render_tab)
-        self._render_hour(0)
+        self._refresh_render_case_label()
+        self._render_hour(self._current_render_index())
 
     # --- save / open results -------------------------------------------------
     def _on_save(self) -> None:
@@ -819,7 +901,12 @@ class AutoWindow(QtWidgets.QMainWindow):
                 tile_step_m=float(c.get("tile_step_m", 1500.0)),
                 mesh_count=int(c.get("mesh_count", 300_000)),
                 iterations=int(c.get("iterations", 300)),
-                wind_source=c.get("wind_source", "open_meteo"))
+                wind_source=c.get("wind_source", "open_meteo"),
+                wind_mode=c.get("wind_mode", "forecast"),
+                manual_wind_speeds_kmh=tuple(
+                    int(v) for v in c.get("manual_wind_speeds_kmh", ())),
+                manual_wind_dirs_deg=tuple(
+                    int(v) for v in c.get("manual_wind_dirs_deg", ())))
         except Exception:
             return None
 
@@ -867,8 +954,112 @@ class AutoWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Échec init 3D", str(exc))
             return False
 
-    def _on_hour_change(self, idx: int) -> None:
-        self._render_hour(int(idx))
+    def _refresh_render_case_label(self) -> None:
+        if not hasattr(self, "hour_label"):
+            return
+        if self._is_manual_wind_result():
+            self._refresh_manual_render_labels()
+            return
+        if self._result is None or not self._result.hours:
+            self.hour_label.setText("")
+            return
+        idx = min(max(int(self.hour_slider.value()), 0), len(self._result.hours) - 1)
+        self.hour_label.setText(self._label_for_hour(self._result.hours[idx]))
+
+    def _on_hour_change(self, _idx: int) -> None:
+        self._refresh_render_case_label()
+
+    def _is_manual_wind_result(self) -> bool:
+        return self._last_cfg is not None and getattr(
+            self._last_cfg, "wind_mode", "") == WIND_MODE_MANUAL_GRID
+
+    def _set_forecast_render_controls_visible(self, visible: bool) -> None:
+        forecast_widget = getattr(self, "forecast_render_widget", None)
+        if forecast_widget is not None:
+            forecast_widget.setVisible(visible)
+        for widget in (
+            getattr(self, "hour_title_label", None),
+            getattr(self, "hour_start_label", None),
+            getattr(self, "hour_slider", None),
+            getattr(self, "hour_end_label", None),
+        ):
+            if widget is not None:
+                widget.setVisible(visible)
+        if hasattr(self, "manual_render_widget"):
+            self.manual_render_widget.setVisible(not visible)
+
+    def _setup_manual_render_controls(self, hours) -> None:
+        available = set(hours)
+        scenarios = [
+            (sid, spd, drc) for sid, spd, drc in manual_wind_scenarios(self._last_cfg)
+            if sid in available
+        ]
+        speeds = []
+        dirs = []
+        case_by_pair = {}
+        for sid, spd, drc in scenarios:
+            if spd not in speeds:
+                speeds.append(spd)
+            if drc not in dirs:
+                dirs.append(drc)
+            case_by_pair[(spd, drc)] = sid
+        self._manual_render_speeds = speeds
+        self._manual_render_dirs = dirs
+        self._manual_render_case_by_pair = case_by_pair
+        for slider, values in (
+            (self.render_speed_slider, speeds),
+            (self.render_dir_slider, dirs),
+        ):
+            slider.blockSignals(True)
+            slider.setMinimum(0)
+            slider.setMaximum(max(0, len(values) - 1))
+            slider.setValue(0)
+            slider.setEnabled(len(values) > 1)
+            slider.blockSignals(False)
+        self.hour_slider.blockSignals(True)
+        self.hour_slider.setMinimum(0)
+        self.hour_slider.setMaximum(max(0, len(hours) - 1))
+        self.hour_slider.setValue(0)
+        self.hour_slider.setEnabled(False)
+        self.hour_slider.blockSignals(False)
+        self._refresh_manual_render_labels()
+
+    def _selected_manual_case_id(self) -> int | None:
+        if not (self._manual_render_speeds and self._manual_render_dirs):
+            return None
+        spd = self._manual_render_speeds[
+            min(self.render_speed_slider.value(), len(self._manual_render_speeds) - 1)]
+        drc = self._manual_render_dirs[
+            min(self.render_dir_slider.value(), len(self._manual_render_dirs) - 1)]
+        return self._manual_render_case_by_pair.get((spd, drc))
+
+    def _refresh_manual_render_labels(self) -> None:
+        sid = self._selected_manual_case_id()
+        if sid is None:
+            self.render_speed_label.setText("")
+            self.render_dir_label.setText("")
+            self.hour_label.setText("")
+            return
+        spd = self._manual_render_speeds[
+            min(self.render_speed_slider.value(), len(self._manual_render_speeds) - 1)]
+        drc = self._manual_render_dirs[
+            min(self.render_dir_slider.value(), len(self._manual_render_dirs) - 1)]
+        self.render_speed_label.setText(f"{spd} km/h")
+        self.render_dir_label.setText(direction_label(drc))
+        self.hour_label.setText(self._label_for_hour(sid))
+
+    def _current_render_index(self) -> int:
+        if self._is_manual_wind_result() and self._result is not None:
+            sid = self._selected_manual_case_id()
+            if sid is not None:
+                try:
+                    return self._result.hours.index(sid)
+                except ValueError:
+                    return 0
+        return int(self.hour_slider.value())
+
+    def _on_manual_render_change(self, *_args) -> None:
+        self._refresh_manual_render_labels()
 
     def _coerce_slider_range(self, key: str, raw: tuple[int, int]) -> tuple[int, int]:
         lo, hi = sorted((int(raw[0]), int(raw[1])))
@@ -986,15 +1177,25 @@ class AutoWindow(QtWidgets.QMainWindow):
             pass
 
     def _on_apply_scale(self) -> None:
-        if self._result is not None:  # recolour/re-extract at the new scales (texture cached)
-            self._render_hour(self.hour_slider.value())
+        if self._result is None:
+            return
+        # Recolour/re-extract at the new scales (texture cached) and give Qt one event pass so
+        # the disabled/busy state is visible before the heavier scene rebuild starts.
+        self.btn_apply_scale.setEnabled(False)
+        self.btn_apply_scale.setText(RENDER_BUSY_TEXT)
+        self.statusBar().showMessage(RENDER_BUSY_TEXT)
+        QtWidgets.QApplication.processEvents()
+        try:
+            self._render_hour(self._current_render_index())
+        finally:
+            self.btn_apply_scale.setText(RENDER_BUTTON_TEXT)
+            self.btn_apply_scale.setEnabled(True)
+            self.statusBar().showMessage("Vue 3D recalculée")
 
     def _on_metric_change(self, idx: int) -> None:
         self._metric = self.METRICS[idx] if 0 <= idx < len(self.METRICS) else "rotor"
         self._apply_metric_controls()
         self._update_legend()
-        if self._result is not None:
-            self._render_hour(self.hour_slider.value())
 
     def _on_opacity_change(self, val: int) -> None:
         """Set the rotor volumes' opacity live (actor-level, no scene rebuild / basemap refetch)."""
@@ -1008,16 +1209,39 @@ class AutoWindow(QtWidgets.QMainWindow):
         day), else today's forecast window."""
         if self._hour_labels and hour in self._hour_labels:
             return self._hour_labels[hour]
+        if self._last_cfg is not None and getattr(self._last_cfg, "wind_mode", "") == WIND_MODE_MANUAL_GRID:
+            return wind_label_for_case(self._last_cfg, hour)
         try:
             return self._fc.label_at(hour)
         except Exception:
             return f"{hour:02d}h"
 
+    def _labels_for_cfg(self, cfg, hours) -> dict:
+        if cfg is not None and getattr(cfg, "wind_mode", "") == WIND_MODE_MANUAL_GRID:
+            return {h: wind_label_for_case(cfg, h) for h in hours}
+        return {h: self._fc.label_at(h) for h in hours}
+
     def _route_winds_utm(self, hour: int):
         """AROME route arrows for ``hour`` as ``[(x, y, speed_ms, from_deg), …]`` in the DEM CRS."""
-        if not self._route_cells or self._dem is None:
+        if self._dem is None:
             return []
-        arrows = arrows_at_hour(self._route_cells, hour)
+        if self._last_cfg is not None and getattr(self._last_cfg, "wind_mode", "") == WIND_MODE_MANUAL_GRID:
+            scenarios = {sid: (spd / 3.6, drc) for sid, spd, drc in manual_wind_scenarios(self._last_cfg)}
+            if int(hour) not in scenarios:
+                return []
+            spd, drc = scenarios[int(hour)]
+            pts, seen = [], set()
+            for seg in (self._route or []):
+                for lat, lon in _sample_route(seg, spacing_km=1.5):
+                    key = (round(lat, 5), round(lon, 5))
+                    if key not in seen:
+                        seen.add(key)
+                        pts.append((lat, lon, spd, drc))
+            arrows = pts
+        else:
+            if not self._route_cells:
+                return []
+            arrows = arrows_at_hour(self._route_cells, hour)
         if not arrows:
             return []
         from rasterio.crs import CRS
@@ -1040,8 +1264,12 @@ class AutoWindow(QtWidgets.QMainWindow):
         self.hour_label.setText(self._label_for_hour(hour))  # absolute date/hour, not just "15h"
         cam = self._plotter.camera_position if self._rendered else None
         self._plotter.clear()
+        basemap_source = (
+            self.render_basemap_combo.currentText()
+            if hasattr(self, "render_basemap_combo") else "IGN plan"
+        )
         populate_auto_scene(self._plotter, self._dem, self._result.cases_for_hour(hour),
-                            crs=self._dem.crs, basemap_source="IGN plan",
+                            crs=self._dem.crs, basemap_source=basemap_source,
                             route_winds=self._route_winds_utm(hour),
                             rotor_cache=self._rotor_cache, rotor_opacity=self._opacity,
                             metric=self._metric, metric_range=self._native_metric_range(),

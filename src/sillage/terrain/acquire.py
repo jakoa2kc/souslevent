@@ -267,12 +267,14 @@ def prepare_dem_for_bbox(
     Returns the written path. ``on_progress(pct, msg)`` / ``cancel()`` let the IHM worker
     report progress and cancel (the tile fetch is the slow part).
     """
-    import contextily as cx
     import rasterio
     from rasterio.crs import CRS
     from rasterio.transform import from_origin
 
     from .dem import load_dem, write_dem
+    from ..viz.map2d import import_contextily
+
+    cx = import_contextily()
 
     south, west, north, east = bbox_latlon
     if not (north > south and east > west):

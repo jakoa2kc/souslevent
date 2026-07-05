@@ -39,6 +39,9 @@ def _cfg_to_dict(cfg) -> dict:
         "mesh_count": cfg.mesh_count,
         "iterations": cfg.iterations,
         "wind_source": cfg.wind_source,
+        "wind_mode": getattr(cfg, "wind_mode", "forecast"),
+        "manual_wind_speeds_kmh": list(getattr(cfg, "manual_wind_speeds_kmh", ())),
+        "manual_wind_dirs_deg": list(getattr(cfg, "manual_wind_dirs_deg", ())),
     }
 
 

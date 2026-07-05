@@ -21,15 +21,17 @@ import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Callable
 from time import perf_counter
 
 from ..flow.windninja import format_run_failure, run_momentum
 from ..terrain.acquire import prepare_dem
 from ..terrain.dem import crop_dem, load_dem, write_dem
 from ..timing import RunTimings
+from ..wind.directions import direction_label
 import numpy as np
 
-from .partition import SubZone, corridor_mask, corridor_tiles, feature_domains
+from .partition import SubZone, corridor_mask, corridor_tiles, feature_domains, partition_zone
 from .progress import ProgressTracker
 from .wind import local_wind_provider
 
@@ -39,6 +41,8 @@ AUTO_EDGE_BUFFER_M = 1200.0  # grow each momentum crop so the outlet/lateral BCs
 # and is clipped out of the displayed rotor — see auto.scene + viz._clip_domain_boundary, ADR-0021).
 MIN_FREE_GB = 3.0  # last-resort abort if the disk is already dangerously low
 DEFAULT_MAX_FEATURES = 12
+WIND_MODE_FORECAST = "forecast"
+WIND_MODE_MANUAL_GRID = "manual_grid"
 
 
 def _free_gb(path) -> float:
@@ -242,7 +246,9 @@ class AutoConfig:
     feature_separation_m: float = 1200.0            # min spacing between feature domains
     # "features" = Pass-1 screening then one domain per candidate relief; "corridor" = blind paving
     # of the whole route (no Pass-1), domains every tile_step_m of half-size tile_half_m.
+    # "manual" = domains were selected by the UI after a screening-only pass.
     domain_mode: str = "features"
+    manual_zones: tuple[SubZone, ...] = ()          # UI-selected candidates for domain_mode="manual"
     tile_step_m: float = 1500.0                     # corridor mode: spacing between sectors
     tile_half_m: float = 0.0                        # corridor mode: 0 ⇒ derive from corridor margin
     mesh_count: int = 300_000                       # WindNinja momentum mesh (ADR-0008) — finer now
@@ -254,6 +260,72 @@ class AutoConfig:
     compact_cases_during_run: bool = False
     dem_source: str = "auto"                        # IGN / world / auto (ADR-0014)
     wind_source: str = "open_meteo"                 # "arome" falls back to Open-Meteo for now
+    wind_mode: str = WIND_MODE_FORECAST             # forecast or homogeneous manual grid
+    manual_wind_speeds_kmh: tuple[int, ...] = ()    # e.g. (10, 15, 20); 5 km/h UI steps
+    manual_wind_dirs_deg: tuple[int, ...] = ()       # e.g. (225, 270, 315); 45° UI steps
+
+
+def _unique_sorted_ints(values) -> tuple[int, ...]:
+    return tuple(sorted({int(round(float(v))) for v in values}))
+
+
+def _unique_ints(values) -> tuple[int, ...]:
+    out, seen = [], set()
+    for value in values:
+        ivalue = int(round(float(value)))
+        if ivalue not in seen:
+            seen.add(ivalue)
+            out.append(ivalue)
+    return tuple(out)
+
+
+def manual_wind_scenarios(cfg: AutoConfig) -> list[tuple[int, int, int]]:
+    """Manual homogeneous wind scenarios as ``(case_id, speed_kmh, from_deg)``.
+
+    ``case_id`` deliberately reuses the historical ``hour`` field in result objects. In forecast
+    mode that field remains a clock-hour offset; in manual mode it is a scenario index whose label
+    is carried by the UI/save bundle.
+    """
+    if cfg.wind_mode != WIND_MODE_MANUAL_GRID:
+        return []
+    speeds = _unique_sorted_ints(cfg.manual_wind_speeds_kmh)
+    dirs = _unique_ints(d % 360 for d in cfg.manual_wind_dirs_deg)
+    scenarios: list[tuple[int, int, int]] = []
+    idx = 0
+    for drc in dirs:
+        for spd in speeds:
+            scenarios.append((idx, spd, drc))
+            idx += 1
+    return scenarios
+
+
+def wind_label_for_case(cfg: AutoConfig | None, case_id: int) -> str:
+    """Display label for a result slider position."""
+    if cfg is not None and cfg.wind_mode == WIND_MODE_MANUAL_GRID:
+        for sid, spd, drc in manual_wind_scenarios(cfg):
+            if sid == int(case_id):
+                return f"{spd} km/h · {direction_label(drc)}"
+        return f"vent #{int(case_id) + 1}"
+    return f"{int(case_id):02d}h"
+
+
+def manual_wind_provider(cfg: AutoConfig):
+    scenarios = manual_wind_scenarios(cfg)
+    if not scenarios:
+        raise ValueError("Aucun scénario de vent manuel sélectionné.")
+    by_id = {sid: (spd / 3.6, float(drc)) for sid, spd, drc in scenarios}
+
+    def make(case_id: int):
+        if int(case_id) not in by_id:
+            raise ValueError(f"Scénario de vent manuel inconnu : {case_id}")
+        spd_ms, drc = by_id[int(case_id)]
+
+        def wind_at_center(_x: float, _y: float) -> tuple[float, float]:
+            return spd_ms, drc
+
+        return wind_at_center
+
+    return make
 
 
 @dataclass(frozen=True, eq=False)
@@ -293,6 +365,28 @@ class AutoResult:
         return sorted({c.hour for c in self.cases})
 
 
+@dataclass
+class ScreeningResult:
+    """Pass-1-only output for the unified UI: candidate domains, no momentum cases yet."""
+
+    dem_path: str
+    crs: object
+    partition: list[SubZone]
+    hours: list[int]
+    hazard: np.ndarray | None = None
+    timings_summary: str = ""
+
+
+@dataclass
+class _DomainPlan:
+    dem_path: str
+    dem: object
+    wind_provider: Callable
+    zones: list[SubZone]
+    timings: RunTimings
+    hazard: np.ndarray | None = None
+
+
 def _expand_bbox(bbox_latlon, buffer_m):
     s, w, n, e = bbox_latlon
     dlat = buffer_m / 111_320.0
@@ -300,25 +394,27 @@ def _expand_bbox(bbox_latlon, buffer_m):
     return (s - dlat, w - dlon, n + dlat, e + dlon)
 
 
-def run_auto(
+def _prepare_domain_plan(
     cfg: AutoConfig,
     *,
     cli: str,
     cache_dir,
     on_progress=None,
     cancel=None,
-) -> AutoResult:
-    """Run the full-resolution auto pipeline. ``on_progress(percent, message)`` carries the ETA;
-    ``cancel()`` aborts between tasks. Returns the per-(zone, hour) cases for the 3D scene."""
-    if not cfg.hours:
-        return AutoResult(dem_path="", crs=None, partition=[],
-                          timings_summary="aucune heure sélectionnée")
+    cleanup: bool = True,
+) -> _DomainPlan:
+    """Prepare the fine DEM, wind provider, and momentum domains for any unified workflow.
 
+    The old auto app needs the full plan then immediately solves all zones. The new global UI can
+    stop after this step for a Pass-1-only/manual-candidate workflow, then later pass selected zones
+    back through ``domain_mode="manual"``.
+    """
     timings = RunTimings()
     cache_dir = Path(cache_dir)
     work_root = cache_dir / "auto"
     work_root.mkdir(parents=True, exist_ok=True)
-    cleanup_auto_artifacts(cache_dir)  # drop previous session/run artifacts before starting
+    if cleanup:
+        cleanup_auto_artifacts(cache_dir)  # drop previous session/run artifacts before starting
 
     s, w, n, e = cfg.bbox_latlon
     out = work_root / f"dem_{s:.3f}_{w:.3f}_{n:.3f}_{e:.3f}_{cfg.target_res_m:.0f}m_{cfg.dem_source}.tif"
@@ -333,13 +429,14 @@ def run_auto(
         )
         dem = load_dem(str(dem_path), max_domain_km=200.0)
 
-    # Local wind (AROME 1.5 km per point) for the window, at the zone crest altitude.
     crest = float(np.nanpercentile(dem.elevation, 80))
-    make = local_wind_provider(dem, crest, n_hours=max(cfg.hours) + 1, source=cfg.wind_source)
+    if cfg.wind_mode == WIND_MODE_MANUAL_GRID:
+        make = manual_wind_provider(cfg)
+    else:
+        make = local_wind_provider(dem, crest, n_hours=max(cfg.hours) + 1, source=cfg.wind_source)
     left, bottom, right, top = dem.bounds
     cx0, cy0 = (left + right) / 2.0, (bottom + top) / 2.0
 
-    # The route as disjoint segments (gaps between them are never paved/screened).
     segments_ll = list(cfg.route_segments) or ([list(cfg.route_latlon)] if cfg.route_latlon else [])
 
     def _seg_xy(seg):
@@ -351,27 +448,46 @@ def run_auto(
         xs, ys = warp_xy(CRS.from_epsg(4326), dem.crs, lons, lats)
         return list(zip(xs, ys))
 
-    if cfg.domain_mode == "corridor" and segments_ll:
-        # BLIND PAVING (ADR-0029): no Pass-1 — tile each route segment with momentum domains.
-        margin_m = cfg.corridor_margin_km * 1000.0
-        half_m = cfg.tile_half_m if cfg.tile_half_m > 0 else max(margin_m, 900.0)
-        step_m = max(300.0, min(cfg.tile_step_m, 2.0 * half_m))  # overlap, no gaps along a segment
+    zones: list[SubZone]
+    hazard_map: np.ndarray | None = None
+    if cfg.domain_mode == "manual" and cfg.manual_zones:
         with timings.measure("features"):
+            zones = list(cfg.manual_zones)
             if on_progress is not None:
-                on_progress(0, "Pavage aveugle des secteurs le long du parcours (sans criblage)…")
-            zones = []
-            for seg in segments_ll:
-                if len(seg) >= 1:
-                    zones += corridor_tiles(dem, _seg_xy(seg), step_m=step_m, half_m=half_m,
-                                            target_res_m=cfg.target_res_m)
-            if on_progress is not None:
-                on_progress(0, f"Pavage : {len(zones)} secteurs sur {len(segments_ll)} segment(s) "
-                               f"(pas {step_m:.0f} m, demi-largeur {half_m:.0f} m, "
-                               f"topo {cfg.target_res_m:.0f} m)")
+                on_progress(0, f"Sélection manuelle : {len(zones)} domaine(s) Pass-2")
+    elif cfg.domain_mode == "corridor":
+        # BLIND PAVING (ADR-0029): no Pass-1. Route selection uses overlapping corridor tiles;
+        # rectangle selection uses the older relief-adaptive quadtree to cover the full AOI.
+        with timings.measure("features"):
+            if segments_ll:
+                margin_m = cfg.corridor_margin_km * 1000.0
+                half_m = cfg.tile_half_m if cfg.tile_half_m > 0 else max(margin_m, 900.0)
+                step_m = max(300.0, min(cfg.tile_step_m, 2.0 * half_m))
+                if on_progress is not None:
+                    on_progress(
+                        0, "Pavage aveugle des secteurs le long du parcours (sans criblage)…")
+                zones = []
+                for seg in segments_ll:
+                    if len(seg) >= 1:
+                        zones += corridor_tiles(dem, _seg_xy(seg), step_m=step_m, half_m=half_m,
+                                                target_res_m=cfg.target_res_m)
+                if on_progress is not None:
+                    on_progress(0, f"Pavage : {len(zones)} secteurs sur {len(segments_ll)} "
+                                   f"segment(s) (pas {step_m:.0f} m, "
+                                   f"demi-largeur {half_m:.0f} m, topo {cfg.target_res_m:.0f} m)")
+            else:
+                step_m = max(600.0, float(cfg.tile_step_m))
+                if on_progress is not None:
+                    on_progress(0, "Pavage aveugle de la zone rectangle (sans criblage)…")
+                zones = partition_zone(
+                    dem, target_res_m=cfg.target_res_m, max_cells=600_000,
+                    max_relief_m=400.0, min_tile_m=step_m)
+                if on_progress is not None:
+                    on_progress(0, f"Pavage rectangle : {len(zones)} secteur(s), "
+                                   f"tuile min {step_m:.0f} m, topo {cfg.target_res_m:.0f} m")
     else:
         # FEATURE-BASED domains (ADR-0023): screen the WHOLE zone once (continuous Pass-1 mass) to
-        # find the relief features, then place ONE momentum domain per feature — no grid, no
-        # internal seams to reconcile (why tiled momentum showed flow "climbing" at every joint).
+        # find the relief features, then place ONE momentum domain per feature.
         with timings.measure("criblage"):
             if on_progress is not None:
                 on_progress(0, "Criblage Pass-1 sur toute la zone (détection des reliefs)…")
@@ -382,7 +498,8 @@ def run_auto(
             except Exception:
                 rep_spd, rep_dir = 8.0, 270.0  # geometry-driven screening if the forecast is down
             if on_progress is not None:
-                on_progress(0, f"Criblage : vent {rep_spd * 3.6:.0f} km/h de {rep_dir:.0f}°")
+                on_progress(
+                    0, f"Criblage : vent {rep_spd * 3.6:.0f} km/h de {direction_label(rep_dir)}")
             screen_work = _screening_work_dir(work_root, dem_path, rep_spd, rep_dir, 150.0)
             hazard, _vel = hourly_indicator(
                 dem=dem, cli=cli, dem_path=str(dem_path), work_dir=screen_work,
@@ -400,15 +517,62 @@ def run_auto(
                 on_progress(0, f"Corridor : marge {cfg.corridor_margin_km:.1f} km autour du parcours")
 
         with timings.measure("features"):
-            # Finer corridor ⇒ finer-grained features along the route.
             sep = cfg.feature_separation_m
             if cfg.route_latlon:
                 sep = max(800.0, min(sep, cfg.corridor_margin_km * 1000.0))
             zones = feature_domains(
                 dem, hazard, max_features=cfg.max_features,
                 min_separation_m=sep, target_res_m=cfg.target_res_m)
+            hazard_map = hazard
             if on_progress is not None:
                 on_progress(0, f"{len(zones)} feature(s) détectée(s) (espacement ≥ {sep:.0f} m)")
+
+    return _DomainPlan(
+        dem_path=str(dem_path), dem=dem, wind_provider=make, zones=zones, timings=timings,
+        hazard=hazard_map)
+
+
+def screen_candidates(
+    cfg: AutoConfig,
+    *,
+    cli: str,
+    cache_dir,
+    on_progress=None,
+    cancel=None,
+) -> ScreeningResult:
+    """Run only the shared domain-preparation/Pass-1 stage and return selectable candidates."""
+    if not cfg.hours:
+        return ScreeningResult(dem_path="", crs=None, partition=[], hours=[],
+                               timings_summary="aucune heure sélectionnée")
+    plan = _prepare_domain_plan(cfg, cli=cli, cache_dir=cache_dir,
+                                on_progress=on_progress, cancel=cancel, cleanup=True)
+    if on_progress is not None:
+        on_progress(100, f"Criblage terminé : {len(plan.zones)} candidat(s).")
+    return ScreeningResult(
+        dem_path=plan.dem_path, crs=plan.dem.crs, partition=plan.zones,
+        hours=list(cfg.hours), hazard=plan.hazard, timings_summary=plan.timings.summary())
+
+
+def run_auto(
+    cfg: AutoConfig,
+    *,
+    cli: str,
+    cache_dir,
+    on_progress=None,
+    cancel=None,
+) -> AutoResult:
+    """Run the full-resolution auto pipeline. ``on_progress(percent, message)`` carries the ETA;
+    ``cancel()`` aborts between tasks. Returns the per-(zone, hour) cases for the 3D scene."""
+    if not cfg.hours:
+        return AutoResult(dem_path="", crs=None, partition=[],
+                          timings_summary="aucune heure sélectionnée")
+
+    cache_dir = Path(cache_dir)
+    work_root = cache_dir / "auto"
+    plan0 = _prepare_domain_plan(cfg, cli=cli, cache_dir=cache_dir,
+                                 on_progress=on_progress, cancel=cancel, cleanup=True)
+    timings = plan0.timings
+    dem_path, dem, make, zones = plan0.dem_path, plan0.dem, plan0.wind_provider, plan0.zones
 
     if not zones:
         if on_progress is not None:
@@ -418,13 +582,14 @@ def run_auto(
 
     tasks = [(zi, h) for zi in range(len(zones)) for h in cfg.hours]
     nz, nh = len(zones), len(cfg.hours)
+    time_unit = "scénario(s) vent" if cfg.wind_mode == WIND_MODE_MANUAL_GRID else "h"
     plan = momentum_parallel_plan(cfg.momentum_workers, task_count=len(tasks))
     workers = plan.workers
     per_run_threads = plan.threads_per_worker
     tracker = ProgressTracker(total=len(tasks), workers=workers)  # parallelism-aware ETA
     cases: list[CaseResult] = []
     if on_progress is not None:
-        on_progress(0, f"{nz} features × {nh} h = {len(tasks)} calculs Pass-2 "
+        on_progress(0, f"{nz} features × {nh} {time_unit} = {len(tasks)} calculs Pass-2 "
                        f"(×{workers} en parallèle, {per_run_threads} thr/solve, "
                        f"{plan.used_cores}/{plan.cores} cœurs utilisés, "
                        f"maillage ~{cfg.mesh_count:,})")
@@ -445,7 +610,7 @@ def run_auto(
             raise RuntimeError(disk_abort["msg"])
         zone = zones[zi]
         cx, cy = zone.center
-        zlabel = f"feature {zi + 1}/{nz} · {h:02d}h"
+        zlabel = f"feature {zi + 1}/{nz} · {wind_label_for_case(cfg, h)}"
         if on_progress is not None:
             on_progress(tracker.display_percent, f"{zlabel} · récupération du vent amont…")
         spd, drc = make(h)(cx, cy)
@@ -456,7 +621,8 @@ def run_auto(
         write_dem(crop, crop_path)
         if on_progress is not None:
             on_progress(tracker.display_percent,
-                        f"{zlabel} · vent {spd * 3.6:.0f} km/h de {drc:.0f}° · maillage + solveur…")
+                        f"{zlabel} · vent {spd * 3.6:.0f} km/h de {direction_label(drc)} "
+                        "· maillage + solveur…")
         t0 = perf_counter()
         run = run_momentum(
             cli=cli, dem_path=str(crop_path),

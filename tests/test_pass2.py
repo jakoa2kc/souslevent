@@ -158,13 +158,14 @@ def test_terrain_mesh_uses_pixel_centres():
 
 def test_drape_basemap_reprojects_tiles_to_terrain_crs(monkeypatch):
     pytest.importorskip("pyvista")
-    pytest.importorskip("contextily")
     from rasterio.warp import transform_bounds
 
-    import contextily as cx
     import rasterio.warp as rwarp
 
     from sillage.viz import volume3d as v3
+    from sillage.viz.map2d import import_contextily
+
+    cx = import_contextily()
 
     dem = Dem(elevation=np.zeros((8, 8), dtype="float32"),
               transform=from_origin(600000.0, 4900000.0, 50.0, 50.0),
@@ -274,6 +275,248 @@ def test_lee_source_can_be_rethresholded_without_openfoam_case():
 def test_gui_module_imports():
     pytest.importorskip("PySide6")  # only when the gui extra is installed
     from sillage.app.main_window import MainWindow  # noqa: F401
+    from sillage.souslevent.window import SousLeVentWindow  # noqa: F401
+
+
+def test_souslevent_window_builds_offscreen():
+    pytest.importorskip("PySide6")
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    from sillage.souslevent.window import SousLeVentWindow
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    w = SousLeVentWindow()
+    assert w.windowTitle() == "SousLeVent"
+    assert w.selection_combo.count() == 2
+    assert w.calc_combo.count() == 3
+    assert w.render_basemap_combo.currentText() == "IGN plan"
+    assert w.candidate_basemap_combo.currentText() == "IGN plan"
+    assert w.btn_apply_scale.text() == "Recalculer la vue 3D"
+    assert "#2d7d2d" in w.btn_apply_scale.styleSheet()
+    settings = w._render_settings_layout
+
+    def settings_index(item):
+        for idx in range(settings.count()):
+            layout_item = settings.itemAt(idx)
+            if layout_item.widget() is item or layout_item.layout() is item:
+                return idx
+        return -1
+
+    assert settings_index(w._basemap_form_layout) == 0
+    assert settings_index(w._metric_choice_layout) < settings_index(w.legend_label)
+    assert settings_index(w.legend_label) < settings_index(w._metric_slider_layout)
+    assert settings_index(w.btn_apply_scale) < settings_index(w.wind_legend_label)
+    assert not w.wind_forecast_widget.isHidden()
+    assert w.wind_manual_widget.isHidden()
+    assert not w.features_row_widget.isHidden()
+    assert w.step_row_widget.isHidden()
+    assert w.btn_validate.minimumWidth() >= 360
+    assert w.tabs.count() == 3
+    w.deleteLater()
+
+
+def test_souslevent_manual_candidate_rectangle_offscreen():
+    pytest.importorskip("PySide6")
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    from sillage.auto.pipeline import AutoConfig, ScreeningResult
+    from sillage.souslevent.window import SousLeVentWindow
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    w = SousLeVentWindow()
+    dem = Dem(
+        elevation=np.arange(400, dtype="float32").reshape(20, 20),
+        transform=from_origin(600000.0, 4900000.0, 50.0, 50.0),
+        crs=CRS.from_epsg(32631),
+        resolution_m=50.0,
+    )
+    w._candidate_dem = dem
+    w._screening_cfg = AutoConfig(
+        bbox_latlon=(44.0, 6.0, 44.1, 6.1), hours=(9,), target_res_m=50.0)
+    w._screening_result = ScreeningResult(
+        dem_path="", crs=dem.crs, partition=[], hours=[9], hazard=np.ones(dem.shape))
+    w._candidate_auto_count = 0
+    w.candidate_basemap_combo.setCurrentText("Aucun")
+
+    w._finish_manual_candidate_rect(600100.0, 4899300.0, 600700.0, 4899800.0)
+
+    assert len(w._screening_result.partition) == 1
+    assert w.candidate_list.count() == 1
+    assert w.candidate_list.item(0).isSelected()
+    assert w._screening_result.partition[0].est_cells > 0
+    w.deleteLater()
+
+
+def test_souslevent_pass1_candidate_map_uses_basemap(monkeypatch):
+    pytest.importorskip("PySide6")
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    from sillage.auto.pipeline import AutoConfig, ScreeningResult
+    from sillage.souslevent import window as slv_window
+    from sillage.souslevent.window import SousLeVentWindow
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    w = SousLeVentWindow()
+    dem = Dem(
+        elevation=np.arange(400, dtype="float32").reshape(20, 20),
+        transform=from_origin(600000.0, 4900000.0, 50.0, 50.0),
+        crs=CRS.from_epsg(32631),
+        resolution_m=50.0,
+    )
+    w._candidate_dem = dem
+    w._screening_cfg = AutoConfig(
+        bbox_latlon=(44.0, 6.0, 44.1, 6.1), hours=(9,), target_res_m=50.0)
+    w._screening_result = ScreeningResult(
+        dem_path="", crs=dem.crs, partition=[], hours=[9], hazard=np.ones(dem.shape))
+
+    calls = []
+
+    def fake_add_basemap(ax, crs, source, **kwargs):
+        calls.append((crs, source, kwargs))
+
+    monkeypatch.setattr(slv_window.map2d, "add_basemap", fake_add_basemap)
+    w._draw_candidate_map()
+
+    assert calls and calls[0][1] == "IGN plan"
+    w.deleteLater()
+
+
+def test_souslevent_manual_wind_grid_config_offscreen():
+    pytest.importorskip("PySide6")
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    from sillage.auto.pipeline import WIND_MODE_MANUAL_GRID
+    from sillage.souslevent.window import SousLeVentWindow
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    w = SousLeVentWindow()
+    w._selection_mode = "rectangle"
+    w._on_rectangle(44.0, 6.0, 44.1, 6.1)
+    w.wind_mode_combo.setCurrentIndex(1)
+    w.speed_slider.setValue((10, 20))
+    w.dir_slider.setValue((270, 315))
+
+    cfg = w._build_cfg(domain_mode="corridor")
+
+    assert w.wind_forecast_widget.isHidden()
+    assert not w.wind_manual_widget.isHidden()
+    assert cfg.wind_mode == WIND_MODE_MANUAL_GRID
+    assert cfg.wind_source == "manual"
+    assert cfg.hours == tuple(range(6))
+    assert cfg.manual_wind_speeds_kmh == (10, 15, 20)
+    assert cfg.manual_wind_dirs_deg == (270, 315)
+    assert w.dir_label.text() == "Ouest → Nord-Ouest"
+    assert w._labels_for_cfg(cfg, cfg.hours)[0] == "10 km/h · Ouest"
+    assert w._labels_for_cfg(cfg, cfg.hours)[5] == "20 km/h · Nord-Ouest"
+    w.deleteLater()
+
+
+def test_souslevent_manual_wind_result_uses_two_render_sliders():
+    pytest.importorskip("PySide6")
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    from sillage.auto.pipeline import AutoConfig, AutoResult, CaseResult, WIND_MODE_MANUAL_GRID
+    from sillage.souslevent.window import SousLeVentWindow
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    w = SousLeVentWindow()
+    cfg = AutoConfig(
+        bbox_latlon=(44.0, 6.0, 44.1, 6.1), hours=tuple(range(6)),
+        wind_mode=WIND_MODE_MANUAL_GRID,
+        manual_wind_speeds_kmh=(10, 15, 20), manual_wind_dirs_deg=(270, 315))
+    cases = [
+        CaseResult(
+            zone_index=0, hour=h, case_dir="", wind_speed_ms=10.0, wind_from_deg=270.0,
+            crs=CRS.from_epsg(32631), aoi_bounds=(0.0, 1.0, 0.0, 1.0), elapsed_s=1.0)
+        for h in cfg.hours
+    ]
+    w._last_cfg = cfg
+    w._result = AutoResult(dem_path="", crs=CRS.from_epsg(32631), partition=[], cases=cases)
+    rendered = []
+    busy_states = []
+
+    def fake_render(idx):
+        busy_states.append((
+            w.btn_apply_scale.isEnabled(),
+            w.btn_apply_scale.text(),
+            w.statusBar().currentMessage(),
+        ))
+        rendered.append(idx)
+
+    w._render_hour = fake_render
+
+    w._show_result_hours(w._result.hours)
+    assert rendered == [0]
+    w.render_speed_slider.setValue(2)
+    w.render_dir_slider.setValue(1)
+
+    assert w.hour_slider.isHidden()
+    assert not w.manual_render_widget.isHidden()
+    assert w.render_speed_label.text() == "20 km/h"
+    assert w.render_dir_label.text() == "Nord-Ouest"
+    assert w.hour_label.text() == "20 km/h · Nord-Ouest"
+    assert rendered == [0]
+    w._on_apply_scale()
+    assert busy_states[-1] == (False, "Calcul en cours...", "Calcul en cours...")
+    assert w.btn_apply_scale.isEnabled()
+    assert w.btn_apply_scale.text() == "Recalculer la vue 3D"
+    assert w.statusBar().currentMessage() == "Vue 3D recalculée"
+    assert rendered[-1] == 5
+    w.deleteLater()
+
+
+def test_souslevent_forecast_hour_slider_waits_for_apply():
+    pytest.importorskip("PySide6")
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    from sillage.auto.pipeline import AutoConfig, AutoResult, CaseResult
+    from sillage.souslevent.window import SousLeVentWindow
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    w = SousLeVentWindow()
+    cfg = AutoConfig(bbox_latlon=(44.0, 6.0, 44.1, 6.1), hours=(0, 1, 2))
+    cases = [
+        CaseResult(
+            zone_index=0, hour=h, case_dir="", wind_speed_ms=10.0, wind_from_deg=270.0,
+            crs=CRS.from_epsg(32631), aoi_bounds=(0.0, 1.0, 0.0, 1.0), elapsed_s=1.0)
+        for h in cfg.hours
+    ]
+    w._last_cfg = cfg
+    w._result = AutoResult(dem_path="", crs=CRS.from_epsg(32631), partition=[], cases=cases)
+    rendered = []
+    w._render_hour = lambda idx: rendered.append(idx)
+
+    w._show_result_hours(w._result.hours)
+    assert rendered == [0]
+    w.hour_slider.setValue(2)
+
+    assert not w.hour_slider.isHidden()
+    assert w.manual_render_widget.isHidden()
+    assert w.hour_label.text()
+    w.metric_combo.setCurrentIndex(1)
+    w.render_basemap_combo.setCurrentIndex(0)
+    assert rendered == [0]
+    w._on_apply_scale()
+    assert rendered == [0, 2]
+    w.deleteLater()
 
 
 def test_sample_grid_and_upstream_wind(tmp_path):
@@ -319,7 +562,6 @@ def test_prepare_dem_ign_decodes(tmp_path, monkeypatch):
     import requests
 
     from sillage.terrain import acquire
-    from sillage.terrain.dem import load_dem
     from sillage.terrain.dem import load_dem
 
     class _Resp:
@@ -382,10 +624,11 @@ def test_zoom_for_resolution_caps():
 
 
 def test_prepare_dem_for_bbox_decodes_and_reprojects(tmp_path, monkeypatch):
-    import contextily as cx
-
     from sillage.terrain import acquire
     from sillage.terrain.dem import load_dem
+    from sillage.viz.map2d import import_contextily
+
+    cx = import_contextily()
 
     # terrarium encoding of 1000 m: v = 1000 + 32768 = 33768 -> R=131, G=232, B=0
     img = np.zeros((16, 16, 4), dtype="uint8")
@@ -624,4 +867,4 @@ def test_add_compass_adds_north_and_wind_arrows():
     v3._add_compass(p, terrain, mean_flow_vector(270.0), wind_speed_ms=12.0, wind_from_deg=270.0)
     assert p.meshes == 2  # north + wind arrows
     assert p.labels[0] == "N"
-    assert "43 km/h" in p.labels[1] and "270" in p.labels[1]  # 12 m/s -> 43 km/h (display only)
+    assert "43 km/h" in p.labels[1] and "Ouest" in p.labels[1]  # 12 m/s -> 43 km/h (display only)

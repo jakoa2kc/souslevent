@@ -12,7 +12,15 @@ app untouched. See docs/10_auto_pipeline.md and ADR-0022.
 from __future__ import annotations
 
 from .partition import SubZone, feature_domains, partition_zone
-from .pipeline import AutoConfig, AutoResult, CaseResult, cleanup_auto_artifacts, run_auto
+from .pipeline import (
+    AutoConfig,
+    AutoResult,
+    CaseResult,
+    ScreeningResult,
+    cleanup_auto_artifacts,
+    run_auto,
+    screen_candidates,
+)
 from .progress import ProgressTracker
 
 __all__ = [
@@ -22,7 +30,9 @@ __all__ = [
     "AutoConfig",
     "AutoResult",
     "CaseResult",
+    "ScreeningResult",
     "cleanup_auto_artifacts",
     "run_auto",
+    "screen_candidates",
     "ProgressTracker",
 ]

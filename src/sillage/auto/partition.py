@@ -224,16 +224,25 @@ def feature_domains(
     left, _bottom, _right, top = dem.bounds
     rpx = max(1, int(round(relief_radius_m / res)))
 
+    def clamp_index(value: float, upper: int) -> int:
+        return min(max(0, int(value)), upper)
+
     zones: list[SubZone] = []
     for c in ind.find_candidates(dem, hazard, n=max_features, min_separation_m=min_separation_m):
-        loc = elev[max(0, c.row - rpx):c.row + rpx, max(0, c.col - rpx):c.col + rpx]
+        row = int(round(float(c.row)))
+        col = int(round(float(c.col)))
+        r0, r1 = clamp_index(row - rpx, h_px), clamp_index(row + rpx, h_px)
+        c0, c1 = clamp_index(col - rpx, w_px), clamp_index(col + rpx, w_px)
+        loc = elev[r0:r1, c0:c1]
         fin = loc[np.isfinite(loc)]
         relief = (float(fin.max()) - float(fin.min())) if fin.size else 0.0
         half = float(min(max_half_m, max(min_half_m, lee_factor * relief / 2.0)))
         cx, cy = c.x, c.y
         bbox = (cx - half, cy - half, cx + half, cy + half)
-        pr0, pr1 = max(0, int((top - (cy + half)) / res)), min(h_px, int((top - (cy - half)) / res))
-        pc0, pc1 = max(0, int((cx - half - left) / res)), min(w_px, int((cx + half - left) / res))
+        pr0 = clamp_index((top - (cy + half)) / res, h_px)
+        pr1 = clamp_index((top - (cy - half)) / res, h_px)
+        pc0 = clamp_index((cx - half - left) / res, w_px)
+        pc1 = clamp_index((cx + half - left) / res, w_px)
         dsub = elev[pr0:pr1, pc0:pc1]
         dfin = dsub[np.isfinite(dsub)]
         zones.append(SubZone(

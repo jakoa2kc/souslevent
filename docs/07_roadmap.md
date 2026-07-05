@@ -137,9 +137,15 @@ topo scale, then a time-sliderable global 3D wake. See docs/10_auto_pipeline.md.
 - [x] **Save/open** results as a portable `.sillage` bundle (compact lee meshes or re-analysable
       lee sources + route winds + params), with run-day labels (ADR-0030/0031); reopened v2 sources
       can re-extract "Seuil volume" without OpenFOAM. ✔
+- [x] **Unified SousLeVent app**: one first tab can select rectangle or route, then launch one of
+      the 3 current workflows: Pass-1-only/manual candidate selection, Pass-1 + automatic
+      candidates, or direct Pass-2 everywhere. The old `sillage-gui` and `sillage-auto` remain as
+      legacy backups. ✔
+- [x] **Pass-1-only graphical candidate selection** in SousLeVent: the screening result now opens a
+      hillshade/Pass-1 map with clickable candidate rectangles, synchronized with the detail list. ✔
 - [ ] Optional: the Météo-France **GRIB** path (eccodes) for >120 m AGL / pressure levels.
-- [ ] Open levers: per-sector IGN 5 m fetch (vs one corridor DEM), turbulence-volume floor as a
-      validated danger threshold, `momentum_workers` vs CPU benchmarking.
+- [ ] Open levers: per-sector IGN 5 m fetch, turbulence-volume floor as a validated danger
+      threshold, `momentum_workers` vs CPU benchmarking.
 
 ## Later / research
 - Humidity & latent effects; lee-wave structure; validation/hindcast against known flying

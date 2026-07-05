@@ -82,23 +82,35 @@ src/sillage/
     wind.py              local AROME-HD wind per domain + route wind series (arrows)
     arome.py             forecast window (absolute dates) from the AROME/Open-Meteo horizon
     scene.py             aggregate one hour into a 3D scene (extract_volume rotor/turbulence)
+    pipeline.py          + manual homogeneous-wind grid (`manual_wind_scenarios`/`_provider`) and
+                         `screen_candidates` (screening-only pass → pick candidates → Pass-2)
     store.py             save/open a run as a portable .sillage bundle (lee meshes only)
     progress.py          parallelism-aware (wave) progress + ETA
-    window.py            the automatic-mode desktop app (route + window -> 3D wake)
+    window.py            the automatic-mode desktop app (route + window -> 3D wake) — legacy backup
+  souslevent/
+    window.py            **the primary unified desktop app** (`SousLeVentWindow`, subclasses
+                         `auto.window.AutoWindow`): route OR rectangle selection × forecast OR manual
+                         wind grid × features/corridor/screen-then-pick. This is the `souslevent`
+                         entry point; the two apps below are kept as legacy backups.
+  wind/directions.py     French octant labels for a meteorological FROM direction
   app/
-    main_window.py       the manual 2-pass desktop app (draw zone, Pass-1 map, Pass-2 3D)
-    map_tab.py           Leaflet map tab (rectangle OR multi-segment route) shared by both apps
-    jobs.py              background QThread job runner (progress/cancel)
+    main_window.py       the manual 2-pass desktop app (draw zone, Pass-1 map, Pass-2 3D) — legacy backup
+    map_tab.py           Leaflet map tab (rectangle OR multi-segment route) shared by all apps
+    jobs.py              background QThread job runner (progress/cancel + shutdown)
+    qt_image.py          RGBA numpy buffer -> QLabel pixmap (copy-safe; shared by the apps)
 scripts/
-  sillage_gui.py         launch the manual app    sillage_auto.py  launch the automatic app
+  souslevent.py          launch the unified app   sillage_gui.py / sillage_auto.py  legacy backups
   demo_pass1.py          end-to-end Pass-1 walkthrough
 ```
 
-**Two apps, one engine.** `app.main_window` (manual: pick a feature, see its precise rotor) and
-`auto.window` (automatic: draw a route, get the whole corridor's wake) share `viz.volume3d`,
-`app.map_tab`, `flow/*` and `wind/*`, so **results and 3D rendering are identical** (same rotor/turbulence
-2-D colormap, same continuous wind colour scale, opacity, legends, scale bar, terrain-locked rotation
-+ right-drag pan).
+**One primary app, one engine, two legacy backups.** `souslevent.window.SousLeVentWindow` is the
+current app; it **subclasses** `auto.window.AutoWindow` and reuses `viz.volume3d`, `app.map_tab`,
+`app.jobs`, `app.qt_image`, `flow/*` and `wind/*`. The older `app.main_window` (manual single-feature)
+and `auto.window` (automatic route) still ship as `sillage-gui` / `sillage-auto` and share the same
+engine, so **results and 3D rendering are identical** across all three (same rotor/turbulence 2-D
+colormap, continuous wind colour scale, opacity, legends, scale bar, terrain-locked rotation +
+right-drag pan). Because the unified app is copied — not fully composed — from the two, a UI fix may
+need to land in more than one window until the shared row-builders are extracted (tracked debt).
 
 ## Hard facts you must not violate (they cause silent wrong results)
 
@@ -116,13 +128,15 @@ scripts/
 
 ## Project status
 
-Both passes work end-to-end in two desktop apps. Pass-1 (hourly, parallel) screens for candidate
-reliefs; Pass-2 (momentum + 3D) resolves the recirculation and is driven either by hand (manual app)
-or automatically along a flight route (auto app). The automatic pipeline adds: AROME-HD local wind,
-feature-based **or** blind-corridor domains, parallel solves with honest wave-based progress/ETA,
-disk-safe case handling, a time slider over absolute dates, rotor **and** turbulence volumes on a
-2-D (height × intensity) colormap with adjustable scales, route wind arrows, and save/open of results
-(`.sillage`). See `docs/07_roadmap.md`, `docs/10_auto_pipeline.md` and `docs/06_dev_log.md`.
+Both passes work end-to-end, now in a single **unified app** (`souslevent.window`, ADR-0033) plus
+two legacy backups. Pass-1 (hourly, parallel) screens for candidate reliefs; Pass-2 (momentum + 3D)
+resolves the recirculation, driven by hand, automatically along a flight route, or via a
+screen-then-pick workflow. The pipeline adds: AROME-HD local wind **or a manual homogeneous wind grid**
+(speed × direction scenarios, ADR-0034), feature-based / blind-corridor / manually-picked domains,
+parallel solves with honest wave-based progress/ETA, disk-safe case handling, a time (or scenario)
+slider over absolute dates, four lee representations with adjustable scales, route wind arrows, and
+save/open of results (`.sillage`). See `docs/03_decisions.md` (ADRs), `docs/07_roadmap.md`,
+`docs/10_auto_pipeline.md` and `docs/06_dev_log.md`.
 
 ## Conventions
 
@@ -133,5 +147,5 @@ disk-safe case handling, a time slider over absolute dates, rotor **and** turbul
 - Functions that shell out to WindNinja or hit a network API live in a small set of clearly-named
   modules so they are easy to mock: `flow/windninja.py` (solver), `wind/forecast.py` +
   `wind/meteofrance.py` (forecast APIs), `auto/wind.py` (AROME-HD local/route wind, ADR-0031-era),
-  and the basemap tile fetch in `viz/volume3d._drape_basemap` (contextily). Keep new network calls
-  inside these; don't scatter them.
+  and the basemap tiles via `viz/map2d.py` (`import_contextily`/`add_basemap`) — reused by
+  `viz/volume3d._drape_basemap` and `terrain/acquire.py`. Keep new network calls inside these.

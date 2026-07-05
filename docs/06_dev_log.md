@@ -1708,6 +1708,352 @@ per-zone lid (kept on purpose — a fixed AGL lid over-cuts given large inter-zo
 
 ---
 
+## Entry 69 — Unified SousLeVent app shell: rectangle/route + 3 workflows  (2026-07-04)
+
+**Goal.** Replace the split UX with a new global app named **SousLeVent**, while keeping
+`sillage-gui` and `sillage-auto` as legacy backups.
+
+**What changed.**
+- Added `sillage.souslevent.window.SousLeVentWindow` and `scripts/souslevent.py`; `pyproject.toml`
+  now exposes the `souslevent` console script. The distribution name is `souslevent`, while the
+  Python package remains `sillage` for compatibility.
+- Tab 1 has a selection dropdown (**Parcours** / **Rectangle**) and a calculation dropdown:
+  Pass-1-only/manual candidate selection, Pass-1 + automatic multiple candidates, or Pass-2
+  everywhere.
+- The unified app subclasses the old auto window to reuse the 3D viewer, sliders, save/open
+  `.sillage`, route winds, progress and cancellation.
+- `auto.pipeline` now has a shared domain-planning stage plus `screen_candidates(...)` /
+  `ScreeningResult`. `AutoConfig.manual_zones` lets the UI run Pass-2 only on candidates selected
+  after a Pass-1-only run.
+- Direct Pass-2 everywhere now works for rectangle selections too: route uses existing
+  `corridor_tiles`; rectangle uses the existing relief-adaptive `partition_zone` cover.
+
+**Known v1 limit.** Manual selection is currently a candidate list, not a clickable Pass-1 map
+overlay. This was removed in Entry 71. The old manual app remains the backup for graphical
+rectangle-by-rectangle exploration.
+
+**Verification.** `SousLeVentWindow` imports/builds offscreen. Targeted no-temp tests:
+`tests/test_auto.py::test_manual_mode_config_carries_selected_zones`,
+`tests/test_pass2.py::test_gui_module_imports`,
+`tests/test_pass2.py::test_souslevent_window_builds_offscreen` -> **3 passed**.
+Full/auto tests are currently blocked by a Windows permission issue on pytest's temp root
+(`pytest-of-a2Kc`), before application assertions run.
+
+---
+
+## Entry 70 — Fix Pass-1-only completion failure in SousLeVent  (2026-07-04)
+
+**Symptom.** The new SousLeVent workflow "Pass-1 seul puis sélection manuelle" could fail after
+screening with `TypeError: slice indices must be integers or None or have an __index__ method`.
+The detailed UI log showed the crash happened after `Criblage terminé : N candidat(s).`, i.e. after
+candidate detection succeeded.
+
+**Actual cause / fix.** `screen_candidates()` called `plan.timings.summary("Pass-1")`, but
+`RunTimings.summary()` expects an integer `max_items`; Python therefore tried to slice
+`items[:"Pass-1"]`. The call is now `plan.timings.summary()`. Added a mocked `screen_candidates()`
+regression test for this exact completion path.
+
+**Additional hardening.** The Pass-1 candidate-to-domain conversion in
+`auto.partition.feature_domains` also now coerces `Candidate.row/col` to `int` and clamps candidate
+pixel windows to the DEM extent, matching the no-negative-wrap discipline used by corridor tiles.
+
+**Verification.** `ruff` passes on `src/sillage/auto/partition.py` and `tests/test_auto.py`.
+Targeted tests:
+`tests/test_auto.py::test_feature_domains_places_one_domain_per_feature`,
+`tests/test_auto.py::test_feature_domains_coerces_candidate_indices`,
+`tests/test_auto.py::test_screen_candidates_builds_timing_summary`,
+`tests/test_auto.py::test_manual_mode_config_carries_selected_zones`,
+`tests/test_pass2.py::test_souslevent_window_builds_offscreen` -> **4 passed** in the latest run
+(selected subset).
+
+---
+
+## Entry 71 — SousLeVent Pass-1 candidates become a clickable map  (2026-07-04)
+
+**Symptom / UX issue.** After the Pass-1-only workflow, showing only a textual candidate list was too
+minimal for real pilot analysis: the user needs to see where the candidates sit on the terrain and
+relative to the route.
+
+**What changed.**
+- `ScreeningResult` now carries the Pass-1 hazard grid produced by the screening stage, in addition
+  to the candidate `SubZone` list.
+- The `Candidats Pass-1` tab now contains a Matplotlib map: DEM hillshade + Pass-1 hazard overlay +
+  route overlay when available + numbered candidate rectangles.
+- Candidate selection is synchronized both ways: simple click on a proposed rectangle toggles it;
+  drag-and-drop on the map creates and selects a new manual rectangle; selected domains are redrawn
+  in green. Right-click on the map clears the selection.
+- The list remains as a compact detail/QA panel (centre, width, relief, estimated topo cells), not
+  the primary selection UI.
+
+**Verification.** `ruff` passes on the touched modules. Targeted tests:
+`tests/test_auto.py::test_screen_candidates_builds_timing_summary`,
+`tests/test_auto.py::test_feature_domains_coerces_candidate_indices`,
+`tests/test_pass2.py::test_souslevent_window_builds_offscreen` -> **3 passed**.
+Additional offscreen smoke test drew a synthetic candidate map successfully.
+
+---
+
+## Entry 72 — IGN basemap on Pass-2 result render  (2026-07-04)
+
+**Goal.** Make the Pass-2 3D result easier to orient by draping an IGN basemap on the terrain, and
+make the behaviour reliable on Windows.
+
+**What changed.**
+- The global Pass-2 render tab now exposes a **Fond** selector, defaulting to `IGN plan`, with
+  `IGN ortho`, `OpenStreetMap`, `OpenTopoMap`, and `Aucun` available. Changing it re-renders the
+  current result without recomputing.
+- The auto/SousLeVent render path now passes the selected basemap source to
+  `populate_auto_scene(...)` instead of hardcoding silently.
+- `contextily` imports now go through `viz.map2d.import_contextily()`, which roots its joblib/temp
+  cache in `SILLAGE_TMP_DIR/contextily` when writable, with a workspace `.tmp/contextily` fallback.
+  This avoids the Windows `AppData\Local\Temp` permission failure that previously made the 3D
+  basemap disappear and fall back to terrain colouring.
+- The same safe contextily import is used by 2-D basemaps, 3-D draping, and Terrarium DEM fallback.
+
+**Verification.** `import_contextily()` succeeds on this Windows environment. Targeted tests:
+`tests/test_pass2.py::test_drape_basemap_reprojects_tiles_to_terrain_crs`,
+`tests/test_pass2.py::test_souslevent_window_builds_offscreen` -> **2 passed**. `ruff` OK.
+
+---
+
+## Entry 73 — IGN basemap on unified Pass-1 candidate result  (2026-07-04)
+
+**Context.** The user clarified that the requested IGN background was meant for the Pass-1 result,
+not the already working Pass-2 3-D render. In the unified SousLeVent UI, the new `Candidats Pass-1`
+map still showed DEM hillshade + hazard only.
+
+**What changed.**
+- The `Candidats Pass-1` tab now has its own **Fond** selector, defaulting to `IGN plan`, with the
+  same sources as the rest of the app plus `Aucun`.
+- The candidate map now draws the selected basemap under the Pass-1 hazard heatmap, then overlays
+  route geometry and selectable Pass-2 rectangles.
+- Tile/network failures fall back to the previous DEM hillshade rendering without losing the
+  candidate-selection workflow.
+
+**Verification.** `ruff` passes on the touched SousLeVent/basemap files. Targeted offscreen tests:
+`tests/test_pass2.py::test_souslevent_window_builds_offscreen`,
+`tests/test_pass2.py::test_souslevent_manual_candidate_rectangle_offscreen`,
+`tests/test_pass2.py::test_souslevent_pass1_candidate_map_uses_basemap` -> **3 passed**. The
+Pass-2 basemap selector from Entry 72 is kept because it is display-only and does not affect
+calculations.
+
+---
+
+## Entry 74 — Manual homogeneous wind sweep in SousLeVent  (2026-07-04)
+
+**Goal.** Let the user choose, from the unified selection tab, either the forecast wind over the
+selected time window or a homogeneous manual wind swept over ranges of speed and direction.
+
+**What changed.**
+- `AutoConfig` now carries `wind_mode`, `manual_wind_speeds_kmh`, and `manual_wind_dirs_deg`.
+- The auto pipeline can build a fixed wind provider for `wind_mode="manual_grid"`; the historical
+  `hour` field is reused as a scenario id, with labels such as `15 km/h · Ouest`.
+- The SousLeVent selection tab now exposes:
+  - `Vent : Météo du créneau / Homogène manuel`;
+  - a speed range slider, snapped to 5 km/h steps;
+  - a direction range slider, snapped to 45° steps.
+- In manual mode, the forecast window slider is disabled and the CPU plan counts
+  `domains × wind scenarios` instead of `domains × hours`.
+- Manual wind settings are saved in `.sillage` manifests and restored on reopen.
+- The 3-D route arrows use the selected homogeneous wind for the displayed scenario.
+
+**Behaviour note.** Pass-1 feature detection still uses the first selected manual scenario as its
+representative screening wind; Pass-2 then runs every selected speed/direction combination on the
+selected/auto domains.
+
+**Verification.** `ruff` passes on the touched pipeline/UI/store/tests. Targeted tests:
+`tests/test_auto.py::test_manual_wind_grid_scenarios_and_provider`,
+`tests/test_pass2.py::test_souslevent_manual_wind_grid_config_offscreen`,
+`tests/test_pass2.py::test_souslevent_window_builds_offscreen` -> **3 passed**.
+
+---
+
+## Entry 75 — Logical top-to-bottom order for SousLeVent tab 1  (2026-07-04)
+
+**Goal.** Reorder the unified selection/calculation tab so the user reads it in the same order as
+the workflow: choose the geometry, inspect the map, choose the wind, choose the calculation mode,
+validate, then watch the log.
+
+**What changed.**
+- Tab 1 now lays out, from top to bottom:
+  1. selection mode (`Parcours` / `Rectangle`);
+  2. IGN map;
+  3. wind mode, with either the forecast-window slider or the manual wind sliders visible;
+  4. calculation mode, with only relevant parameter rows visible;
+  5. a wider centred validate button;
+  6. progress line and log at the bottom.
+- Calculation parameters are no longer just disabled: corridor margin, candidate count, and sector
+  step rows are hidden when not useful for the current selection/calculation mode.
+
+**Verification.** `ruff` passes on `src/sillage/souslevent/window.py` and `tests/test_pass2.py`.
+Targeted offscreen tests:
+`tests/test_pass2.py::test_souslevent_window_builds_offscreen`,
+`tests/test_pass2.py::test_souslevent_manual_wind_grid_config_offscreen` -> **2 passed**.
+
+---
+
+## Entry 76 — Manual-wind Pass-2 parallelism visibility and regression test  (2026-07-04)
+
+**Question.** User reported that Pass-2 runs with manual wind ranges did not appear to launch in
+parallel when several speeds/directions were selected.
+
+**What changed / verified.**
+- Added an explicit Pass-2 plan line in the candidate-selection summary and launch log:
+  `N domaines × M scénarios = K calculs Pass-2 · W en parallèle × T thread(s)`.
+- Added a regression test that monkeypatches the momentum solve and measures overlap between four
+  manual wind scenarios. It fails if the scenarios are executed sequentially.
+
+**Result.** The orchestration path does run manual wind scenarios through the same
+`ThreadPoolExecutor` as forecast-hour cases. If the app shows `1 en parallèle`, the limiting factor
+is the `Calculs simultanés` slider, detected cores, or a single available task, not the manual wind
+mode itself.
+
+**Verification.** `ruff` passes on the touched files. Targeted tests:
+`tests/test_auto.py::test_run_auto_parallelizes_manual_wind_scenarios`,
+`tests/test_auto.py::test_manual_wind_grid_scenarios_and_provider`,
+`tests/test_pass2.py::test_souslevent_manual_wind_grid_config_offscreen` -> **3 passed**.
+
+---
+
+## Entry 77 — Wind direction labels use compass names  (2026-07-04)
+
+**Goal.** Replace user-facing manual-wind directions displayed as angles with French compass
+labels (`Nord`, `Nord-Est`, `Ouest`, etc.).
+
+**What changed.**
+- Added `wind.directions.direction_label()` as the shared angle-to-label helper.
+- Manual wind scenario labels now show `10 km/h · Ouest` / `Nord-Ouest` instead of `270°` / `315°`.
+- The SousLeVent manual direction slider shows compass labels for its range.
+- Pass-2 progress/log messages and the 3-D wind arrow label use compass labels.
+
+**Verification.** `ruff` passes on the touched files. Targeted tests:
+`tests/test_auto.py::test_manual_wind_grid_scenarios_and_provider`,
+`tests/test_pass2.py::test_souslevent_manual_wind_grid_config_offscreen`,
+`tests/test_pass2.py::test_add_compass_adds_north_and_wind_arrows` -> **3 passed**.
+
+---
+
+## Entry 78 — Separate speed/orientation sliders for manual-wind 3-D results  (2026-07-04)
+
+**Goal.** In the 3-D result tab, manual wind sweeps should be browsed by two independent controls
+instead of one flattened scenario slider.
+
+**What changed.**
+- Forecast results keep the existing single `Créneau` slider.
+- Manual-wind results hide the forecast slider and show two sliders:
+  - `Vitesse` over the selected speed values;
+  - `Orientation` over the selected compass directions.
+- Changing either slider renders the corresponding manual wind scenario and keeps the combined
+  label (`20 km/h · Nord-Ouest`) in the result header.
+- Metric, opacity, and basemap refreshes now use the current manual speed/orientation pair rather
+  than the hidden forecast slider.
+
+**Verification.** `ruff` passes on the touched files. Targeted offscreen tests:
+`tests/test_pass2.py::test_souslevent_manual_wind_result_uses_two_render_sliders`,
+`tests/test_pass2.py::test_souslevent_manual_wind_grid_config_offscreen`,
+`tests/test_pass2.py::test_souslevent_window_builds_offscreen` -> **3 passed**.
+
+---
+
+## Entry 79 — 3-D render settings apply explicitly  (2026-07-05)
+
+**Goal.** Avoid UI freezes caused by rebuilding the 3-D scene every time the user drags the
+hour/speed/orientation sliders.
+
+**What changed.**
+- Moved the 3-D case controls into the right render-settings panel:
+  - forecast results show the `Créneau` slider there;
+  - manual-wind sweeps show separate `Vitesse` and `Orientation` sliders there.
+- Slider movement now updates only the current selection label. The heavy 3-D rebuild is triggered
+  by `Appliquer le rendu`.
+- Metric and basemap changes are also kept behind the same apply button, so a user can adjust
+  several settings before one rebuild.
+- Moved the colour legends to the bottom of the settings panel, separated from the selection
+  controls.
+- Opacity remains live because it only changes existing actors and does not rebuild/refetch the
+  scene.
+
+**Verification.** `.\.venv\Scripts\ruff.exe check --no-cache src/sillage/auto/window.py
+tests/test_pass2.py` -> **OK**. Targeted offscreen tests:
+`tests/test_pass2.py::test_souslevent_window_builds_offscreen`,
+`tests/test_pass2.py::test_souslevent_manual_wind_result_uses_two_render_sliders`,
+`tests/test_pass2.py::test_souslevent_forecast_hour_slider_waits_for_apply` -> **3 passed**.
+Pytest still emits the known non-blocking `.pytest_cache` warning on Windows (`WinError 183`).
+
+---
+
+## Entry 80 — 3-D render apply button feedback  (2026-07-05)
+
+**Goal.** Make the explicit 3-D rebuild action visually match calculation launch buttons and avoid
+double-clicks while the view is being rebuilt.
+
+**What changed.**
+- Renamed the render apply button to `Recalculer la vue 3D`.
+- Applied the same green button style used by calculation launch actions.
+- During the synchronous 3-D rebuild, the button is disabled and displays `Calcul en cours...`;
+  the status bar shows the same message, then returns to `Vue 3D recalculée`.
+
+**Verification.** `.\.venv\Scripts\ruff.exe check --no-cache src/sillage/auto/window.py
+tests/test_pass2.py` -> **OK**. Targeted offscreen tests:
+`tests/test_pass2.py::test_souslevent_window_builds_offscreen`,
+`tests/test_pass2.py::test_souslevent_manual_wind_result_uses_two_render_sliders`,
+`tests/test_pass2.py::test_souslevent_forecast_hour_slider_waits_for_apply` -> **3 passed**.
+Pytest still emits the known non-blocking `.pytest_cache` warning on Windows (`WinError 183`).
+
+---
+
+## Entry 81 — 3-D render panel ordering correction  (2026-07-05)
+
+**Goal.** Keep the render controls visually grouped in the order the user expects.
+
+**What changed.**
+- Moved the 3-D basemap selector (`Fond`) to the top of the render settings panel.
+- Moved the metric colour legend (`Rotor`, horizontal speed, vertical speed, turbulence) back above
+  the corresponding threshold/scale sliders.
+- Kept the wind-speed legend at the bottom, since it is not tied to the metric threshold sliders.
+- Added a small offscreen layout-order regression check.
+
+**Verification.** `.\.venv\Scripts\ruff.exe check --no-cache src/sillage/auto/window.py
+tests/test_pass2.py` -> **OK**. Targeted offscreen tests:
+`tests/test_pass2.py::test_souslevent_window_builds_offscreen`,
+`tests/test_pass2.py::test_souslevent_manual_wind_result_uses_two_render_sliders`,
+`tests/test_pass2.py::test_souslevent_forecast_hour_slider_waits_for_apply` -> **3 passed**.
+Pytest still emits the known non-blocking `.pytest_cache` warning on Windows (`WinError 183`).
+
+---
+
+## Entry 82 — Pre-deploy review of the unified-app changes + doc catch-up  (2026-07-05)
+
+**What.** Reviewed the uncommitted SousLeVent unified-app + manual-wind-grid changes before commit
+(the multi-agent correctness angles were cut short by a model limit, so the correctness pass was done
+by hand). **Verdict: functionally correct, deployable; no correctness bug found.**
+
+**Checked.** (1) The new `SousLeVentWindow` subclasses `AutoWindow` and does NOT override
+`_render_hour`/`_on_open`/`closeEvent`/`_on_route`/`_on_winds_fetched`/`_show_result_hours`/
+`_on_opacity_change`, so the Entry-66 fixes (saved-wind restore, cache eviction, `SolveJob.shutdown`,
+QImage copy, terrain cache) are inherited; the overridden run-launch paths (`on_validate`,
+`_on_run_selected_candidates`) both call `_invalidate_shown_result()` + `_set_running(True)`. (2)
+Manual grid: UI dedups speeds (5 km/h step) and dirs (`%360`), so `hours = range(n×m)` == scenario
+count — asserted by `test_souslevent_manual_wind_grid_config_offscreen` (6==6 + label mapping). (3)
+km/h→m/s only in `manual_wind_provider` (`/3.6`); `_cfg_to_dict` persists `wind_mode` + both grids.
+(4) Manual rectangle → `SubZone` clamps the bbox before the pixel window (no negative-index wrap). (5)
+`wind/directions.py` octant math correct. 107 tests pass; `__pycache__` gitignored.
+
+**Docs catch-up (this entry's changes).** The code change had updated dev log/roadmap/README but not
+the "map": added **ADR-0033** (unified app subclassing the auto app; two legacy backups) and
+**ADR-0034** (manual homogeneous wind grid), and refreshed CLAUDE.md's code-layout, "one app / two
+backups" framing, network-module list (`viz/map2d` basemap), and project status.
+
+**Tracked debt (not a blocker).** The unified app *copies* ~150+ lines from `AutoWindow`/`main_window`
+(select-tab rows, rubber-band rect selector, hazard-map render, CPU-plan text, run-launch ×2,
+`main()`) → three windows to keep in sync (a cosmetic drift already exists: `features_spin` 1-64 vs
+1-32). Fix later by extracting shared row-builders + a `_start_run(fn)` helper on `AutoWindow`, moving
+the rect selector + hazard-map draw into shared modules. Minor: dead no-op slot
+`auto.window._on_render_basemap_change`; `scripts/souslevent.py` is a redundant wrapper; `main()`
+dropped `sys.exit(app.exec())`.
+
+---
+
 <!-- TEMPLATE for new entries — copy below the line
 ## Entry N — <short title>  (YYYY-MM-DD)
 **What changed / what I tried.**

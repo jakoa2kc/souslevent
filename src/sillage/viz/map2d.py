@@ -12,6 +12,9 @@ open question).
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
+from pathlib import Path
+import tempfile
 
 import numpy as np
 
@@ -29,6 +32,59 @@ BASEMAP_SOURCES = {
 }
 
 
+def import_contextily():
+    """Import contextily with its joblib/temp cache rooted in the project temp directory.
+
+    On this Windows setup, the OS temp directory can reject joblib's import-time cache creation,
+    which silently disables 2-D/3-D basemaps. Keep the override scoped to the import so WindNinja /
+    OpenFOAM subprocesses don't inherit a project TMP unless their caller explicitly asks for it.
+    """
+    candidates: list[Path] = []
+    try:
+        from ..config import load_config
+
+        candidates.append(Path(load_config().temp_dir) / "contextily")
+    except Exception:
+        pass
+    candidates.append(Path(__file__).resolve().parents[3] / ".tmp" / "contextily")
+    tmp = None
+    for candidate in candidates:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            tmp = candidate
+            break
+        except OSError:
+            continue
+    if tmp is None:
+        raise PermissionError("Aucun dossier temporaire accessible pour contextily/joblib.")
+    session_tmp = tmp / "session"
+    (session_tmp / "joblib").mkdir(parents=True, exist_ok=True)
+    keys = ("TMP", "TEMP", "TMPDIR")
+    old = {k: os.environ.get(k) for k in keys}
+    old_tempdir = tempfile.tempdir
+    old_mkdtemp = tempfile.mkdtemp
+
+    def stable_mkdtemp(*_args, **_kwargs):
+        session_tmp.mkdir(parents=True, exist_ok=True)
+        return str(session_tmp)
+
+    try:
+        for key in keys:
+            os.environ[key] = str(tmp)
+        tempfile.tempdir = str(tmp)
+        tempfile.mkdtemp = stable_mkdtemp
+        import contextily as cx
+        return cx
+    finally:
+        tempfile.mkdtemp = old_mkdtemp
+        tempfile.tempdir = old_tempdir
+        for key, value in old.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def add_basemap(ax, crs, source: str = "IGN plan", attribution: bool = False, zorder: int = 0,
                 zoom_adjust: int = 1):
     """Add a web-tile basemap under the current axes (reprojected to ``crs``).
@@ -44,7 +100,7 @@ def add_basemap(ax, crs, source: str = "IGN plan", attribution: bool = False, zo
         raise ValueError(f"Unknown basemap source {source!r}; have {list(BASEMAP_SOURCES)}")
     import inspect
 
-    import contextily as cx
+    cx = import_contextily()
 
     family, layer = BASEMAP_SOURCES[source]
     provider = getattr(cx.providers, family)

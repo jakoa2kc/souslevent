@@ -528,3 +528,342 @@ Verification:
 - Tests cibles `tests/test_auto.py tests/test_pass2.py` -> `60 passed`.
 - Suite complete `.\.venv\Scripts\python.exe -m pytest -q` -> `94 passed`.
 - `git diff --check` OK (warnings LF/CRLF Windows seulement).
+
+### 2026-07-04 — Nouvelle IHM globale SousLeVent (Codex)
+
+Contexte:
+- Demande: unifier les deux anciennes versions en une nouvelle version globale appelee
+  **SousLeVent**, avec les anciennes gardees en backup.
+
+Realise:
+- Nouveau module `src/sillage/souslevent/window.py` + script `scripts/souslevent.py` + entree
+  console `souslevent`.
+- Les anciennes fenetres restent lanceables: `sillage-gui` / `scripts/sillage_gui.py` et
+  `sillage-auto` / `scripts/sillage_auto.py`.
+- Onglet 1 unifie: menu deroulant **Selection = Parcours / Rectangle**.
+- Menu deroulant **Calcul** avec les 3 options:
+  1. `Pass-1 seul puis selection manuelle`: lance le criblage et remplit un onglet candidats;
+     la selection manuelle v1 se fait dans une liste de domaines candidats.
+  2. `Pass-1 + candidats multiples auto`: reutilise `run_auto(domain_mode="features")`.
+  3. `Pass-2 partout`: route -> pavage corridor existant; rectangle -> pavage quadtree
+     `partition_zone` pour couvrir toute la zone.
+- Refactor pipeline: extraction d'un plan commun DEM + domaines; ajout `screen_candidates(...)`,
+  `ScreeningResult`, et `AutoConfig.manual_zones` pour relancer Pass-2 sur les candidats choisis.
+
+Limite connue:
+- Limite initiale corrigee ensuite: la selection manuelle v1 etait une liste de candidats;
+  l'entree "Carte cliquable des candidats Pass-1" ci-dessous ajoute la carte de selection.
+
+Verification:
+- Import/construction GUI offscreen `SousLeVentWindow` OK.
+- Tests cibles sans `tmp_path`: `3 passed`.
+- Les tests complets sont bloques par un probleme de permissions pytest sur le dossier temporaire
+  `pytest-of-a2Kc` (hors assert applicatif); a relancer apres nettoyage du temp pytest Windows.
+
+### 2026-07-04 — Correctif Pass-1 seule: fin de criblage (Codex)
+
+Contexte:
+- Retour test: en mode `Pass-1 seul puis selection manuelle`, l'IHM affichait:
+  `TypeError: slice indices must be integers or None or have an __index__ method`.
+- Le log utilisateur montrait que les 6 features etaient detectees, puis que l'erreur arrivait
+  apres `Criblage termine : 6 candidat(s).`
+
+Realise:
+- Cause effective corrigee dans `src/sillage/auto/pipeline.py`:
+  - `screen_candidates()` appelait `plan.timings.summary("Pass-1")`;
+  - or `RunTimings.summary()` attend un entier `max_items`, donc Python tentait
+    `items[:"Pass-1"]`;
+  - remplacement par `plan.timings.summary()` et ajout d'un test de regression.
+- Correction defensive dans `src/sillage/auto/partition.py`:
+  - conversion explicite des `Candidate.row/col` en indices entiers avant slicing du MNT;
+  - clamp de toutes les fenetres pixel candidat/source a l'emprise du MNT;
+  - prevention du wrap negatif deja traite cote `corridor_tiles`.
+- Ajout d'un test de regression avec candidat dont `row/col` arrivent en float.
+
+Verification:
+- `ruff` OK sur `src/sillage/auto/pipeline.py`, `src/sillage/auto/partition.py` et
+  `tests/test_auto.py`.
+- Tests cibles:
+  `test_feature_domains_coerces_candidate_indices`,
+  `test_screen_candidates_builds_timing_summary`,
+  `test_manual_mode_config_carries_selected_zones`,
+  `test_souslevent_window_builds_offscreen` -> `4 passed`.
+
+### 2026-07-04 — Carte cliquable des candidats Pass-1 (Codex)
+
+Contexte:
+- Retour test: le rendu apres `Pass-1 seul puis selection manuelle` etait trop minimaliste avec
+  une simple liste; il faut une carte pour choisir les candidats.
+
+Realise:
+- `ScreeningResult` transporte maintenant aussi la grille Pass-1 (`hazard`) produite par le
+  criblage.
+- Onglet `Candidats Pass-1` refait:
+  - carte Matplotlib avec hillshade MNT + overlay danger Pass-1;
+  - trace du parcours superposee si le calcul vient d'un parcours;
+  - rectangles candidats numerotes;
+  - clic simple sur rectangle propose = selection/deselection;
+  - drag-and-drop sur la carte = creation + selection d'un nouveau rectangle manuel;
+  - clic droit sur la carte = vider la selection;
+  - synchronisation carte <-> liste de detail.
+- La liste reste a droite pour verifier centre, largeur, relief et estimation de cellules topo.
+
+Verification:
+- `ruff` OK sur les modules touches.
+- Tests cibles:
+  `test_screen_candidates_builds_timing_summary`,
+  `test_feature_domains_coerces_candidate_indices`,
+  `test_souslevent_window_builds_offscreen` -> `3 passed`.
+- Smoke test offscreen: rendu d'une carte candidat synthetique OK.
+
+### 2026-07-04 — Fond IGN sur rendu Pass-2 (Codex)
+
+Contexte:
+- Retour test: le resultat Pass-2 manque de fond de carte IGN pour se reperer facilement.
+
+Realise:
+- Onglet rendu 3D global: ajout d'un selecteur **Fond**, par defaut `IGN plan`, avec
+  `IGN ortho`, `OpenStreetMap`, `OpenTopoMap`, `Aucun`.
+- Le changement de fond re-render le resultat courant sans relancer le calcul.
+- Correction du vrai point bloquant observe: `contextily`/`joblib` essayait de creer son cache dans
+  `AppData\Local\Temp`, ce qui plante sur cette machine et faisait retomber le rendu 3D sur la
+  coloration relief sans fond.
+- Nouveau helper `viz.map2d.import_contextily()`:
+  - utilise `SILLAGE_TMP_DIR/contextily` si accessible;
+  - fallback `.tmp/contextily` workspace si le temp configure est verrouille;
+  - neutralise le cache `tempfile` pendant l'import de contextily.
+- Le helper est utilise par les fonds 2D, le drapage 3D et le fallback MNT Terrarium.
+
+Verification:
+- `import_contextily()` OK sur cet environnement Windows.
+- Tests cibles:
+  `test_drape_basemap_reprojects_tiles_to_terrain_crs`,
+  `test_souslevent_window_builds_offscreen` -> `2 passed`.
+- `ruff` OK.
+
+### 2026-07-04 — Fond IGN sur resultat Pass-1 candidats (Codex)
+
+Contexte:
+- Clarification utilisateur: la demande de fond IGN concernait le resultat Pass-1 / carte des
+  candidats, pas le rendu 3D Pass-2 qui fonctionnait deja correctement.
+
+Realise:
+- Onglet `Candidats Pass-1`: ajout d'un selecteur **Fond** par defaut sur `IGN plan`.
+- La carte des candidats affiche maintenant le fond selectionne sous la heatmap danger Pass-1,
+  puis le parcours et les rectangles candidats/manuels au-dessus.
+- Si le fond de carte est indisponible (reseau/tuiles/contextily), repli sur l'ancien rendu
+  hillshade MNT + danger Pass-1, sans bloquer la selection.
+- Le changement fait par malentendu sur Pass-2 est conserve pour l'instant: c'est un selecteur
+  d'affichage uniquement, sans impact calcul.
+
+Verification:
+- `ruff` OK sur les fichiers touches.
+- Tests cibles:
+  `test_souslevent_window_builds_offscreen`,
+  `test_souslevent_manual_candidate_rectangle_offscreen`,
+  `test_souslevent_pass1_candidate_map_uses_basemap` -> `3 passed`.
+
+### 2026-07-04 — Vent manuel homogene par plages vitesse/direction (Codex)
+
+Contexte:
+- Besoin utilisateur dans l'onglet selection parcours/creneau:
+  - soit utiliser le vent meteo du creneau selectionne;
+  - soit imposer un vent homogene sur toute la carte;
+  - lancer un calcul pour chaque pas de vitesse et chaque pas de direction selectionnes.
+
+Realise:
+- Ajout d'un choix `Vent : Meteo du creneau / Homogene manuel` dans SousLeVent.
+- En mode manuel:
+  - slider de plage vitesses, pas force a 5 km/h;
+  - slider de plage directions, pas force a 45 degres;
+  - le slider de creneau meteo est desactive pour eviter l'ambiguite;
+  - le plan CPU compte maintenant les scenarios `vitesse x direction` au lieu des heures.
+- Le pipeline auto supporte `wind_mode="manual_grid"`:
+  - chaque couple vitesse/direction devient un scenario de calcul;
+  - les labels de resultat affichent `15 km/h · Ouest` plutot qu'une fausse heure;
+  - les fleches de vent 3D du parcours suivent le scenario manuel affiche.
+- Les champs de vent manuel sont sauvegardes/restaures dans les `.sillage`.
+
+Note:
+- Le criblage Pass-1 utilise pour l'instant le premier scenario manuel comme vent representatif
+  pour detecter les candidats; la Pass-2 calcule ensuite tous les couples vitesse/direction sur
+  les domaines selectionnes/automatiques.
+
+Verification:
+- `ruff` OK sur les fichiers touches.
+- Tests cibles:
+  `test_manual_wind_grid_scenarios_and_provider`,
+  `test_souslevent_manual_wind_grid_config_offscreen`,
+  `test_souslevent_window_builds_offscreen` -> `3 passed`.
+
+### 2026-07-04 — Reorganisation logique onglet 1 (Codex)
+
+Contexte:
+- Demande utilisateur: ordonner l'onglet 1 de haut en bas selon le flux naturel:
+  selection parcours/rectangle, carte IGN, vent, mode de calcul, validation centree, log en bas.
+
+Realise:
+- Onglet `Selection + calcul` reorganise:
+  - menu `Selection` seul en haut;
+  - carte IGN juste dessous;
+  - bloc `Vent` ensuite, avec masquage complet du bloc non selectionne:
+    - mode meteo: creneau + graduations + source prevision;
+    - mode manuel: sliders vitesse/direction uniquement;
+  - bloc `Calcul` ensuite, avec masquage des parametres inutiles:
+    - marge corridor visible seulement en mode parcours;
+    - candidats max visible pour Pass-1 / Pass-1 + auto;
+    - pas secteurs visible seulement pour Pass-2 partout;
+  - bouton `Valider` plus large et centre;
+  - avancement + log tout en bas.
+- Ajout d'assertions de regression UI offscreen sur les blocs visibles/masques.
+
+Verification:
+- `ruff` OK sur `src/sillage/souslevent/window.py` et `tests/test_pass2.py`.
+- Tests cibles:
+  `test_souslevent_window_builds_offscreen`,
+  `test_souslevent_manual_wind_grid_config_offscreen` -> `2 passed`.
+
+### 2026-07-04 — Verification parallelisme Pass-2 vent manuel (Codex)
+
+Contexte:
+- Retour utilisateur: les Pass-2 avec vent manuel ne semblaient pas se lancer en parallele quand
+  plusieurs vitesses/orientations etaient selectionnees.
+
+Realise:
+- Ajout d'une ligne de plan Pass-2 dans le resume candidats et dans le log au lancement:
+  `N domaines x M scenarios = K calculs Pass-2 · W en parallele x T thread(s)`.
+- Ajout d'un test de regression qui simule quatre scenarios de vent manuel et verifie que les faux
+  `run_momentum` se chevauchent bien. Si le pipeline repassait en sequentiel, ce test echouerait.
+
+Conclusion:
+- Le pipeline lance bien les scenarios vent manuel via le meme `ThreadPoolExecutor` que les heures
+  meteo.
+- Si l'IHM affiche `1 en parallele`, il faut regarder le slider `Calculs simultanes`, le nombre de
+  coeurs detectes, ou le nombre reel de taches disponibles.
+
+Verification:
+- `ruff` OK sur les fichiers touches.
+- Tests cibles:
+  `test_run_auto_parallelizes_manual_wind_scenarios`,
+  `test_manual_wind_grid_scenarios_and_provider`,
+  `test_souslevent_manual_wind_grid_config_offscreen` -> `3 passed`.
+
+### 2026-07-04 — Directions de vent en libelles cardinaux (Codex)
+
+Contexte:
+- Demande utilisateur: afficher les orientations de vent sous forme lisible (`Nord`, `Ouest`,
+  `Nord-Est`, etc.) plutot que par valeur d'angle.
+
+Realise:
+- Ajout du helper commun `wind.directions.direction_label()`.
+- Labels scenarios vent manuel:
+  - avant: `10 km/h · 270°`;
+  - maintenant: `10 km/h · Ouest`.
+- Le slider de directions manuel affiche maintenant `Ouest -> Nord-Ouest` au lieu de `270 -> 315°`.
+- Les messages de progression Pass-2 et la boussole/fleche vent 3D utilisent aussi ces libelles.
+- Les degres restent stockes/envoyes a WindNinja en interne.
+
+Verification:
+- `ruff` OK sur les fichiers touches.
+- Tests cibles:
+  `test_manual_wind_grid_scenarios_and_provider`,
+  `test_souslevent_manual_wind_grid_config_offscreen`,
+  `test_add_compass_adds_north_and_wind_arrows` -> `3 passed`.
+
+### 2026-07-04 — Deux sliders rendu 3D pour vent manuel (Codex)
+
+Contexte:
+- Demande utilisateur: dans l'onglet rendu 3D, ajouter un deuxieme slider pour les orientations
+  lorsque le resultat vient d'un balayage de vent manuel.
+
+Realise:
+- Mode meteo: conservation du slider unique `Creneau`.
+- Mode vent manuel: masquage du slider creneau et affichage de deux sliders separes:
+  - `Vitesse`;
+  - `Orientation`.
+- Le couple vitesse/orientation selectionne rend directement le scenario correspondant.
+- Le libelle courant reste combine, par exemple `20 km/h · Nord-Ouest`.
+- Les changements de metrique, fond de carte et seuils utilisent le couple vitesse/orientation
+  courant au lieu du slider creneau masque.
+
+Verification:
+- `ruff` OK sur les fichiers touches.
+- Tests cibles:
+  `test_souslevent_manual_wind_result_uses_two_render_sliders`,
+  `test_souslevent_manual_wind_grid_config_offscreen`,
+  `test_souslevent_window_builds_offscreen` -> `3 passed`.
+
+### 2026-07-05 — Rendu 3D applique seulement apres validation (Codex)
+
+Contexte:
+- Retour utilisateur: dans l'onglet rendu 3D, deplacer les sliders d'heure, vitesse ou orientation
+  relancait directement le rendu, ce qui pouvait freezer l'IHM quand le recalcul etait long.
+- La legende etait trop proche des infos de selection et pouvait etre confondue avec les reglages.
+
+Realise:
+- Deplacement des controles de cas dans le panneau de reglages de rendu a droite:
+  - mode meteo: slider `Creneau`;
+  - mode vent manuel: sliders `Vitesse` et `Orientation`.
+- Les changements de creneau/vitesse/orientation ne reconstruisent plus la scene: ils mettent
+  seulement a jour le libelle du cas courant.
+- Le recalcul 3D est maintenant declenche par le bouton `Appliquer le rendu`.
+- Les changements de representation et de fond de carte attendent aussi ce bouton, pour pouvoir
+  ajuster plusieurs reglages avant un seul rebuild.
+- L'opacite reste live: elle ne reconstruit pas la scene, elle modifie seulement les acteurs deja
+  affiches.
+- Les legendes couleur/vent sont deplacees tout en bas du panneau de droite.
+
+Verification:
+- `.\.venv\Scripts\ruff.exe check --no-cache src/sillage/auto/window.py tests/test_pass2.py`
+  -> OK.
+- Tests cibles:
+  `test_souslevent_window_builds_offscreen`,
+  `test_souslevent_manual_wind_result_uses_two_render_sliders`,
+  `test_souslevent_forecast_hour_slider_waits_for_apply` -> `3 passed`.
+- Avertissement pytest connu et non bloquant: `.pytest_cache` / `WinError 183`.
+
+### 2026-07-05 — Ordre du panneau rendu 3D corrige (Codex)
+
+Contexte:
+- Retour utilisateur: la legende couleur liee aux parametres de rendu (`Rotor`, vitesses,
+  turbulence) doit rester au-dessus des sliders correspondants, et le selecteur de fond de carte
+  doit etre tout en haut.
+
+Realise:
+- `Fond` de carte deplace tout en haut du panneau de droite.
+- Legende couleur de la metrique de rendu replacee entre `Representation` et les sliders de seuils.
+- Legende vent conservee en bas, car elle n'est pas liee aux sliders de seuils/metrique.
+- Ajout d'un test offscreen qui verifie l'ordre du layout.
+
+Verification:
+- `.\.venv\Scripts\ruff.exe check --no-cache src/sillage/auto/window.py tests/test_pass2.py`
+  -> OK.
+- Tests cibles:
+  `test_souslevent_window_builds_offscreen`,
+  `test_souslevent_manual_wind_result_uses_two_render_sliders`,
+  `test_souslevent_forecast_hour_slider_waits_for_apply` -> `3 passed`.
+- Avertissement pytest connu et non bloquant: `.pytest_cache` / `WinError 183`.
+
+### 2026-07-05 — Bouton explicite de recalcul vue 3D (Codex)
+
+Contexte:
+- Demande utilisateur: rendre le bouton d'application des sliders plus visible, avec le meme style
+  vert que les boutons de lancement de calcul, et empecher les doubles clics pendant le recalcul.
+
+Realise:
+- Bouton renomme en `Recalculer la vue 3D`.
+- Style vert applique via le meme QSS que `Valider` / lancement de calcul.
+- Pendant le rebuild 3D synchrone:
+  - bouton desactive;
+  - texte `Calcul en cours...`;
+  - barre de statut `Calcul en cours...`;
+  - restauration du texte et de l'etat actif a la fin, avec statut `Vue 3D recalculee`.
+
+Verification:
+- `.\.venv\Scripts\ruff.exe check --no-cache src/sillage/auto/window.py tests/test_pass2.py`
+  -> OK.
+- Tests cibles:
+  `test_souslevent_window_builds_offscreen`,
+  `test_souslevent_manual_wind_result_uses_two_render_sliders`,
+  `test_souslevent_forecast_hour_slider_waits_for_apply` -> `3 passed`.
+- Avertissement pytest connu et non bloquant: `.pytest_cache` / `WinError 183`.

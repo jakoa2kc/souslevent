@@ -1,8 +1,8 @@
-# Sillage
+# SousLeVent
 
 **Leeward turbulence / rotor mapping for mountain paragliding.**
 
-Sillage computes and visualizes the disturbed air — the *wake* (French: *sillage*) — that
+SousLeVent computes and visualizes the disturbed air — the *wake* (French: *sillage*) — that
 forms downwind of mountain terrain when wind blows over it, so a pilot can see **where**
 and **when** the dangerous, rotor-prone zones will be before flying. Inputs: a fine
 terrain model (DEM) + wind forecasts by altitude, hour by hour.
@@ -41,6 +41,7 @@ docs/                  ← the full reasoning trail + technical & support docs
 prompts/               ← paste-in context for AI assistants (context_primer, coding_agent_brief)
 src/sillage/           ← the package
   terrain/  wind/  flow/  screening/  viz/   config.py
+  souslevent/           ← unified desktop app (rectangle/route + 3 calculation modes)
   app/                 ← manual desktop app (main_window) + shared map_tab + jobs
   auto/                ← automatic pipeline (route → corridor → Pass-2 ×hours → 3D) + save/open
 scripts/               ← sillage_gui.py (manual), sillage_auto.py (auto), demo_pass1.py, …
@@ -64,21 +65,23 @@ python scripts/demo_pass1.py --dem path/to/dem.tif --run-windninja --fetch-forec
 Desktop apps (need WindNinja installed + a display):
 
 ```bash
+python scripts/souslevent.py       # unified: rectangle or route, then one of the 3 workflows
 python scripts/sillage_gui.py     # manual: draw a zone, Pass-1 map, draw a Pass-2 rectangle → 3D
 python scripts/sillage_auto.py    # automatic: draw a flight route + window → corridor wake (3D)
 ```
+
+After `pip install -e .[gui]`, the new command is `souslevent`. The two older commands
+`sillage-gui` and `sillage-auto` remain as legacy backups.
 
 You also need **WindNinja** installed separately (provides `WindNinja_cli` and the
 momentum solver). See `docs/support/environment.md`.
 
 ## Status
 
-Both passes work end-to-end in **two desktop apps** that share one engine (identical results +
-3D rendering). The manual app does click-to-detail Pass-2; the automatic app solves Pass-2 along a
-flight route (feature-based **or** blind corridor paving), with AROME-HD local wind, parallel solves
-+ wave-based ETA, rotor **and** turbulence 3D volumes (2-D height×intensity colormap), and save/open
-of results (`.sillage`). Roadmap in `docs/07_roadmap.md`; the chronological reasoning trail in
-`docs/06_dev_log.md`; the automatic mode in `docs/10_auto_pipeline.md`.
+The new **SousLeVent** app is the global UI: select a rectangle or route, then choose between
+Pass-1-only/manual candidate selection, Pass-1 + automatic candidates, or direct Pass-2 everywhere.
+The two older desktop apps are kept as backups. Roadmap in `docs/07_roadmap.md`; the chronological
+reasoning trail in `docs/06_dev_log.md`; the automatic mode in `docs/10_auto_pipeline.md`.
 
 ## For AI tools / new contributors
 

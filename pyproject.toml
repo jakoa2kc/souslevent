@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sillage"
+name = "souslevent"
 version = "0.0.1"
-description = "Leeward turbulence / rotor mapping for mountain paragliding (two-pass: WindNinja mass screening + momentum detail)."
+description = "SousLeVent: leeward turbulence / rotor mapping for mountain paragliding."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "TBD" }
@@ -39,9 +39,10 @@ gui = [
 # era5  = ["cdsapi>=0.6"]  # reanalysis validation/hindcast
 
 [project.scripts]
+souslevent = "scripts.souslevent:main"      # unified app (same scripts/ pattern as the backups)
 sillage-pass1 = "scripts.demo_pass1:main"
-sillage-gui = "scripts.sillage_gui:main"
-sillage-auto = "scripts.sillage_auto:main"
+sillage-gui = "scripts.sillage_gui:main"    # legacy backup: manual two-pass UI
+sillage-auto = "scripts.sillage_auto:main"  # legacy backup: old automatic UI
 
 [tool.setuptools.packages.find]
 where = ["src"]

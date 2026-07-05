@@ -83,13 +83,15 @@ def _drape_basemap(plotter, terrain, crs, source: str, zoom_boost: int = 0,
         key = (round(xmin), round(ymin), round(xmax), round(ymax), source, int(zoom_boost))
         tex = texture_cache.get(key) if texture_cache is not None else None
         if tex is None:
-            import contextily as cx
             from rasterio.crs import CRS as RCRS
             from rasterio.enums import Resampling
             from rasterio.transform import from_bounds
             from rasterio.warp import reproject
             from rasterio.warp import transform as warp_xy
 
+            from .map2d import import_contextily
+
+            cx = import_contextily()
             dst_crs = RCRS.from_user_input(crs)
             lons, lats = warp_xy(dst_crs, RCRS.from_epsg(4326),
                                  [xmin, xmin, xmax, xmax], [ymin, ymax, ymin, ymax])
@@ -826,7 +828,9 @@ def _add_compass(plotter, terrain, mean_flow_dir, wind_speed_ms=None, wind_from_
         if wind_speed_ms is not None:
             txt = f"vent {wind_speed_ms * 3.6:.0f} km/h"
             if wind_from_deg is not None:
-                txt += f" · {wind_from_deg:.0f}°"
+                from ..wind.directions import direction_label
+
+                txt += f" · {direction_label(wind_from_deg)}"
         pts.append((base[0] + wd[0] * length * 1.15, base[1] + wd[1] * length * 1.15,
                     base[2] + wd[2] * length * 1.15))
         labels.append(txt)
