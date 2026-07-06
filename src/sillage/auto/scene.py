@@ -77,7 +77,8 @@ def populate_auto_scene(plotter, dem, cases, crs=None, basemap_source: str = "IG
                         route_winds=None, basemap_zoom_boost: int = 2, rotor_cache=None,
                         rotor_opacity: float = 0.5, intensity_max=None,
                         metric: str = "rotor", vol_floor: float = 0.20, texture_cache=None,
-                        metric_range=None, terrain_cache=None):
+                        metric_range=None, terrain_cache=None,
+                        wind_size_factor: float = 1.0, wind_altitude_m: float = 20.0):
     """Add the global wake scene for one hour to ``plotter``.
 
     ``dem`` is the full fine zone DEM (terrain), ``cases`` the :class:`auto.pipeline.CaseResult`
@@ -270,7 +271,9 @@ def populate_auto_scene(plotter, dem, cases, crs=None, basemap_source: str = "IG
             rendered += 1
 
     if route_winds:  # AROME wind sampled along the route, at the rendered hour
-        plotter._wind_arrows = v3._add_wind_arrows_3d(plotter, terrain, route_winds)
+        plotter._wind_arrows = v3._add_wind_arrows_3d(
+            plotter, terrain, route_winds,
+            size_factor=wind_size_factor, altitude_m=wind_altitude_m)
         plotter._wind_ref_metric = None  # re-baseline the zoom-autoscale for this build
     else:
         plotter._wind_arrows = []

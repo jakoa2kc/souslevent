@@ -2144,3 +2144,22 @@ traceback / DLL error** (timed out still-running = healthy).
 **Left for the release build:** flip `console=True → False` in the spec (windowed), test on a **clean**
 machine without Python, and ship `dist/SousLeVent/` zipped. WindNinja stays a separate install
 (`WINDNINJA_CLI` in the `.env` next to the exe). Packaging steps in `packaging/README.md`.
+
+---
+
+## Entry 87 — Wind-arrow size + altitude sliders under the 3D view  (2026-07-06)
+
+**Ask.** Two sliders below the 3D view to set the wind arrows' **reference size** (staying
+proportional to zoom) and their **altitude above ground** (0 → 300 m).
+
+**How.** Both apply to the actors live (no mesh rebuild): `_add_wind_arrows_3d` now builds arrows at
+**ground** level and exposes `size_factor` (actor scale) + `altitude_m` (actor Z position). The zoom
+autoscale (`_rescale`) multiplies `zoom_f × plotter._wind_size_factor`, so the reference size still
+tracks zoom; altitude is a pure vertical shift the autoscale doesn't touch. New
+`viz.volume3d.set_wind_arrow_style(plotter, size_factor=, altitude_m=)` re-applies to the existing
+actors and records the values for the next build. `populate_auto_scene` gained
+`wind_size_factor`/`wind_altitude_m` (threaded from the window) so hour scrubs keep the settings.
+
+**UI.** `AutoWindow._build_render_tab` adds a row under the viewport: "Flèches vent — taille" (20–400 %)
++ "altitude sol" (0–300 m) + a live label; `_on_wind_style_change` calls `set_wind_arrow_style`.
+`SousLeVentWindow` inherits it. Defaults: 100 % · 20 m. 2 tests. `pytest -q` → **112 passed**, ruff clean.

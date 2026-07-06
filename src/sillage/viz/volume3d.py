@@ -333,9 +333,17 @@ def wind_legend_image(vmax: float = WIND_VMAX_KMH, n: int = 256):
     return _fig_to_rgba(fig)
 
 
-def _add_wind_arrows_3d(plotter, terrain, winds):
-    """One wind arrow per cell, above the terrain, coloured by the continuous wind scale. Returns
-    ``[(actor, origin), …]`` so ``enable_wind_arrow_autoscale`` can keep them ~constant on screen."""
+WIND_ARROW_ALT_DEFAULT_M = 20.0  # default height of the wind arrows above ground (AGL)
+
+
+def _add_wind_arrows_3d(plotter, terrain, winds, *, size_factor: float = 1.0,
+                        altitude_m: float = WIND_ARROW_ALT_DEFAULT_M):
+    """One wind arrow per cell, coloured by the continuous wind scale. Returns
+    ``[(actor, ground_origin), …]`` for ``enable_wind_arrow_autoscale``.
+
+    Arrows are built at **ground** level; ``altitude_m`` lifts them (AGL) via the actor position and
+    ``size_factor`` scales the reference length via the actor scale — both are combined with the zoom
+    autoscale factor, so a size/altitude slider adjusts them live without rebuilding the meshes."""
     import pyvista as pv
     from scipy.spatial import cKDTree
 
@@ -344,20 +352,60 @@ def _add_wind_arrows_3d(plotter, terrain, winds):
     b = terrain.bounds
     side = max(1, round(len(winds) ** 0.5))
     length = min(0.06 * min(b[1] - b[0], b[3] - b[2]),
-                 0.32 * min(b[1] - b[0], b[3] - b[2]) / side)
-    lift = 0.04 * (b[5] - b[4]) + 10.0
+                 0.32 * min(b[1] - b[0], b[3] - b[2]) / side)  # intrinsic reference length
+    s = float(max(0.05, size_factor))
+    alt = float(max(0.0, altitude_m))
     actors = []
     for x, y, spd, drc in winds:
         zi = float(tpts[tree.query([x, y])[1], 2])
         blow = np.deg2rad((float(drc) + 180.0) % 360.0)
         d = (float(np.sin(blow)), float(np.cos(blow)), 0.0)
-        origin = (float(x), float(y), zi + lift)
-        start = (x - d[0] * length / 2, y - d[1] * length / 2, zi + lift)
+        origin = (float(x), float(y), zi)  # ground point — altitude applied via actor position
+        start = (x - d[0] * length / 2, y - d[1] * length / 2, zi)
         arrow = pv.Arrow(start=start, direction=d, scale=length,
                          tip_length=0.30, tip_radius=0.10, shaft_radius=0.04)
         actor = plotter.add_mesh(arrow, color=wind_color(float(spd) * 3.6))
+        try:
+            actor.SetOrigin(*origin)
+            actor.SetScale(s, s, s)
+            actor.SetPosition(0.0, 0.0, alt)
+        except Exception:
+            pass
         actors.append((actor, origin))
+    plotter._wind_size_factor = s
+    plotter._wind_altitude_m = alt
     return actors
+
+
+def set_wind_arrow_style(plotter, *, size_factor=None, altitude_m=None) -> None:
+    """Live-adjust the wind arrows' reference SIZE and AGL ALTITUDE (no rebuild). Size multiplies the
+    zoom autoscale factor (arrows stay proportional to zoom); altitude is a pure vertical shift.
+    Records the values so the next scene build / autoscale reuses them even if no arrows exist yet."""
+    if size_factor is not None:
+        plotter._wind_size_factor = float(max(0.05, size_factor))
+    if altitude_m is not None:
+        plotter._wind_altitude_m = float(max(0.0, altitude_m))
+    arrows = getattr(plotter, "_wind_arrows", None)
+    if not arrows:
+        return
+    s = float(getattr(plotter, "_wind_size_factor", 1.0))
+    alt = float(getattr(plotter, "_wind_altitude_m", WIND_ARROW_ALT_DEFAULT_M))
+    ref = getattr(plotter, "_wind_ref_metric", None)
+    try:
+        f = float(max(0.15, min(8.0, _camera_screen_metric(plotter.camera) / ref))) if ref else 1.0
+    except Exception:
+        f = 1.0
+    for actor, origin in arrows:
+        try:
+            actor.SetOrigin(*origin)
+            actor.SetScale(f * s, f * s, f * s)
+            actor.SetPosition(0.0, 0.0, alt)
+        except Exception:
+            pass
+    try:
+        plotter.render()
+    except Exception:
+        pass
 
 
 def _camera_screen_metric(camera):
@@ -377,8 +425,9 @@ def baseline_wind_autoscale(plotter):
     their built size. Call right after a render once the camera is in place."""
     try:
         plotter._wind_ref_metric = _camera_screen_metric(plotter.camera)
+        s = float(getattr(plotter, "_wind_size_factor", 1.0))  # baseline (zoom factor 1) × size
         for actor, _origin in getattr(plotter, "_wind_arrows", None) or []:
-            actor.SetScale(1.0, 1.0, 1.0)
+            actor.SetScale(s, s, s)
     except Exception:
         pass
 
@@ -398,11 +447,12 @@ def enable_wind_arrow_autoscale(plotter):
         ref = getattr(plotter, "_wind_ref_metric", None)
         if not arrows or not ref:
             return
+        s = float(getattr(plotter, "_wind_size_factor", 1.0))
         f = float(max(0.15, min(8.0, _camera_screen_metric(plotter.camera) / ref)))
         for actor, origin in arrows:
             try:
                 actor.SetOrigin(*origin)
-                actor.SetScale(f, f, f)
+                actor.SetScale(f * s, f * s, f * s)  # zoom × reference-size; position holds altitude
             except Exception:
                 pass
         try:

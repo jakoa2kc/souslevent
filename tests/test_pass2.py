@@ -477,6 +477,37 @@ def test_souslevent_candidate_hour_slider_browses_hazard_stack(monkeypatch):
     w.deleteLater()
 
 
+def test_souslevent_wind_arrow_sliders_update_state():
+    pytest.importorskip("PySide6")
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    from sillage.souslevent.window import SousLeVentWindow
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    w = SousLeVentWindow()
+    w.wind_size_slider.setValue(250)      # 2.5× reference size
+    w.wind_alt_slider.setValue(120)       # 120 m above ground
+    assert w._wind_size_factor == 2.5
+    assert w._wind_altitude_m == 120.0
+    assert "250 %" in w.wind_style_label.text() and "120 m" in w.wind_style_label.text()
+    w.deleteLater()
+
+
+def test_set_wind_arrow_style_records_without_arrows():
+    # No arrows on the plotter yet: the call must still record size/altitude for the next build.
+    from sillage.viz.volume3d import set_wind_arrow_style
+
+    class _P:
+        pass
+
+    p = _P()
+    set_wind_arrow_style(p, size_factor=2.0, altitude_m=50.0)
+    assert p._wind_size_factor == 2.0 and p._wind_altitude_m == 50.0
+
+
 def test_souslevent_manual_wind_result_uses_two_render_sliders():
     pytest.importorskip("PySide6")
     import os

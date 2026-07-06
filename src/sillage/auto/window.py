@@ -89,6 +89,8 @@ class AutoWindow(QtWidgets.QMainWindow):
         self._manual_render_dirs = []
         self._manual_render_case_by_pair = {}
         self._opacity = 0.5      # rotor volume opacity (slider-controlled, see inside the thickness)
+        self._wind_size_factor = 1.0    # wind-arrow reference size (× zoom autoscale); slider-set
+        self._wind_altitude_m = 20.0    # wind-arrow height above ground (m, AGL); slider-set
         self._metric = "rotor"          # 3D colour metric (default rotor)
         # Display units. Ranges drive both extraction (min/max shown) and colour clamping.
         self._metric_ranges = {
@@ -337,6 +339,34 @@ class AutoWindow(QtWidgets.QMainWindow):
         self.opacity_slider.valueChanged.connect(self._on_opacity_change)
         srow.addWidget(self.opacity_slider)
         lay.addLayout(srow)
+
+        # Wind-arrow controls under the 3D view: reference size (stays proportional to zoom) + AGL
+        # altitude (0 → 300 m). Both apply live to the drawn arrows (no scene rebuild).
+        wrow = QtWidgets.QHBoxLayout()
+        wrow.addWidget(QtWidgets.QLabel("Flèches vent — taille :"))
+        self.wind_size_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.wind_size_slider.setRange(20, 400)                 # 0.2× … 4.0× the reference size
+        self.wind_size_slider.setValue(int(self._wind_size_factor * 100))
+        self.wind_size_slider.setFixedWidth(150)
+        self.wind_size_slider.setToolTip(
+            "Taille de référence des flèches de vent. Elle reste ensuite proportionnelle au zoom.")
+        self.wind_size_slider.valueChanged.connect(self._on_wind_style_change)
+        wrow.addWidget(self.wind_size_slider)
+        wrow.addSpacing(18)
+        wrow.addWidget(QtWidgets.QLabel("altitude sol :"))
+        self.wind_alt_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.wind_alt_slider.setRange(0, 300)                   # 0 … 300 m above ground
+        self.wind_alt_slider.setValue(int(self._wind_altitude_m))
+        self.wind_alt_slider.setFixedWidth(150)
+        self.wind_alt_slider.setToolTip("Hauteur des flèches de vent au-dessus du sol (0 → 300 m).")
+        self.wind_alt_slider.valueChanged.connect(self._on_wind_style_change)
+        wrow.addWidget(self.wind_alt_slider)
+        self.wind_style_label = QtWidgets.QLabel(
+            f"{int(self._wind_size_factor * 100)} % · {int(self._wind_altitude_m)} m")
+        self.wind_style_label.setStyleSheet("color:#888; font-size:10px;")
+        wrow.addWidget(self.wind_style_label)
+        wrow.addStretch(1)
+        lay.addLayout(wrow)
         outer.addLayout(lay, stretch=1)
 
         # Right panel: basemap, render case, metric legend/sliders, then the wind legend.
@@ -1219,6 +1249,18 @@ class AutoWindow(QtWidgets.QMainWindow):
             from ..viz.volume3d import set_rotor_opacity
             set_rotor_opacity(self._plotter, self._opacity)
 
+    def _on_wind_style_change(self, *_a) -> None:
+        """Live-adjust the wind arrows' reference size + AGL altitude (no scene rebuild)."""
+        self._wind_size_factor = self.wind_size_slider.value() / 100.0
+        self._wind_altitude_m = float(self.wind_alt_slider.value())
+        if hasattr(self, "wind_style_label"):
+            self.wind_style_label.setText(
+                f"{self.wind_size_slider.value()} % · {int(self._wind_altitude_m)} m")
+        if self._plotter is not None:
+            from ..viz.volume3d import set_wind_arrow_style
+            set_wind_arrow_style(self._plotter, size_factor=self._wind_size_factor,
+                                 altitude_m=self._wind_altitude_m)
+
     def _label_for_hour(self, hour: int) -> str:
         """Absolute date label for an hour offset — the saved labels for an opened result (its run
         day), else today's forecast window."""
@@ -1288,7 +1330,9 @@ class AutoWindow(QtWidgets.QMainWindow):
                             route_winds=self._route_winds_utm(hour),
                             rotor_cache=self._rotor_cache, rotor_opacity=self._opacity,
                             metric=self._metric, metric_range=self._native_metric_range(),
-                            texture_cache=self._tex_cache, terrain_cache=self._terrain_cache)
+                            texture_cache=self._tex_cache, terrain_cache=self._terrain_cache,
+                            wind_size_factor=self._wind_size_factor,
+                            wind_altitude_m=self._wind_altitude_m)
         if cam is not None:  # keep the viewpoint across hour scrubs
             self._plotter.camera_position = cam
         else:
