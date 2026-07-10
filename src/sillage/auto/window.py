@@ -474,33 +474,37 @@ class AutoWindow(QtWidgets.QMainWindow):
 
         right.addStretch(1)
 
-        # Wind-arrow controls, just above the wind-speed legend: reference size (stays proportional
-        # to zoom) + AGL altitude (0 → 300 m). Both apply live to the drawn arrows (no scene rebuild).
-        wind_form = QtWidgets.QFormLayout()
-        wind_form.setContentsMargins(0, 0, 0, 0)
-        self.wind_size_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.wind_size_slider.setRange(20, 400)                 # 0.2× … 4.0× the reference size
-        self.wind_size_slider.setValue(int(self._wind_size_factor * 100))
-        self.wind_size_slider.setToolTip(
-            "Taille de référence des flèches de vent. Elle reste ensuite proportionnelle au zoom.")
-        self.wind_size_slider.valueChanged.connect(self._on_wind_style_change)
-        wind_form.addRow("Flèches — taille :", self.wind_size_slider)
-        self.wind_alt_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.wind_alt_slider.setRange(0, 300)                   # 0 … 300 m above ground
-        self.wind_alt_slider.setValue(int(self._wind_altitude_m))
-        self.wind_alt_slider.setToolTip("Hauteur des flèches de vent au-dessus du sol (0 → 300 m).")
-        self.wind_alt_slider.valueChanged.connect(self._on_wind_style_change)
-        wind_form.addRow("altitude sol :", self.wind_alt_slider)
-        right.addLayout(wind_form)
-        self.wind_style_label = QtWidgets.QLabel(
-            f"{int(self._wind_size_factor * 100)} % · {int(self._wind_altitude_m)} m")
-        self.wind_style_label.setStyleSheet("color:#888; font-size:10px;")
-        self.wind_style_label.setAlignment(QtCore.Qt.AlignHCenter)
-        right.addWidget(self.wind_style_label)
-
         self.wind_legend_label = QtWidgets.QLabel()
         self.wind_legend_label.setAlignment(QtCore.Qt.AlignHCenter)
         right.addWidget(self.wind_legend_label)
+
+        # Wind-arrow controls BELOW the wind-speed legend, side by side and compact: reference size
+        # (stays proportional to zoom) + AGL altitude (0 → 300 m). Live (no scene rebuild).
+        wind_row = QtWidgets.QHBoxLayout()
+        wind_row.addWidget(QtWidgets.QLabel("Flèches — taille"))
+        self.wind_size_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.wind_size_slider.setRange(20, 400)                 # 0.2× … 4.0× the reference size
+        self.wind_size_slider.setValue(int(self._wind_size_factor * 100))
+        self.wind_size_slider.setFixedWidth(70)
+        self.wind_size_slider.setToolTip(
+            "Taille de référence des flèches de vent. Elle reste ensuite proportionnelle au zoom.")
+        self.wind_size_slider.valueChanged.connect(self._on_wind_style_change)
+        wind_row.addWidget(self.wind_size_slider)
+        wind_row.addSpacing(10)
+        wind_row.addWidget(QtWidgets.QLabel("alt. sol"))
+        self.wind_alt_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.wind_alt_slider.setRange(0, 300)                   # 0 … 300 m above ground
+        self.wind_alt_slider.setValue(int(self._wind_altitude_m))
+        self.wind_alt_slider.setFixedWidth(70)
+        self.wind_alt_slider.setToolTip("Hauteur des flèches de vent au-dessus du sol (0 → 300 m).")
+        self.wind_alt_slider.valueChanged.connect(self._on_wind_style_change)
+        wind_row.addWidget(self.wind_alt_slider)
+        self.wind_style_label = QtWidgets.QLabel(
+            f"{int(self._wind_size_factor * 100)} % · {int(self._wind_altitude_m)} m")
+        self.wind_style_label.setStyleSheet("color:#888; font-size:10px;")
+        wind_row.addWidget(self.wind_style_label)
+        wind_row.addStretch(1)
+        right.addLayout(wind_row)
         outer.addLayout(right)
         self._apply_metric_controls()
         return w

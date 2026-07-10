@@ -46,7 +46,9 @@ def import_contextily():
         candidates.append(Path(load_config().temp_dir) / "contextily")
     except Exception:
         pass
-    candidates.append(Path(__file__).resolve().parents[3] / ".tmp" / "contextily")
+    # Fallback = the OS temp dir, NEVER the (drive-synced) source tree — so nothing generated at
+    # runtime leaks into the dev/repo folder even if the configured C:\A2K temp is unavailable.
+    candidates.append(Path(tempfile.gettempdir()) / "souslevent" / "contextily")
     tmp = session_tmp = None
     for candidate in candidates:
         try:
