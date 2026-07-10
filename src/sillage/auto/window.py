@@ -329,44 +329,7 @@ class AutoWindow(QtWidgets.QMainWindow):
         self.btn_save.clicked.connect(self._on_save)
         srow.addWidget(self.btn_save)
         srow.addStretch(1)
-        srow.addWidget(QtWidgets.QLabel("Opacité :"))
-        self.opacity_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.opacity_slider.setRange(5, 100)
-        self.opacity_slider.setValue(int(self._opacity * 100))
-        self.opacity_slider.setFixedWidth(120)
-        self.opacity_slider.setToolTip(
-            "Transparence des volumes rotor — baisse pour voir l'intérieur de l'épaisseur.")
-        self.opacity_slider.valueChanged.connect(self._on_opacity_change)
-        srow.addWidget(self.opacity_slider)
         lay.addLayout(srow)
-
-        # Wind-arrow controls under the 3D view: reference size (stays proportional to zoom) + AGL
-        # altitude (0 → 300 m). Both apply live to the drawn arrows (no scene rebuild).
-        wrow = QtWidgets.QHBoxLayout()
-        wrow.addWidget(QtWidgets.QLabel("Flèches vent — taille :"))
-        self.wind_size_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.wind_size_slider.setRange(20, 400)                 # 0.2× … 4.0× the reference size
-        self.wind_size_slider.setValue(int(self._wind_size_factor * 100))
-        self.wind_size_slider.setFixedWidth(150)
-        self.wind_size_slider.setToolTip(
-            "Taille de référence des flèches de vent. Elle reste ensuite proportionnelle au zoom.")
-        self.wind_size_slider.valueChanged.connect(self._on_wind_style_change)
-        wrow.addWidget(self.wind_size_slider)
-        wrow.addSpacing(18)
-        wrow.addWidget(QtWidgets.QLabel("altitude sol :"))
-        self.wind_alt_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.wind_alt_slider.setRange(0, 300)                   # 0 … 300 m above ground
-        self.wind_alt_slider.setValue(int(self._wind_altitude_m))
-        self.wind_alt_slider.setFixedWidth(150)
-        self.wind_alt_slider.setToolTip("Hauteur des flèches de vent au-dessus du sol (0 → 300 m).")
-        self.wind_alt_slider.valueChanged.connect(self._on_wind_style_change)
-        wrow.addWidget(self.wind_alt_slider)
-        self.wind_style_label = QtWidgets.QLabel(
-            f"{int(self._wind_size_factor * 100)} % · {int(self._wind_altitude_m)} m")
-        self.wind_style_label.setStyleSheet("color:#888; font-size:10px;")
-        wrow.addWidget(self.wind_style_label)
-        wrow.addStretch(1)
-        lay.addLayout(wrow)
         outer.addLayout(lay, stretch=1)
 
         # Right panel: basemap, render case, metric legend/sliders, then the wind legend.
@@ -496,7 +459,45 @@ class AutoWindow(QtWidgets.QMainWindow):
             "Recalcule le rendu 3D avec le cas, la métrique, le fond et les seuils affichés.")
         self.btn_apply_scale.clicked.connect(self._on_apply_scale)
         right.addWidget(self.btn_apply_scale)
+
+        # Opacity sits with the render params (live, actor-level — no rebuild).
+        opacity_row = QtWidgets.QHBoxLayout()
+        opacity_row.addWidget(QtWidgets.QLabel("Opacité volumes :"))
+        self.opacity_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.opacity_slider.setRange(5, 100)
+        self.opacity_slider.setValue(int(self._opacity * 100))
+        self.opacity_slider.setToolTip(
+            "Transparence des volumes sous le vent — baisse pour voir l'intérieur de l'épaisseur.")
+        self.opacity_slider.valueChanged.connect(self._on_opacity_change)
+        opacity_row.addWidget(self.opacity_slider, stretch=1)
+        right.addLayout(opacity_row)
+
         right.addStretch(1)
+
+        # Wind-arrow controls, just above the wind-speed legend: reference size (stays proportional
+        # to zoom) + AGL altitude (0 → 300 m). Both apply live to the drawn arrows (no scene rebuild).
+        wind_form = QtWidgets.QFormLayout()
+        wind_form.setContentsMargins(0, 0, 0, 0)
+        self.wind_size_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.wind_size_slider.setRange(20, 400)                 # 0.2× … 4.0× the reference size
+        self.wind_size_slider.setValue(int(self._wind_size_factor * 100))
+        self.wind_size_slider.setToolTip(
+            "Taille de référence des flèches de vent. Elle reste ensuite proportionnelle au zoom.")
+        self.wind_size_slider.valueChanged.connect(self._on_wind_style_change)
+        wind_form.addRow("Flèches — taille :", self.wind_size_slider)
+        self.wind_alt_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.wind_alt_slider.setRange(0, 300)                   # 0 … 300 m above ground
+        self.wind_alt_slider.setValue(int(self._wind_altitude_m))
+        self.wind_alt_slider.setToolTip("Hauteur des flèches de vent au-dessus du sol (0 → 300 m).")
+        self.wind_alt_slider.valueChanged.connect(self._on_wind_style_change)
+        wind_form.addRow("altitude sol :", self.wind_alt_slider)
+        right.addLayout(wind_form)
+        self.wind_style_label = QtWidgets.QLabel(
+            f"{int(self._wind_size_factor * 100)} % · {int(self._wind_altitude_m)} m")
+        self.wind_style_label.setStyleSheet("color:#888; font-size:10px;")
+        self.wind_style_label.setAlignment(QtCore.Qt.AlignHCenter)
+        right.addWidget(self.wind_style_label)
+
         self.wind_legend_label = QtWidgets.QLabel()
         self.wind_legend_label.setAlignment(QtCore.Qt.AlignHCenter)
         right.addWidget(self.wind_legend_label)
