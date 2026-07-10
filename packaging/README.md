@@ -8,6 +8,18 @@ python -m pip install -e .[dev]        :: app + pytest/ruff/build/pyinstaller
 python -m pytest -q                    :: sanity (offscreen ok)
 ```
 
+## Easiest: one command, outputs land in C:\A2K (never the synced dev folder)
+
+```bat
+python scripts\build_release.py         :: wheel + exe -> %SILLAGE_GENERATED_ROOT%\build\dist
+python scripts\build_release.py --exe   :: exe only    (--wheel for wheel only)
+```
+
+It redirects every output under the generated root (`C:\A2K\SousLeVent\build\` by default) and
+deletes any stray `build/` / `dist/` / `*.egg-info` the tools drop in the repo — important when the
+dev folder is synced to a cloud drive that can't honour `.gitignore`. The manual steps below are
+equivalent; pass `--outdir` / `--distpath` / `--workpath` yourself to keep them out of the repo.
+
 ## 1. Wheel
 
 ```bat
