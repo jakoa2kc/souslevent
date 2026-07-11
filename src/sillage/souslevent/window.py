@@ -409,7 +409,7 @@ class SousLeVentWindow(AutoWindow):
             self.step_row_widget.setVisible(is_pass2_everywhere)
         labels = {
             self.CALC_PASS1_MANUAL: "✓  Valider — lancer Pass-1",
-            self.CALC_PASS2_EVERYWHERE: "✓  Valider — Pass-2 partout",
+            self.CALC_PASS2_EVERYWHERE: "✓  Valider — pavage auto",
         }
         self.btn_validate.setText(labels.get(calc, "✓  Valider"))
         self._refresh_cpu_plan()
