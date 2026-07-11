@@ -1070,12 +1070,29 @@ class SousLeVentWindow(AutoWindow):
             "Clique ou trace d'autres zones, puis lance Pass-2.")
         self._draw_candidate_map()
         if self.isVisible():  # modal dialog — skipped in offscreen tests (window never shown)
-            self._ask_manual_mesh_choice(zone)
+            self._ask_manual_mesh_choice(zone, idx)
 
-    def _ask_manual_mesh_choice(self, zone: SubZone) -> None:
+    def _remove_candidate_zone(self, idx: int) -> None:
+        """Drop a just-added manual zone from the partition, the list and the map (popup 'Annuler')."""
+        result = self._screening_result
+        if result is None or not (0 <= idx < len(result.partition)):
+            return
+        result.partition.pop(idx)
+        self._candidate_syncing = True
+        try:
+            self.candidate_list.takeItem(idx)
+        finally:
+            self._candidate_syncing = False
+        if idx < self._candidate_auto_count:  # only reachable for manual zones, but stay safe
+            self._candidate_auto_count -= 1
+        self._draw_candidate_map()
+        self._on_candidate_selection()
+        self.statusBar().showMessage("Sélection manuelle annulée.")
+
+    def _ask_manual_mesh_choice(self, zone: SubZone, idx: int) -> None:
         """Mesh ↔ terrain-resolution trade-off for a hand-drawn zone (ADR-0037): tell the pilot how
-        many mesh cells matching the terrain resolution would take, and offer either that mesh count
-        or a terrain resolution adapted to the selected mesh preset."""
+        many mesh cells matching the terrain resolution would take, and offer either that mesh count,
+        a terrain resolution adapted to the selected mesh preset, or cancelling the drawn zone."""
         from ..auto.partition import mesh_count_for_resolution, ninjafoam_resolution_m
         from ..auto.pipeline import AUTO_EDGE_BUFFER_M
 
@@ -1106,9 +1123,13 @@ class SousLeVentWindow(AutoWindow):
             QtWidgets.QMessageBox.AcceptRole)
         b_topo = box.addButton(
             f"Adapter la topo → {topo_adapted:.0f} m", QtWidgets.QMessageBox.ActionRole)
-        box.addButton("Garder tel quel", QtWidgets.QMessageBox.RejectRole)
+        b_cancel = box.addButton("Annuler la zone", QtWidgets.QMessageBox.RejectRole)
+        box.setEscapeButton(b_cancel)  # Échap / fermer la boîte = annuler la sélection en cours
         box.exec()
         clicked = box.clickedButton()
+        if clicked is b_cancel or clicked is None:
+            self._remove_candidate_zone(idx)
+            return
         if clicked is b_mesh:
             self._manual_mesh_override = int(needed)
             self._manual_topo_override = None

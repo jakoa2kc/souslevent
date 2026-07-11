@@ -350,6 +350,10 @@ def test_souslevent_manual_candidate_rectangle_offscreen():
     assert w.candidate_list.count() == 1
     assert w.candidate_list.item(0).isSelected()
     assert w._screening_result.partition[0].est_cells > 0
+
+    w._remove_candidate_zone(0)                     # popup "Annuler la zone" → fully gone
+    assert len(w._screening_result.partition) == 0
+    assert w.candidate_list.count() == 0
     w.deleteLater()
 
 
