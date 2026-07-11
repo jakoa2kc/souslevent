@@ -105,18 +105,31 @@ class SousLeVentWindow(AutoWindow):
         side.setContentsMargins(0, 0, 8, 0)
         side.setSpacing(8)
 
-        form = QtWidgets.QFormLayout()
-        form.setContentsMargins(0, 0, 0, 0)
+        def _shrinkable(combo: QtWidgets.QComboBox) -> QtWidgets.QComboBox:
+            """Let a combo shrink below its longest item so it never overflows the column (the
+            dropdown list still shows the full texts)."""
+            combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(12)
+            combo.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            return combo
+
+        def _form() -> QtWidgets.QFormLayout:
+            f = QtWidgets.QFormLayout()
+            f.setContentsMargins(0, 0, 0, 0)
+            f.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
+            return f
+
+        form = _form()
         self.selection_combo = QtWidgets.QComboBox()
         self.selection_combo.addItem("Parcours", "route")
         self.selection_combo.addItem("Rectangle", "rectangle")
         self.selection_combo.currentIndexChanged.connect(self._on_selection_mode_change)
-        form.addRow("Sélection :", self.selection_combo)
+        form.addRow("Sélection :", _shrinkable(self.selection_combo))
         self.wind_mode_combo = QtWidgets.QComboBox()
         self.wind_mode_combo.addItem("Météo du créneau", WIND_MODE_FORECAST)
         self.wind_mode_combo.addItem("Homogène manuel", WIND_MODE_MANUAL_GRID)
         self.wind_mode_combo.currentIndexChanged.connect(self._on_wind_mode_change)
-        form.addRow("Vent :", self.wind_mode_combo)
+        form.addRow("Vent :", _shrinkable(self.wind_mode_combo))
         side.addLayout(form)
 
         self.wind_forecast_widget = QtWidgets.QWidget()
@@ -134,7 +147,8 @@ class SousLeVentWindow(AutoWindow):
         self.window_label = QtWidgets.QLabel("")
         self.window_label.setWordWrap(True)
         forecast_lay.addWidget(self.window_label)
-        self._tick_strip = self._make_tick_strip()
+        self._tick_strip = self._make_tick_strip(3)  # 3 date labels fit the 400 px column
+        self._tick_strip.layout().setContentsMargins(0, 0, 0, 0)
         forecast_lay.addWidget(self._tick_strip)
         self.avail_label = QtWidgets.QLabel(f"Prévision : {self._fc.source} · {self._fc.note}")
         self.avail_label.setStyleSheet("color:#555;")
@@ -173,13 +187,12 @@ class SousLeVentWindow(AutoWindow):
         wind.addWidget(self.dir_label)
         side.addWidget(self.wind_manual_widget)
 
-        calc_form = QtWidgets.QFormLayout()
-        calc_form.setContentsMargins(0, 0, 0, 0)
+        calc_form = _form()
         self.calc_combo = QtWidgets.QComboBox()
         self.calc_combo.addItem("Pass-1 puis sélection des candidats", self.CALC_PASS1_MANUAL)
         self.calc_combo.addItem("Pass-2 partout (pavage aveugle)", self.CALC_PASS2_EVERYWHERE)
         self.calc_combo.currentIndexChanged.connect(self._on_calc_mode_change)
-        calc_form.addRow("Calcul :", self.calc_combo)
+        calc_form.addRow("Calcul :", _shrinkable(self.calc_combo))
         side.addLayout(calc_form)
 
         self.common_params_widget = QtWidgets.QWidget()
@@ -197,15 +210,14 @@ class SousLeVentWindow(AutoWindow):
         self.workers_label.setWordWrap(True)
         self.workers_label.setStyleSheet("color:#555;")
         wr.addWidget(self.workers_label)
-        params_form = QtWidgets.QFormLayout()
-        params_form.setContentsMargins(0, 0, 0, 0)
+        params_form = _form()
         self.topo_combo = QtWidgets.QComboBox()
         self.topo_combo.addItems(TOPO_LABELS)
         self.topo_combo.setCurrentIndex(TOPO_PRESETS.index(10.0))
         self.topo_combo.setToolTip(
             "Résolution du MNT. 1 m utilise les données IGN haute résolution quand disponibles "
             "et peut être très lourd : à réserver aux trajets courts.")
-        params_form.addRow("Topo :", self.topo_combo)
+        params_form.addRow("Topo :", _shrinkable(self.topo_combo))
         self.mesh_combo = QtWidgets.QComboBox()
         self.mesh_combo.addItems(list(PASS2_MESH_PRESETS))
         self.mesh_combo.setCurrentText(PASS2_MESH_DEFAULT)
@@ -213,7 +225,7 @@ class SousLeVentWindow(AutoWindow):
             "Finesse du maillage momentum (qualité/temps, ADR-0008). Plus fin = plus précis mais "
             "beaucoup plus lent, par calcul Pass-2. « Affiner en cas de doute ».")
         self.mesh_combo.currentIndexChanged.connect(lambda *_: self._refresh_cpu_plan())
-        params_form.addRow("Maillage Pass-2 :", self.mesh_combo)
+        params_form.addRow("Maillage Pass-2 :", _shrinkable(self.mesh_combo))
         wr.addLayout(params_form)
         side.addWidget(self.common_params_widget)
 

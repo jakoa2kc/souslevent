@@ -78,7 +78,8 @@ src/sillage/
   viz/volume3d.py      3D rendering: basemap drape, rotor 2-D colormap, wind arrows, legends, pan
   auto/                ONE-CLICK automatic pipeline (see docs/10):
     pipeline.py          run_auto: DEM -> (Pass-1 features | blind corridor tiling) -> Pass-2 ×hours
-    partition.py         feature_domains (hazard) + corridor_tiles (blind paving) + corridor_mask
+    partition.py         feature_domains (hazard) + corridor_grid_tiles (global-surface paving) +
+                         corridor_mask + mesh↔topo resolution helpers (ADR-0037)
     wind.py              local AROME-HD wind per domain + route wind series (arrows)
     arome.py             forecast window (absolute dates) from the AROME/Open-Meteo horizon
     scene.py             aggregate one hour into a 3D scene (extract_volume rotor/turbulence)
@@ -128,15 +129,18 @@ need to land in more than one window until the shared row-builders are extracted
 
 ## Project status
 
-Both passes work end-to-end, now in a single **unified app** (`souslevent.window`, ADR-0033) plus
-two legacy backups. Pass-1 (hourly, parallel) screens for candidate reliefs; Pass-2 (momentum + 3D)
-resolves the recirculation, driven by hand, automatically along a flight route, or via a
-screen-then-pick workflow. The pipeline adds: AROME-HD local wind **or a manual homogeneous wind grid**
-(speed × direction scenarios, ADR-0034), feature-based / blind-corridor / manually-picked domains,
-parallel solves with honest wave-based progress/ETA, disk-safe case handling, a time (or scenario)
-slider over absolute dates, four lee representations with adjustable scales, route wind arrows, and
-save/open of results (`.sillage`). See `docs/03_decisions.md` (ADRs), `docs/07_roadmap.md`,
-`docs/10_auto_pipeline.md` and `docs/06_dev_log.md`.
+Both passes work end-to-end, now in a single **unified app** (`souslevent.window`, ADR-0033, v1.0,
+MIT-licensed, wheel + Windows exe built) plus two legacy backups. Pass-1 (hourly, parallel) screens
+for candidate reliefs; Pass-2 (momentum + 3D) resolves the recirculation. **Every workflow reviews
+its zones in the candidates tab before solving** (ADR-0036/0037): screened candidates with a
+browsable hourly hazard, a paving preview (union corridor mask paved by ONE regular grid — no
+stacked tilings on self-crossing routes), or hand-drawn rectangles; zone sizes are capped so the
+**momentum mesh matches the topo resolution** (calibrated law, mesh↔topo arbitration popups). The
+pipeline adds: AROME-HD local wind **or a manual homogeneous wind grid** (ADR-0034), parallel solves
+with honest wave-based progress/ETA, disk-safe case handling, a time (or scenario) slider over
+absolute dates, four lee representations with adjustable scales, route wind arrows (size/altitude
+sliders), and save/open of results (`.sillage`, Zip-Slip-safe). See `docs/03_decisions.md` (ADRs),
+`docs/07_roadmap.md`, `docs/10_auto_pipeline.md` and `docs/06_dev_log.md`.
 
 ## Conventions
 

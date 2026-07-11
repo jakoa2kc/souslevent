@@ -20,11 +20,15 @@ layer; only the orchestration + UI differ. See **ADR-0022**.
   │
   ├─ terrain.acquire.prepare_dem  ──────────────►  corridor DEM (IGN de-striped, target res 1/5/10/25 m)
   │
-  ├─ domains, per the chosen mode:
+  ├─ domains, per the chosen mode (all zone sizes are CAPPED so the momentum mesh matches the
+  │   topo resolution — res ≈ 1.45·(side+2·buffer)/√mesh_count, calibrated; ADR-0037):
   │   • "features" (default, ADR-0023): Pass-1 mass over the corridor → hazard → find_candidates →
   │       auto.partition.feature_domains: ONE domain per relief, half ~ lee_factor×relief/2, no seams
-  │   • "corridor" (blind paving, ADR-0029): NO Pass-1 — auto.partition.corridor_tiles paves each
-  │       segment with square domains every tile_step_m (overlapping), at max topo resolution
+  │   • "corridor" (blind paving, ADR-0029): NO Pass-1 — union corridor MASK over all segments,
+  │       paved by ONE regular grid (auto.partition.corridor_grid_tiles): full-surface coverage,
+  │       no stacked tilings when the route doubles back / crosses itself
+  │   • "manual" (ADR-0036/0037): zones picked in the candidates tab (screened candidates, paving
+  │       preview, or hand-drawn rectangles) after the mesh↔topo arbitration popup
   │
   ├─ for each (domain × hour):                    auto.pipeline.run_auto  (bounded concurrency)
   │      auto.wind.local_wind_provider(hour)(centre) → (speed, from_deg)   [AROME HD / fallback]
@@ -35,8 +39,9 @@ layer; only the orchestration + UI differ. See **ADR-0022**.
         │
         └─ auto.scene.populate_auto_scene(hour, metric)  → global 3D for that hour
              drape DEM once (basemap reprojected to DEM CRS, zoom-boosted) + overlay each domain's
-             volume (rotor OR turbulence), CLIPPED to its zone + drawn by NEAREST sector only so
-             overlaps don't alpha-stack (ADR-0021 / ADR-0027 / ADR-0029)
+             volume, CLIPPED to its zone, drawn ONCE per point (nearest sector, no alpha-stacking)
+             but COLOURED by a feathered cross-sector weighted average → continuous across
+             boundaries (ADR-0021 / 0027 / 0029 / 0032)
 ```
 
 Route **AROME wind arrows** (`auto.wind.route_wind_series` / `arrows_at_hour`) are drawn on the 2-D
@@ -52,14 +57,14 @@ floored by the genuinely completed fraction.
 
 | Module | Role | Status |
 |---|---|---|
-| `partition.py` | `feature_domains` (hazard) + `corridor_tiles` (blind paving) + `corridor_mask` | **done, tested** |
+| `partition.py` | `feature_domains` (hazard) + `corridor_grid_tiles` (global-surface paving) + `corridor_mask` + mesh↔topo helpers (`ninjafoam_resolution_m`…, ADR-0037) | **done, tested** |
 | `progress.py` | `ProgressTracker` (wave-based % + ETA, ADR-0028) | **done, tested** |
 | `wind.py` | per-domain upstream wind + `route_wind_series`/`arrows_at_hour` (arrows) | **done** (AROME HD via Open-Meteo + fallback) |
 | `arome.py` | forecast window (absolute dates) from the AROME/Open-Meteo horizon | **done, tested** |
 | `pipeline.py` | `AutoConfig` / `AutoResult` / `run_auto`; modes, disk-safe compaction, parallel plan | **done** (integration-run) |
 | `scene.py` | `extract_volume` (rotor/turbulence) + aggregate one hour into a 3D scene | **done** (reuses `viz.volume3d`) |
 | `store.py` | save/open a run as a portable `.sillage` bundle: compact volumes or re-analysable sources (ADR-0030/0031) | **done, tested** |
-| `window.py` | the 2-tab IHM (route → run → 3D time slider + metric/opacity/scales + save/open) | **done** |
+| `window.py` | the legacy 2-tab IHM (kept as backup); the published UI is `souslevent.window` (3 tabs, ADR-0033) | **done** |
 
 ## Reuse map (no duplication)
 
@@ -73,18 +78,29 @@ floored by the genuinely completed fraction.
 
 ## UI contract (`window.py`)
 
-- **Tab 1 — sélection:** `MapTab(mode="route")` (IGN; draw the flight route — left-click add,
-  right-click undo, double-click finish, **« ＋ » = new segment** to skip a valley) with the live
-  corridor + AROME wind arrows; a **window range slider** (absolute dates), **« Calculs simultanés »**,
-  **« Marge corridor »**, **« Features max »**, **« Pavage aveugle »** + **pas** + **topo (1/5/10/25 m)**,
-  **« Valider »** → `run_auto` on a `SolveJob`. The CPU plan shows integer division (`jobs × threads
-  = used/total cores`, perfect divisors, estimated domains). A live step **log** + **% / elapsed / ETA**.
-- **Tab 2 — rendu 3D:** an embedded `QtInteractor` (rotation locked to azimuth/elev + **right-drag
-  pan**) + an **hour slider** (absolute-date labels) → `populate_auto_scene(...)`. Right panel:
-  **Représentation**, the metric legend, only the useful **range sliders** for that representation
-  (rotor min/max, horizontal min/max, vertical sink + lift ranges, turbulence min/max) +
-  **« Appliquer les sliders »**, an **Opacité** slider (live), a continuous **wind colourbar**, and
-  **📂 Ouvrir / 💾 Sauvegarder** (`.sillage`).
+The **unified app** (`souslevent.window`, the published UI) has THREE tabs; the legacy `auto.window`
+keeps the old two-tab flow.
+
+- **Tab 1 — sélection + calcul:** the map takes the LEFT side (route **or** rectangle selection;
+  left-click add, right-click undo, double-click finish, **« ＋ » = new segment**), with every
+  parameter in a **scrollable right-hand column**: Sélection, Vent (**AROME forecast créneau** OR
+  **manual speed × direction grid**, ADR-0034), Calcul (**Pass-1 puis sélection** / **pavage auto**),
+  Calculs simultanés, **Topo (1/5/10/25 m)**, **Maillage Pass-2** (Grossier→Max, ADR-0008/0035),
+  Marge corridor, Candidats max, Pas secteurs, the CPU plan (with the ~min/solve estimate),
+  **« Valider »**, avancement + log. Both calc modes stop at the candidates tab — no solve is
+  launched from tab 1 (ADR-0036/0037).
+- **Tab 2 — candidats Pass-1:** the screened candidates (browsable **hourly hazard** slider,
+  ADR-0036) OR the paving preview (every sector pre-selected). Click sectors on the map or the list
+  to (de)select; drag a rectangle to add a **manual zone** (mesh↔topo popup, ADR-0037). The plan
+  text shows `zones × créneaux = solves`, the **effective mesh resolution** and the ~total minutes.
+  **« Lancer Pass-2 sur la sélection »** applies the final mesh↔topo arbitration popup, then runs
+  `run_auto(domain_mode="manual")` on exactly the selected zones.
+- **Tab 3 — rendu 3D:** an embedded `QtInteractor` (rotation locked to azimuth/elev + **right-drag
+  pan**) + an **hour/scenario slider** (absolute-date or wind-grid labels) → `populate_auto_scene`.
+  Right panel: **Représentation**, the metric legend, only the useful **range sliders** for that
+  representation, **« Recalculer la vue 3D »**, an **Opacité** slider (live), the continuous **wind
+  colourbar** with the **wind-arrow size/altitude sliders** under it, and **📂 Ouvrir /
+  💾 Sauvegarder** (`.sillage`).
 
 ## Key decisions / open items
 
@@ -100,7 +116,9 @@ floored by the genuinely completed fraction.
 - **Momentum is CPU-bound (ADR-0006)** and its temp env can't be redirected (OpenFOAM crash,
   Entry 38), so `momentum_workers` defaults to **all detected cores** as a max request; the
   effective workers are capped by the real `domains × hours` task count. The honest speed lever
-  remains `mesh_count` + a lean per-domain solve.
+  remains `mesh_count` + a lean per-domain solve. **Mesh ↔ topo (ADR-0037):** the effective mesh
+  resolution is `≈ 1.45·(side+2·buffer)/√mesh_count` (calibrated on real cases), so zone sizes are
+  capped to match the chosen topo, and the UI shows the effective resolution before launching.
 - **Cost.** A run is `len(zones) × len(hours)` momentum solves — minutes to a long while; the ETA
   sets expectations. Caching (`*_vel.asc` reuse, the DEM cache) keeps re-launches cheaper.
 - **Disk.** OpenFOAM cases are kept while the window is open, then deleted on close (and before the

@@ -128,7 +128,9 @@ topo scale, then a time-sliderable global 3D wake. See docs/10_auto_pipeline.md.
 - [x] Parallel feature/hour solves (`momentum_workers` defaults to all detected cores, then is
       capped by available tasks; integer CPU split shown in the UI) + live progress (steps, %, ETA). ✔
 - [x] **Blind corridor paving** (`domain_mode="corridor"`, ADR-0029): Pass-2 everywhere along the
-      route at max topo res, no Pass-1; **multi-segment routes** skip valley crossings (ADR-0030). ✔
+      route; **multi-segment routes** skip valley crossings (ADR-0030). Now a **global-surface
+      grid** over the union corridor mask (no stacked tilings on self-crossing routes) with a
+      **preview + final mesh↔topo popup** before any solve (ADR-0037). ✔
 - [x] **Rendering**: four lee representations (rotor / horizontal % / vertical m/s / turbulence rms),
       metric-specific range sliders, uniform opacity slider, continuous wind legend; overlaps drawn
       by nearest sector (no alpha-stacking); turbulence as absolute rms (comparable between domains);
@@ -137,10 +139,12 @@ topo scale, then a time-sliderable global 3D wake. See docs/10_auto_pipeline.md.
 - [x] **Save/open** results as a portable `.sillage` bundle (compact lee meshes or re-analysable
       lee sources + route winds + params), with run-day labels (ADR-0030/0031); reopened v2 sources
       can re-extract "Seuil volume" without OpenFOAM. ✔
-- [x] **Unified SousLeVent app**: one first tab can select rectangle or route, then launch one of
-      the 3 current workflows: Pass-1-only/manual candidate selection, Pass-1 + automatic
-      candidates, or direct Pass-2 everywhere. The old `sillage-gui` and `sillage-auto` remain as
-      legacy backups. ✔
+- [x] **Unified SousLeVent app** (ADR-0033): rectangle or route selection × forecast or manual wind
+      grid (ADR-0034) × two workflows — **Pass-1 puis sélection des candidats** (hourly hazard
+      browser, ADR-0036) and **pavage auto** (sector preview). Both review zones in the candidates
+      tab before solving; mesh↔topo arbitration popups (ADR-0037); map left / params column right;
+      Pass-2 mesh preset (ADR-0035). The old `sillage-gui` and `sillage-auto` remain as local
+      legacy backups; v1.0 published (MIT, wheel + exe, showcase site). ✔
 - [x] **Pass-1-only graphical candidate selection** in SousLeVent: the screening result now opens a
       hillshade/Pass-1 map with clickable candidate rectangles, synchronized with the detail list. ✔
 - [ ] Optional: the Météo-France **GRIB** path (eccodes) for >120 m AGL / pressure levels.

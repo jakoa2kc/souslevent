@@ -2208,3 +2208,28 @@ the topo **and re-pave** (sector sizes follow) / cancel. The run uses `domain_mo
 selected sectors — what was previewed is what is solved; unticking opts a sector out.
 
 3 new/extended tests. `pytest -q` → **116 passed**, ruff clean.
+
+---
+
+## Entry 90 — Global-surface paving, tile dedup, tab-1 layout, small UX  (2026-07-06)
+
+**Paving thinks in SURFACE, not segments.** Two rounds on the same user report ("pavés en double",
+stacked tilings where the route doubles back / crosses itself):
+1. First round: full corridor **width** paving (perpendicular rows when ADR-0037 caps tiles below
+   the corridor half-width) + `dedup_zones` snap-grid dedup across segments.
+2. Real fix: `partition.corridor_grid_tiles` — build the **union corridor mask**
+   (`corridor_mask` over all segments) and pave it with **one axis-aligned regular grid**
+   (step ≤ 2·half ⇒ every masked pixel covered; centres ≥ one step apart ⇒ stacking impossible by
+   construction). The pipeline's route paving now uses it; `corridor_tiles`/`dedup_zones` kept for
+   compat. Test proves full coverage on a crossing route and that the per-segment way did stack.
+
+**Tab 1 layout.** Map on the left with all the space (proper aspect ratio); every parameter/menu/
+info in a 400 px scrollable right-hand column (compact form rows). Overflow fixed: combos shrink
+below their longest item (`AdjustToMinimumContentsLengthWithIcon`), form fields grow, tick strip
+reduced to 3 date labels, labels word-wrap.
+
+**Small UX.** Validate button reads « Valider — pavage auto » in paving mode; paved sectors can be
+(de)selected by clicking them on the preview map (regression-tested — it worked, but duplicates made
+it look broken: unticking the top tile revealed its twin underneath).
+
+**Result.** `pytest -q` → **119 passed**, ruff clean.

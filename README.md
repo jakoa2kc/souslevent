@@ -81,7 +81,9 @@ momentum solver). See `docs/support/environment.md`.
 
 The **SousLeVent** app is the global UI: select a **rectangle or a route**, then choose one of two
 workflows — **Pass-1 then manual candidate selection** (browse the hourly hazard, pick the zones worth
-solving, Pass-2 on all hours for them), or **Pass-2 everywhere** (blind corridor paving, no Pass-1).
+solving, Pass-2 on all hours for them), or **pavage auto** (no Pass-1: the whole corridor surface is
+paved with one regular grid of sectors, previewed and adjustable before launching). Zone sizes are
+matched to the terrain resolution so the mesh actually resolves what the DEM provides (ADR-0037).
 Wind is the hourly AROME forecast **or** a manual homogeneous speed × direction grid. The two older
 desktop apps are kept as backups. Roadmap in `docs/07_roadmap.md`; the chronological reasoning trail
 in `docs/06_dev_log.md`; the automatic mode in `docs/10_auto_pipeline.md`.
