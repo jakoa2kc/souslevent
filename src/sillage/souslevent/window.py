@@ -71,6 +71,8 @@ class SousLeVentWindow(AutoWindow):
         self._candidate_hour = 0          # index into the screening hazard stack being displayed
         self._manual_mesh_override = None  # mesh_count chosen via the manual-zone popup (ADR-0037)
         self._manual_topo_override = None  # target_res_m chosen via the manual-zone popup
+        self._candidate_zone_artists = []  # (patch, label) per zone, restyled without a full redraw
+        self._candidate_drag_bg = None     # blit background captured at drag start (fluid rubber band)
         self._candidate_press = None
         self._candidate_drag_patch = None
         super().__init__()
@@ -742,7 +744,7 @@ class SousLeVentWindow(AutoWindow):
                     base + " Clique les rectangles sur la carte ou trace un nouveau rectangle manuel, "
                     "puis lance Pass-2.")
         if not self._candidate_syncing:
-            self._draw_candidate_map()
+            self._refresh_candidate_styles()  # restyle only — no basemap/hazard rebuild
 
     def _on_candidate_basemap_change(self, *_args) -> None:
         if self._screening_result is not None and self._candidate_dem is not None:
@@ -872,25 +874,47 @@ class SousLeVentWindow(AutoWindow):
             self.candidate_fig.colorbar(im, ax=ax, label="Danger Pass-1 (0-1)", shrink=0.82)
         self._draw_candidate_route(ax)
 
-        selected = set(self._selected_candidate_indices())
+        self._candidate_zone_artists = []  # (patch, label) per zone — restyled in place on selection
         for i, z in enumerate(result.partition):
             x0, y0, x1, y1 = z.bbox
+            patch = Rectangle((x0, y0), x1 - x0, y1 - y0, zorder=8)
+            ax.add_patch(patch)
+            label = ax.text(
+                z.center[0], z.center[1], self._candidate_label(i), ha="center", va="center",
+                color="white", fontsize=9, fontweight="bold", zorder=9,
+                bbox=dict(boxstyle="circle,pad=0.25", edgecolor="white", alpha=0.95))
+            self._candidate_zone_artists.append((patch, label))
+        self._apply_candidate_styles()
+
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_title("Candidats Pass-1 — zones de calcul Pass-2 sélectionnables")
+        self._candidate_drag_bg = None  # figure changed → the drag blit background is stale
+        self.candidate_canvas.draw_idle()
+
+    def _apply_candidate_styles(self) -> None:
+        """Style the zone rectangles/labels for the CURRENT selection, in place. Selection toggles
+        call this + one draw instead of rebuilding the whole map (basemap/hazard/hillshade), which
+        made clicking and dragging feel sluggish."""
+        selected = set(self._selected_candidate_indices())
+        for i, (patch, label) in enumerate(getattr(self, "_candidate_zone_artists", [])):
             is_selected = i in selected
             is_manual = i >= self._candidate_auto_count
             edge = "#00c853" if is_selected else "#d81b60" if is_manual else "#00a8ff"
             face = "#00c85322" if is_selected else "#d81b6018" if is_manual else "#00a8ff16"
-            lw = 3.0 if is_selected else 1.8
-            ax.add_patch(Rectangle(
-                (x0, y0), x1 - x0, y1 - y0, facecolor=face, edgecolor=edge,
-                linewidth=lw, linestyle="-" if is_selected else "--", zorder=8))
-            ax.text(
-                z.center[0], z.center[1], self._candidate_label(i), ha="center", va="center",
-                color="white", fontsize=9, fontweight="bold", zorder=9,
-                bbox=dict(boxstyle="circle,pad=0.25", facecolor=edge, edgecolor="white",
-                          alpha=0.95))
+            patch.set(facecolor=face, edgecolor=edge, linewidth=3.0 if is_selected else 1.8,
+                      linestyle="-" if is_selected else "--")
+            label.get_bbox_patch().set_facecolor(edge)
 
-        ax.set_aspect("equal", adjustable="box")
-        ax.set_title("Candidats Pass-1 — zones de calcul Pass-2 sélectionnables")
+    def _refresh_candidate_styles(self) -> None:
+        """Light selection refresh: restyle + one draw. Falls back to a full rebuild only if the
+        artists don't match the partition (e.g. a zone was added)."""
+        result = self._screening_result
+        artists = getattr(self, "_candidate_zone_artists", None)
+        if result is None or artists is None or len(artists) != len(result.partition):
+            self._draw_candidate_map()
+            return
+        self._apply_candidate_styles()
+        self._candidate_drag_bg = None  # colours changed → stale blit background
         self.candidate_canvas.draw_idle()
 
     def _candidate_index_at(self, x: float, y: float) -> int | None:
@@ -952,13 +976,45 @@ class SousLeVentWindow(AutoWindow):
             return
         self._candidate_press["dragging"] = True
         x, y = xy
+        canvas = self.candidate_canvas
         if self._candidate_drag_patch is None:
+            # Decouple the rubber band from the (heavy) map: capture the fully-drawn figure ONCE as
+            # a bitmap, then each motion only restores it and blits the rectangle on top — no
+            # basemap/hazard/patches re-render per mouse move, so the drag stays fluid.
+            try:
+                canvas.draw()  # make sure the renderer + background are current
+                self._candidate_drag_bg = canvas.copy_from_bbox(self.candidate_fig.bbox)
+            except Exception:
+                self._candidate_drag_bg = None  # blit unavailable → fall back to draw_idle below
             self._candidate_drag_patch = Rectangle(
                 (sx, sy), 0.0, 0.0, facecolor="#d81b6022", edgecolor="#d81b60",
-                linewidth=2.2, linestyle="-", zorder=10)
+                linewidth=2.2, linestyle="-", zorder=10,
+                animated=self._candidate_drag_bg is not None)
             self._candidate_ax.add_patch(self._candidate_drag_patch)
         self._candidate_drag_patch.set_bounds(min(sx, x), min(sy, y), abs(x - sx), abs(y - sy))
-        self.candidate_canvas.draw_idle()
+        if self._candidate_drag_bg is not None:
+            canvas.restore_region(self._candidate_drag_bg)
+            self._candidate_ax.draw_artist(self._candidate_drag_patch)
+            canvas.blit(self.candidate_fig.bbox)
+        else:
+            canvas.draw_idle()
+
+    def _drop_drag_patch(self) -> None:
+        """Remove the rubber band and restore the cached background (no full map redraw)."""
+        if self._candidate_drag_patch is not None:
+            try:
+                self._candidate_drag_patch.remove()
+            except Exception:
+                pass
+            self._candidate_drag_patch = None
+            if self._candidate_drag_bg is not None:
+                try:
+                    self.candidate_canvas.restore_region(self._candidate_drag_bg)
+                    self.candidate_canvas.blit(self.candidate_fig.bbox)
+                    return
+                except Exception:
+                    pass
+            self.candidate_canvas.draw_idle()
 
     def _on_candidate_map_release(self, event) -> None:
         press = self._candidate_press
@@ -967,13 +1023,7 @@ class SousLeVentWindow(AutoWindow):
             return
         xy = self._event_data_xy(event)
         if xy is None:
-            if self._candidate_drag_patch is not None:
-                try:
-                    self._candidate_drag_patch.remove()
-                except Exception:
-                    pass
-                self._candidate_drag_patch = None
-                self.candidate_canvas.draw_idle()
+            self._drop_drag_patch()
             return
         if press["dragging"]:
             sx, sy = press["data"]
@@ -1007,8 +1057,12 @@ class SousLeVentWindow(AutoWindow):
             return
         result.partition.append(zone)
         idx = len(result.partition) - 1
-        item = self._add_candidate_item(idx, zone)
-        item.setSelected(True)
+        self._candidate_syncing = True  # one full redraw below — not one per selection signal
+        try:
+            item = self._add_candidate_item(idx, zone)
+            item.setSelected(True)
+        finally:
+            self._candidate_syncing = False
         self.candidate_list.scrollToItem(item)
         total_manual = len(result.partition) - self._candidate_auto_count
         self.candidate_summary.setText(

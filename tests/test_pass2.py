@@ -496,6 +496,47 @@ def test_souslevent_wind_arrow_sliders_update_state():
     w.deleteLater()
 
 
+def test_souslevent_candidate_drag_uses_blit_not_full_redraws():
+    # Dragging the manual rectangle must not rebuild the map per mouse move: the background is
+    # captured once (blit) and only the rubber band is redrawn — that's what keeps the drag fluid.
+    pytest.importorskip("PySide6")
+    import os
+    from types import SimpleNamespace
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    from sillage.auto.pipeline import AutoConfig, ScreeningResult
+    from sillage.souslevent.window import SousLeVentWindow
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    w = SousLeVentWindow()
+    dem = Dem(elevation=np.arange(400, dtype="float32").reshape(20, 20),
+              transform=from_origin(600000.0, 4900000.0, 50.0, 50.0),
+              crs=CRS.from_epsg(32631), resolution_m=50.0)
+    w._candidate_dem = dem
+    w._screening_cfg = AutoConfig(bbox_latlon=(44.0, 6.0, 44.1, 6.1), hours=(9,), target_res_m=50.0)
+    w._screening_result = ScreeningResult(dem_path="", crs=dem.crs, partition=[], hours=[9],
+                                          hazard=np.ones(dem.shape))
+    w.candidate_basemap_combo.setCurrentText("Aucun")
+    w._draw_candidate_map()
+
+    def ev(x, y, px, py):
+        return SimpleNamespace(inaxes=w._candidate_ax, xdata=x, ydata=y, x=px, y=py, button=1)
+
+    w._on_candidate_map_press(ev(600100.0, 4899300.0, 100.0, 100.0))
+    w._on_candidate_map_motion(ev(600400.0, 4899600.0, 160.0, 160.0))   # > 8 px → drag starts
+    assert w._candidate_press["dragging"]
+    assert w._candidate_drag_patch is not None
+    assert w._candidate_drag_bg is not None            # blit background captured (fluid path)
+    assert w._candidate_drag_patch.get_width() == pytest.approx(300.0)
+    w._on_candidate_map_motion(ev(600700.0, 4899800.0, 220.0, 200.0))  # rubber band follows
+    assert w._candidate_drag_patch.get_width() == pytest.approx(600.0)
+    w._drop_drag_patch()                               # cancel: patch removed, no full redraw
+    assert w._candidate_drag_patch is None
+    w.deleteLater()
+
+
 def test_souslevent_manual_mesh_topo_overrides_feed_cfg():
     # The manual-zone popup (ADR-0037) either forces the mesh to match the terrain resolution or
     # adapts the terrain resolution to the mesh preset; both must land in the Pass-2 cfg.
