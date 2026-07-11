@@ -501,11 +501,13 @@ def _prepare_domain_plan(
                 for seg in segments_ll:
                     if len(seg) >= 1:
                         zones += corridor_tiles(dem, _seg_xy(seg), step_m=step_m, half_m=half_m,
-                                                target_res_m=cfg.target_res_m)
+                                                target_res_m=cfg.target_res_m,
+                                                corridor_half_m=margin_m)  # pave the FULL width
                 if on_progress is not None:
                     on_progress(0, f"Pavage : {len(zones)} secteurs sur {len(segments_ll)} "
                                    f"segment(s) (pas {step_m:.0f} m, "
-                                   f"demi-largeur {half_m:.0f} m, topo {cfg.target_res_m:.0f} m) — "
+                                   f"demi-largeur {half_m:.0f} m, corridor ±{margin_m:.0f} m, "
+                                   f"topo {cfg.target_res_m:.0f} m) — "
                                    + _res_note(2.0 * half_m))
             else:
                 step_m = max(600.0, float(cfg.tile_step_m))

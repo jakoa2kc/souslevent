@@ -536,11 +536,25 @@ class SousLeVentWindow(AutoWindow):
         bbox, _flat, _segs = self._current_selection()
         if calc == self.CALC_PASS2_EVERYWHERE:
             if self._selection_mode == "route":
+                from ..auto.partition import ZONE_HALF_FLOOR_M, zone_side_for_resolution
+                from ..auto.pipeline import AUTO_EDGE_BUFFER_M
+
                 step_km = self.step_spin.value()
                 rlen = self._route_length_km()
-                domains = max(1, int(rlen / max(0.1, step_km)) + 1) if rlen > 0 else 1
+                along = max(1, int(rlen / max(0.1, step_km)) + 1) if rlen > 0 else 1
+                # rows across the corridor width: tiles are mesh-capped (ADR-0037), so the paving
+                # adds perpendicular rows until the whole ±margin band is covered
+                margin_m = self.margin_spin.value() * 1000.0
+                cap_half = max(ZONE_HALF_FLOOR_M, zone_side_for_resolution(
+                    TOPO_PRESETS[self.topo_combo.currentIndex()], self._mesh_preset()[0],
+                    AUTO_EDGE_BUFFER_M) / 2.0)
+                half = min(max(margin_m, 900.0), cap_half)
+                step_m = max(300.0, min(step_km * 1000.0, 2.0 * half))
+                rows = 1 + 2 * math.ceil(max(0.0, margin_m - half) / step_m)
+                domains = along * rows
                 tasks = (f"pavage parcours : ~{domains} secteurs "
-                         f"({rlen:.1f} km / pas {step_km:.1f} km) × {cases} {wind_unit}")
+                         f"({rlen:.1f} km / pas {step_km:.1f} km × {rows} rangée(s) "
+                         f"sur ±{margin_m / 1000:.1f} km) × {cases} {wind_unit}")
             else:
                 width, height = self._bbox_size_km(bbox)
                 step = max(0.1, self.step_spin.value())

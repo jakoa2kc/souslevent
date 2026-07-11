@@ -226,6 +226,28 @@ def test_corridor_tiles_paves_route_without_gaps():
     assert all(abs((t.bbox[2] - t.bbox[0]) - 2000.0) < 1e-6 for t in tiles)  # square, 2*half
 
 
+def test_corridor_tiles_pave_the_full_corridor_width():
+    # Mesh-capped tiles smaller than the corridor (ADR-0037) must pave the WHOLE ±margin band with
+    # perpendicular rows, not just a single centreline row.
+    from sillage.auto.partition import corridor_tiles
+
+    dem = _dem(np.zeros((200, 200)), res_m=50.0)  # 10 x 10 km
+    left, _b, _r, top = dem.bounds
+    ymid = top - 5000.0
+    route = [(left + 2000.0, ymid), (left + 8000.0, ymid)]  # straight W->E
+    tiles = corridor_tiles(dem, route, step_m=800.0, half_m=500.0, target_res_m=10.0,
+                           corridor_half_m=2000.0)          # corridor 4x wider than a tile
+    ys = sorted({round(t.center[1]) for t in tiles})
+    assert len(ys) >= 3                                     # several rows across the width
+    assert min(ys) - 500.0 <= ymid - 2000.0 + 1.0           # bottom tile edge reaches the band edge
+    assert max(ys) + 500.0 >= ymid + 2000.0 - 1.0           # top tile edge reaches the band edge
+    assert max(b - a for a, b in zip(ys, ys[1:])) <= 800.0 + 1.0  # rows overlap (step ≤ 2·half)
+
+    single = corridor_tiles(dem, route, step_m=1500.0, half_m=2000.0, target_res_m=10.0,
+                            corridor_half_m=2000.0)         # tile spans the corridor → one row
+    assert len({round(t.center[1]) for t in single}) == 1
+
+
 def test_corridor_mask_keeps_band_around_route():
     from sillage.auto.partition import corridor_mask
 

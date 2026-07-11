@@ -162,20 +162,22 @@ def corridor_tiles(
     step_m: float = 1500.0,
     half_m: float = 1000.0,
     target_res_m: float = 5.0,
+    corridor_half_m: float | None = None,
 ) -> list[SubZone]:
     """**Blind paving** of Pass-2 momentum domains along the route — NO Pass-1 gating.
 
-    Lays a square domain of half-size ``half_m`` every ``step_m`` of arc length along the route
-    polyline (``route_xy`` in the DEM CRS). Every sector is computed (the user accepts the cost +
-    the seams between independent solves). ``half_m`` should be ≥ the corridor half-width so a tile
-    spans the corridor; ``step_m`` ≤ ``2·half_m`` keeps tiles touching/overlapping (no gaps)."""
+    Lays square domains of half-size ``half_m`` every ``step_m`` of arc length along the route
+    polyline (``route_xy`` in the DEM CRS). When ``corridor_half_m`` exceeds ``half_m`` (tiles
+    mesh-capped smaller than the corridor, ADR-0037), extra rows are laid **perpendicular to the
+    route** every ``step_m`` until the tiles span the whole corridor width — homogeneous paving
+    across the band, not just along the centreline. ``step_m`` ≤ ``2·half_m`` keeps neighbouring
+    tiles touching/overlapping in both directions (no gaps)."""
     elev = np.asarray(dem.elevation, dtype="float64")
     h_px, w_px = elev.shape
     res = float(dem.resolution_m)
     left, _bottom, _right, top = dem.bounds
 
-    zones: list[SubZone] = []
-    for cx, cy in _resample_polyline(list(route_xy), max(50.0, step_m)):
+    def _tile(cx: float, cy: float) -> SubZone:
         bbox = (cx - half_m, cy - half_m, cx + half_m, cy + half_m)
         # Clamp BOTH ends to the DEM (0..dim). A tile north/west of the DEM otherwise yields a
         # negative index (e.g. cy-half_m > top) → elev[pr0:pr1] wraps to a huge wrong window instead
@@ -186,12 +188,37 @@ def corridor_tiles(
         pc1 = min(max(0, int((cx + half_m - left) / res)), w_px)
         dsub = elev[pr0:pr1, pc0:pc1]
         dfin = dsub[np.isfinite(dsub)]
-        zones.append(SubZone(
+        return SubZone(
             bbox=bbox, center=(cx, cy),
             crest_alt_m=float(np.nanpercentile(dsub, 80)) if dfin.size else 0.0,
             relief_m=(float(dfin.max()) - float(dfin.min())) if dfin.size else 0.0,
             est_cells=estimate_cells(2 * half_m, 2 * half_m, target_res_m),
-            pixel_window=(pr0, pr1, pc0, pc1)))
+            pixel_window=(pr0, pr1, pc0, pc1))
+
+    pts = _resample_polyline(list(route_xy), max(50.0, step_m))
+    # perpendicular offsets so the outermost tile edge reaches the corridor edge
+    width_half = float(corridor_half_m) if corridor_half_m else 0.0
+    n_side = int(np.ceil(max(0.0, width_half - half_m) / max(1.0, step_m)))
+    offsets = [k * step_m for k in range(-n_side, n_side + 1)]
+
+    zones: list[SubZone] = []
+    seen: set[tuple[int, int]] = set()
+    snap = max(1.0, step_m / 2.0)  # dedup grid: corners/backtracks would stack near-identical tiles
+    for i, (cx, cy) in enumerate(pts):
+        if len(pts) > 1:  # local route direction → unit normal (perpendicular, in-plane)
+            x0, y0 = pts[max(0, i - 1)]
+            x1, y1 = pts[min(len(pts) - 1, i + 1)]
+            norm = float(np.hypot(x1 - x0, y1 - y0)) or 1.0
+            nx, ny = -(y1 - y0) / norm, (x1 - x0) / norm
+        else:
+            nx, ny = 0.0, 1.0
+        for off in offsets:
+            tx, ty = cx + nx * off, cy + ny * off
+            key = (int(round(tx / snap)), int(round(ty / snap)))
+            if key in seen:
+                continue
+            seen.add(key)
+            zones.append(_tile(tx, ty))
     return zones
 
 
