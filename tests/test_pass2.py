@@ -496,6 +496,37 @@ def test_souslevent_wind_arrow_sliders_update_state():
     w.deleteLater()
 
 
+def test_souslevent_manual_mesh_topo_overrides_feed_cfg():
+    # The manual-zone popup (ADR-0037) either forces the mesh to match the terrain resolution or
+    # adapts the terrain resolution to the mesh preset; both must land in the Pass-2 cfg.
+    pytest.importorskip("PySide6")
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    from sillage.auto.pipeline import AutoConfig
+    from sillage.auto.partition import SubZone
+    from sillage.souslevent.window import SousLeVentWindow
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    w = SousLeVentWindow()
+    w._screening_cfg = AutoConfig(bbox_latlon=(44.0, 6.0, 44.1, 6.1), hours=(9,), target_res_m=5.0)
+    zone = SubZone(bbox=(0.0, 0.0, 2000.0, 2000.0), center=(1000.0, 1000.0), crest_alt_m=1500.0,
+                   relief_m=300.0, est_cells=160_000, pixel_window=(0, 10, 0, 10))
+
+    w._manual_mesh_override = 1_234_000            # popup: "mailler pour coller à la topo"
+    cfg = w._manual_pass2_cfg((zone,))
+    assert cfg.mesh_count == 1_234_000 and cfg.target_res_m == 5.0
+
+    w._manual_mesh_override = None                 # popup: "adapter la topo au maillage"
+    w._manual_topo_override = 25.0
+    cfg = w._manual_pass2_cfg((zone,))
+    assert cfg.target_res_m == 25.0 and cfg.mesh_count == w._mesh_preset()[0]
+    assert "topo adaptée 25 m" in w._manual_pass2_plan_text(1)
+    w.deleteLater()
+
+
 def test_set_wind_arrow_style_records_without_arrows():
     # No arrows on the plotter yet: the call must still record size/altitude for the next build.
     from sillage.viz.volume3d import set_wind_arrow_style

@@ -195,6 +195,34 @@ def corridor_tiles(
     return zones
 
 
+# --- NinjaFOAM effective mesh resolution (ADR-0037) --------------------------------------------
+# Calibrated on 18 real Champsaur momentum cases (lee meshes from saved .sillage bundles):
+#   res_h ≈ C × side_buffered / sqrt(mesh_count)   with C ≈ 1.2 (50 k) … 1.75 (400 k)
+# e.g. 400 k cells over a ~6.9 km buffered domain → ~19 m; 50 k over ~7.4 km → ~39 m. The topo (DEM)
+# resolution only helps if the MESH matches it — which is why 1 m vs 10 m topo looked identical.
+NINJAFOAM_RES_COEF = 1.45          # midpoint of the calibrated range
+ZONE_HALF_FLOOR_M = 400.0          # a lee domain smaller than this is physically degenerate
+
+
+def ninjafoam_resolution_m(zone_side_m: float, mesh_count: int, buffer_m: float) -> float:
+    """Estimated effective horizontal mesh resolution for a momentum solve on ``zone + buffer``."""
+    side_buf = float(zone_side_m) + 2.0 * float(buffer_m)
+    return NINJAFOAM_RES_COEF * side_buf / max(float(mesh_count), 1.0) ** 0.5
+
+
+def mesh_count_for_resolution(zone_side_m: float, res_m: float, buffer_m: float) -> int:
+    """Mesh cells needed for an effective resolution of ``res_m`` on ``zone + buffer``."""
+    side_buf = float(zone_side_m) + 2.0 * float(buffer_m)
+    return int(round((NINJAFOAM_RES_COEF * side_buf / max(float(res_m), 0.1)) ** 2))
+
+
+def zone_side_for_resolution(res_m: float, mesh_count: int, buffer_m: float) -> float:
+    """Largest zone side whose momentum mesh reaches ``res_m`` with ``mesh_count`` cells.
+    Can be ≤ 0 when the buffer alone exceeds the budget (resolution unreachable)."""
+    side_buf = float(res_m) * max(float(mesh_count), 1.0) ** 0.5 / NINJAFOAM_RES_COEF
+    return side_buf - 2.0 * float(buffer_m)
+
+
 def feature_domains(
     dem: Dem,
     hazard: np.ndarray,

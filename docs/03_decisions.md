@@ -1040,6 +1040,36 @@ that count and the ~minutes estimate so the cost is explicit before launching.
 
 ---
 
+## ADR-0037 — Match the momentum mesh to the terrain resolution (calibrated zone sizing)
+
+**Status.** Accepted (2026-07-06).
+
+**Context.** Users observed that switching the IGN topo preset (1/5/10/25 m) did not change the
+result's resolution. Root cause measured on **18 real cases** (lee meshes from saved `.sillage`
+bundles): NinjaFOAM spreads `mesh_count` over the whole **buffered** domain, so a 400 k mesh on a
+~4.5 km zone (+1.2 km buffer each side) yields **~19 m** effective horizontal resolution — the 1 m
+DEM cannot show. Empirical law: `res_h ≈ C × (side + 2·buffer) / √mesh_count`, C ≈ 1.2 (50 k) …
+1.75 (400 k).
+
+**Decision.** `auto/partition.py` gains the calibrated helpers (`NINJAFOAM_RES_COEF = 1.45`,
+`ninjafoam_resolution_m`, `mesh_count_for_resolution`, `zone_side_for_resolution`,
+`ZONE_HALF_FLOOR_M = 400 m`). `_prepare_domain_plan` **caps zone sizes so the mesh matches
+`target_res_m`**: feature domains get `min/max_half_m ≤ cap`, corridor tiles get `half_m ≤ cap`
+(step follows), the rectangle quadtree gets its `max_cells` derived from the cap. When the floor
+wins (e.g. topo 1–5 m: the buffer alone busts the budget), the log states the **effective** mesh
+resolution and that the topo is not reachable with this preset. Manual zones are NOT auto-resized:
+a **popup** at rectangle-draw time shows the cell count needed to match the terrain
+(`≈ (C·side_buf/res)²`, with ~min/solve) and offers (a) force that mesh count, (b) adapt the terrain
+resolution to the selected mesh, or (c) keep as-is; the choice feeds `_manual_pass2_cfg`.
+
+**Consequences.** The topo preset now genuinely drives result resolution — at the cost the arithmetic
+imposes: matching 10 m needs zones ≲ 2 km at 400 k; 5 m is only reachable via the popup's forced mesh
+counts (≈ 10⁶ cells, ~1½ h/solve); 1 m stays out of reach (buffer alone ≈ 24 M cells — documented
+honestly rather than pretended). More, smaller zones parallelise better (ADR-0023). The coefficient
+is a measured mid-range, not exact per count; revisit if WindNinja's meshing changes.
+
+---
+
 ## Open questions tracked as future ADRs
 
 - **Stability / diurnal winds on the momentum solver.** Available on the mass solver

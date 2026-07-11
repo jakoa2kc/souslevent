@@ -69,6 +69,8 @@ class SousLeVentWindow(AutoWindow):
         self._candidate_syncing = False
         self._candidate_auto_count = 0
         self._candidate_hour = 0          # index into the screening hazard stack being displayed
+        self._manual_mesh_override = None  # mesh_count chosen via the manual-zone popup (ADR-0037)
+        self._manual_topo_override = None  # target_res_m chosen via the manual-zone popup
         self._candidate_press = None
         self._candidate_drag_patch = None
         super().__init__()
@@ -661,6 +663,8 @@ class SousLeVentWindow(AutoWindow):
         self._candidate_press = None
         self._candidate_drag_patch = None
         self._candidate_hour = 0
+        self._manual_mesh_override = None   # new screening → back to the mesh-combo preset
+        self._manual_topo_override = None
         self._candidate_syncing = True
         try:
             self.candidate_list.clear()
@@ -749,6 +753,19 @@ class SousLeVentWindow(AutoWindow):
             int(item.data(QtCore.Qt.UserRole)) for item in self.candidate_list.selectedItems()
         })
 
+    def _manual_pass2_cfg(self, zones) -> AutoConfig:
+        """The Pass-2 config for manually selected zones: current mesh preset + the popup overrides
+        (mesh forced to match the terrain, or terrain adapted to the mesh — ADR-0037)."""
+        mesh_count, iterations = self._mesh_preset()  # mesh is a Pass-2 knob (screening ignores it)
+        if self._manual_mesh_override is not None:    # popup choice: match the terrain resolution
+            mesh_count = int(self._manual_mesh_override)
+        cfg = replace(self._screening_cfg, domain_mode="manual", manual_zones=zones,
+                      mesh_count=mesh_count, iterations=iterations,
+                      momentum_workers=self.workers_slider.value())
+        if self._manual_topo_override is not None:    # popup choice: match the mesh preset
+            cfg = replace(cfg, target_res_m=float(self._manual_topo_override))
+        return cfg
+
     def _manual_pass2_plan_text(self, selected_count: int, cfg: AutoConfig | None = None) -> str:
         cfg = cfg or self._screening_cfg
         if cfg is None:
@@ -759,14 +776,19 @@ class SousLeVentWindow(AutoWindow):
                                       task_count=tasks)
         unit = "scénario(s) vent" if cfg.wind_mode == WIND_MODE_MANUAL_GRID else "h"
         idle = "" if plan.idle_cores == 0 else f", {plan.idle_cores} au repos"
-        per = pass2_estimate_minutes(self._mesh_preset()[0])  # per-solve minutes for the chosen mesh
+        mesh_count = (int(self._manual_mesh_override) if self._manual_mesh_override is not None
+                      else self._mesh_preset()[0])
+        mesh_txt = (f"{mesh_count:,}".replace(",", " ") + " mailles (topo)"
+                    if self._manual_mesh_override is not None else self.mesh_combo.currentText())
+        if self._manual_topo_override is not None:
+            mesh_txt += f" · topo adaptée {self._manual_topo_override:.0f} m"
+        per = pass2_estimate_minutes(mesh_count)      # per-solve minutes for the effective mesh
         waves = max(1, math.ceil(tasks / max(1, plan.workers)))
         return (
             f"{selected_count} domaine(s) × {cases} {unit} (tous calculés) = {tasks} calcul(s) "
             f"Pass-2. {plan.workers} en parallèle × {plan.threads_per_worker} thread(s) "
             f"= {plan.used_cores}/{plan.cores} cœurs{idle}. "
-            f"Maillage {self.mesh_combo.currentText()} ≈ {per} min/calcul ⇒ ~{per * waves} min "
-            f"au total (indicatif).")
+            f"Maillage {mesh_txt} ≈ {per} min/calcul ⇒ ~{per * waves} min au total (indicatif).")
 
     def _draw_candidate_placeholder(self, text: str | None = None) -> None:
         if not hasattr(self, "candidate_fig"):
@@ -993,6 +1015,57 @@ class SousLeVentWindow(AutoWindow):
             f"{self._candidate_auto_count} candidat(s) Pass-1 + {total_manual} rectangle(s) manuel(s). "
             "Clique ou trace d'autres zones, puis lance Pass-2.")
         self._draw_candidate_map()
+        if self.isVisible():  # modal dialog — skipped in offscreen tests (window never shown)
+            self._ask_manual_mesh_choice(zone)
+
+    def _ask_manual_mesh_choice(self, zone: SubZone) -> None:
+        """Mesh ↔ terrain-resolution trade-off for a hand-drawn zone (ADR-0037): tell the pilot how
+        many mesh cells matching the terrain resolution would take, and offer either that mesh count
+        or a terrain resolution adapted to the selected mesh preset."""
+        from ..auto.partition import mesh_count_for_resolution, ninjafoam_resolution_m
+        from ..auto.pipeline import AUTO_EDGE_BUFFER_M
+
+        cfg = self._screening_cfg
+        topo = float(getattr(cfg, "target_res_m", 10.0) if cfg is not None else 10.0)
+        if self._manual_topo_override is not None:
+            topo = float(self._manual_topo_override)
+        side = max(zone.bbox[2] - zone.bbox[0], zone.bbox[3] - zone.bbox[1])
+        preset_count = (self._manual_mesh_override
+                        if self._manual_mesh_override is not None else self._mesh_preset()[0])
+        needed = mesh_count_for_resolution(side, topo, AUTO_EDGE_BUFFER_M)
+        eff = ninjafoam_resolution_m(side, preset_count, AUTO_EDGE_BUFFER_M)
+        if needed <= preset_count * 1.1:  # the current mesh already matches the terrain — no dilemma
+            return
+        topo_adapted = max(topo, min(TOPO_PRESETS, key=lambda p: abs(p - eff))
+                           if eff <= max(TOPO_PRESETS) else eff)
+
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Maillage / résolution terrain")
+        box.setIcon(QtWidgets.QMessageBox.Question)
+        box.setText(
+            f"Zone {side / 1000:.1f} km (+ tampon {AUTO_EDGE_BUFFER_M / 1000:.1f} km de chaque côté).\n\n"
+            f"Coller à la résolution terrain ({topo:.0f} m) demande ≈ {needed:,} mailles "
+            f"(~{pass2_estimate_minutes(needed)} min PAR calcul Pass-2).\n"
+            f"Le maillage sélectionné ({preset_count:,}) donne ≈ {eff:.0f} m effectifs.".replace(",", " "))
+        b_mesh = box.addButton(
+            f"Mailler à {needed:,} (topo {topo:.0f} m)".replace(",", " "),
+            QtWidgets.QMessageBox.AcceptRole)
+        b_topo = box.addButton(
+            f"Adapter la topo → {topo_adapted:.0f} m", QtWidgets.QMessageBox.ActionRole)
+        box.addButton("Garder tel quel", QtWidgets.QMessageBox.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is b_mesh:
+            self._manual_mesh_override = int(needed)
+            self._manual_topo_override = None
+            self._log(f"Pass-2 manuel : maillage forcé à {needed:,} mailles "
+                      f"(résolution terrain {topo:.0f} m).".replace(",", " "))
+        elif clicked is b_topo:
+            self._manual_topo_override = float(topo_adapted)
+            self._manual_mesh_override = None
+            self._log(f"Pass-2 manuel : résolution terrain adaptée à {topo_adapted:.0f} m "
+                      f"pour le maillage {preset_count:,}.".replace(",", " "))
+        self._on_candidate_selection()  # refresh the plan text with the choice
 
     def _manual_zone_from_bbox(self, bbox: tuple[float, float, float, float]) -> SubZone | None:
         dem = self._candidate_dem
@@ -1039,10 +1112,7 @@ class SousLeVentWindow(AutoWindow):
             QtWidgets.QMessageBox.information(self, "Candidats", "Sélectionne au moins un candidat.")
             return
         zones = tuple(self._screening_result.partition[i] for i in rows)
-        mesh_count, iterations = self._mesh_preset()  # mesh is a Pass-2 knob (screening ignores it)
-        cfg = replace(self._screening_cfg, domain_mode="manual", manual_zones=zones,
-                      mesh_count=mesh_count, iterations=iterations,
-                      momentum_workers=self.workers_slider.value())
+        cfg = self._manual_pass2_cfg(zones)
         self._last_cfg = cfg
         cli, cache = self.cfg.windninja_cli, self.cfg.cache_dir
 

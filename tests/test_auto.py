@@ -114,6 +114,23 @@ def test_load_result_reads_legacy_rotor_turb_files(tmp_path):
     assert loaded.result.cases[0].vtu_paths.get("rotor", "").endswith("r.vtu")
 
 
+def test_ninjafoam_resolution_model_roundtrip():
+    # Calibrated model (ADR-0037): res = C·(side+2·buf)/√count; the three helpers must agree.
+    from sillage.auto.partition import (
+        mesh_count_for_resolution,
+        ninjafoam_resolution_m,
+        zone_side_for_resolution,
+    )
+
+    res = ninjafoam_resolution_m(4500.0, 400_000, 1200.0)
+    assert 12.0 < res < 22.0                       # measured ≈19 m on the real 400 k cases
+    n = mesh_count_for_resolution(2000.0, 10.0, 1200.0)
+    assert abs(ninjafoam_resolution_m(2000.0, n, 1200.0) - 10.0) < 0.2   # inverse consistency
+    side = zone_side_for_resolution(10.0, n, 1200.0)
+    assert abs(side - 2000.0) < 5.0                                       # roundtrip
+    assert zone_side_for_resolution(1.0, 50_000, 1200.0) < 0              # 1 m unreachable → ≤ 0
+
+
 def test_load_result_rejects_zip_slip(tmp_path):
     # A .sillage is untrusted input: a member escaping the extraction dir must be refused, not written.
     import zipfile

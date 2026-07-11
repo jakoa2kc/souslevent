@@ -31,7 +31,16 @@ from ..timing import RunTimings
 from ..wind.directions import direction_label
 import numpy as np
 
-from .partition import SubZone, corridor_mask, corridor_tiles, feature_domains, partition_zone
+from .partition import (
+    ZONE_HALF_FLOOR_M,
+    SubZone,
+    corridor_mask,
+    corridor_tiles,
+    feature_domains,
+    ninjafoam_resolution_m,
+    partition_zone,
+    zone_side_for_resolution,
+)
 from .progress import ProgressTracker
 from .wind import local_wind_provider
 
@@ -454,11 +463,28 @@ def _prepare_domain_plan(
     zones: list[SubZone]
     hazard_map: np.ndarray | None = None
     hazard_stack: list | None = None
+
+    # Zone sizing so the MOMENTUM MESH matches the terrain resolution (ADR-0037): with mesh_count
+    # spread over (zone + buffer)², bigger zones mean a coarser mesh than the topo — so cap the zone
+    # side at what reaches cfg.target_res_m, floored at a physically-sane lee-domain size. When the
+    # floor wins, the topo resolution is NOT reachable with this mesh preset (reported to the log).
+    cap_side = zone_side_for_resolution(cfg.target_res_m, cfg.mesh_count, AUTO_EDGE_BUFFER_M)
+    cap_half = max(ZONE_HALF_FLOOR_M, cap_side / 2.0)
+
+    def _res_note(side_m: float) -> str:
+        eff = ninjafoam_resolution_m(side_m, cfg.mesh_count, AUTO_EDGE_BUFFER_M)
+        ok = eff <= cfg.target_res_m * 1.15
+        return (f"maillage effectif ≈ {eff:.0f} m pour topo {cfg.target_res_m:.0f} m"
+                + ("" if ok else " (topo non atteignable avec ce maillage : affine le maillage "
+                               "ou réduis les zones)"))
+
     if cfg.domain_mode == "manual" and cfg.manual_zones:
         with timings.measure("features"):
             zones = list(cfg.manual_zones)
             if on_progress is not None:
-                on_progress(0, f"Sélection manuelle : {len(zones)} domaine(s) Pass-2")
+                widest = max((z.bbox[2] - z.bbox[0]) for z in zones)
+                on_progress(0, f"Sélection manuelle : {len(zones)} domaine(s) Pass-2 — "
+                               + _res_note(widest))
     elif cfg.domain_mode == "corridor":
         # BLIND PAVING (ADR-0029): no Pass-1. Route selection uses overlapping corridor tiles;
         # rectangle selection uses the older relief-adaptive quadtree to cover the full AOI.
@@ -466,6 +492,7 @@ def _prepare_domain_plan(
             if segments_ll:
                 margin_m = cfg.corridor_margin_km * 1000.0
                 half_m = cfg.tile_half_m if cfg.tile_half_m > 0 else max(margin_m, 900.0)
+                half_m = min(half_m, cap_half)  # shrink tiles until the mesh matches the topo
                 step_m = max(300.0, min(cfg.tile_step_m, 2.0 * half_m))
                 if on_progress is not None:
                     on_progress(
@@ -478,17 +505,23 @@ def _prepare_domain_plan(
                 if on_progress is not None:
                     on_progress(0, f"Pavage : {len(zones)} secteurs sur {len(segments_ll)} "
                                    f"segment(s) (pas {step_m:.0f} m, "
-                                   f"demi-largeur {half_m:.0f} m, topo {cfg.target_res_m:.0f} m)")
+                                   f"demi-largeur {half_m:.0f} m, topo {cfg.target_res_m:.0f} m) — "
+                                   + _res_note(2.0 * half_m))
             else:
                 step_m = max(600.0, float(cfg.tile_step_m))
                 if on_progress is not None:
                     on_progress(0, "Pavage aveugle de la zone rectangle (sans criblage)…")
+                # cap the leaf tile SIDE via the topo-cell budget: est_cells = (side/res)², so a
+                # max_cells of (cap_side/res)² caps leaves at the mesh-matched size.
+                cells_cap = int(min(600_000, max((2 * cap_half / cfg.target_res_m) ** 2, 4)))
                 zones = partition_zone(
-                    dem, target_res_m=cfg.target_res_m, max_cells=600_000,
-                    max_relief_m=400.0, min_tile_m=step_m)
+                    dem, target_res_m=cfg.target_res_m, max_cells=cells_cap,
+                    max_relief_m=400.0, min_tile_m=min(step_m, 2 * cap_half))
                 if on_progress is not None:
+                    widest = max((z.bbox[2] - z.bbox[0]) for z in zones) if zones else 0.0
                     on_progress(0, f"Pavage rectangle : {len(zones)} secteur(s), "
-                                   f"tuile min {step_m:.0f} m, topo {cfg.target_res_m:.0f} m")
+                                   f"tuile min {step_m:.0f} m, topo {cfg.target_res_m:.0f} m — "
+                                   + _res_note(widest))
     else:
         # FEATURE-BASED domains (ADR-0023): screen the WHOLE zone once (continuous Pass-1 mass) to
         # find the relief features, then place ONE momentum domain per feature.
@@ -548,10 +581,15 @@ def _prepare_domain_plan(
                 sep = max(800.0, min(sep, cfg.corridor_margin_km * 1000.0))
             zones = feature_domains(
                 dem, hazard, max_features=cfg.max_features,
-                min_separation_m=sep, target_res_m=cfg.target_res_m)
+                min_separation_m=sep, target_res_m=cfg.target_res_m,
+                # cap the per-feature domain so the momentum mesh matches the topo (ADR-0037);
+                # the lee-physics floor still wins when the topo is too fine for the mesh preset
+                min_half_m=min(900.0, cap_half), max_half_m=min(2500.0, cap_half))
             hazard_map = hazard
             if on_progress is not None:
-                on_progress(0, f"{len(zones)} feature(s) détectée(s) (espacement ≥ {sep:.0f} m)")
+                widest = max((z.bbox[2] - z.bbox[0]) for z in zones) if zones else 2 * cap_half
+                on_progress(0, f"{len(zones)} feature(s) détectée(s) (espacement ≥ {sep:.0f} m) — "
+                               + _res_note(widest))
 
     return _DomainPlan(
         dem_path=str(dem_path), dem=dem, wind_provider=make, zones=zones, timings=timings,

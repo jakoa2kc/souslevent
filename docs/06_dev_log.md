@@ -2163,3 +2163,24 @@ actors and records the values for the next build. `populate_auto_scene` gained
 **UI.** `AutoWindow._build_render_tab` adds a row under the viewport: "Flèches vent — taille" (20–400 %)
 + "altitude sol" (0–300 m) + a live label; `_on_wind_style_change` calls `set_wind_arrow_style`.
 `SousLeVentWindow` inherits it. Defaults: 100 % · 20 m. 2 tests. `pytest -q` → **112 passed**, ruff clean.
+
+---
+
+## Entry 88 — Mesh ↔ terrain resolution: measured, modelled, and enforced (ADR-0037)  (2026-07-06)
+
+**User observation (right):** the topo preset (1/5/10 m) didn't change the result. **Measured** on 18
+real cases pulled from the saved `.sillage` bundles (median same-layer neighbour spacing of the lee
+meshes): 400 k cells / ~4.5 km zone → **~19 m** effective; 300 k → 14–21 m; 50 k → 33–40 m. The mesh,
+not the DEM, was the limit. Calibrated `res_h ≈ C·(side+2·buf)/√count`, C ≈ 1.2–1.75 → **1.45**.
+
+**Enforced.** Helpers in `partition.py`; `_prepare_domain_plan` caps feature/corridor/quadtree zone
+sizes so the momentum mesh matches `target_res_m` (floor `ZONE_HALF_FLOOR_M=400 m`; the log reports
+the effective resolution and says when the topo is unreachable with the preset). **Manual zones**: a
+popup at rectangle-draw shows the mesh count needed to match the terrain and offers to force it, to
+adapt the terrain resolution to the mesh, or keep as-is (`_manual_mesh_override` /
+`_manual_topo_override` → `_manual_pass2_cfg`; plan text reflects the choice; popup skipped when the
+window isn't shown, i.e. offscreen tests).
+
+**Honest arithmetic.** 10 m needs zones ≲ 2 km at 400 k; 5 m ⇒ ~10⁶ cells (~1½ h/solve) via the
+popup; 1 m unreachable (buffer alone ≈ 24 M cells). 4 new tests (model roundtrip + cfg overrides).
+`pytest -q` → **114 passed**, ruff clean.
