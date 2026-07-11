@@ -2,6 +2,9 @@
 
 **Leeward turbulence / rotor mapping for mountain paragliding.**
 
+> 🪂 **Just want to use the app?** Windows download + step-by-step setup (WindNinja, `.env`):
+> **[INSTALL.md](INSTALL.md)** · latest release: <https://github.com/jakoa2kc/souslevent/releases/latest>
+
 SousLeVent computes and visualizes the disturbed air — the *wake* (French: *sillage*) — that
 forms downwind of mountain terrain when wind blows over it, so a pilot can see **where**
 and **when** the dangerous, rotor-prone zones will be before flying. Inputs: a fine
