@@ -541,6 +541,44 @@ def test_souslevent_candidate_drag_uses_blit_not_full_redraws():
     w.deleteLater()
 
 
+def test_souslevent_paving_preview_preselects_all_sectors(monkeypatch):
+    # "Pass-2 partout" now stops at the candidates tab: every paved sector is shown pre-selected,
+    # with the real mesh resolution in the plan text, BEFORE any momentum solve (ADR-0037).
+    pytest.importorskip("PySide6")
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    from sillage.auto.partition import SubZone
+    from sillage.auto.pipeline import AutoConfig, ScreeningResult
+    from sillage.souslevent import window as slv_window
+    from sillage.souslevent.window import SousLeVentWindow
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    w = SousLeVentWindow()
+    dem = Dem(elevation=np.arange(400, dtype="float32").reshape(20, 20),
+              transform=from_origin(600000.0, 4900000.0, 50.0, 50.0),
+              crs=CRS.from_epsg(32631), resolution_m=50.0)
+    monkeypatch.setattr(slv_window, "load_dem", lambda *a, **k: dem)
+    w._screening_cfg = AutoConfig(bbox_latlon=(44.0, 6.0, 44.1, 6.1), hours=(9,),
+                                  domain_mode="corridor", target_res_m=10.0)
+    w._last_cfg = w._screening_cfg
+    zones = [SubZone(bbox=(x, 0.0, x + 1500.0, 1500.0), center=(x + 750.0, 750.0),
+                     crest_alt_m=1500.0, relief_m=300.0, est_cells=22_500,
+                     pixel_window=(0, 10, 0, 10)) for x in (0.0, 1500.0, 3000.0)]
+    result = ScreeningResult(dem_path="x.tif", crs=dem.crs, partition=zones, hours=[9])
+    w._screening_result = result
+    w._preview_preselect_all = True
+    w._populate_candidates(result)
+
+    assert w.candidate_list.count() == 3
+    assert len(w._selected_candidate_indices()) == 3        # all sectors pre-checked
+    assert w.btn_run_selected.isEnabled()
+    assert "Résolution maillage" in w.candidate_summary.text()
+    w.deleteLater()
+
+
 def test_souslevent_manual_mesh_topo_overrides_feed_cfg():
     # The manual-zone popup (ADR-0037) either forces the mesh to match the terrain resolution or
     # adapts the terrain resolution to the mesh preset; both must land in the Pass-2 cfg.

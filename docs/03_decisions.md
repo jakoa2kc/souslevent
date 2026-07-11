@@ -1068,6 +1068,17 @@ counts (≈ 10⁶ cells, ~1½ h/solve); 1 m stays out of reach (buffer alone ≈
 honestly rather than pretended). More, smaller zones parallelise better (ADR-0023). The coefficient
 is a measured mid-range, not exact per count; revisit if WindNinja's meshing changes.
 
+**Amendment (same day) — Pass-2-everywhere previews before paying.** "Pass-2 partout" no longer
+launches solves directly: `on_validate` runs `screen_candidates` (DEM + tiling only — the corridor
+branch does **no** WindNinja run) and shows the paved sectors in the candidates tab, **all
+pre-selected**, with sizes and the **effective mesh resolution** (or the cell count the chosen topo
+would need) in the plan text. The launch button then applies the same mesh↔topo arbitration popup as
+manual zones — with three outcomes: force the matching mesh count, **adapt the topo and re-pave**
+(sector sizes follow the new resolution), or cancel the launch. The run itself goes through
+`domain_mode="manual"` with the selected sectors, so what was previewed is exactly what is solved
+(and unticking sectors opts them out). The manual-zone popup's third button is "Annuler la zone"
+(removes the drawn rectangle); "keep the mismatch silently" no longer exists in either flow.
+
 ---
 
 ## Open questions tracked as future ADRs

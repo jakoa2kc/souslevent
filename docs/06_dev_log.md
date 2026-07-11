@@ -2184,3 +2184,27 @@ window isn't shown, i.e. offscreen tests).
 **Honest arithmetic.** 10 m needs zones ≲ 2 km at 400 k; 5 m ⇒ ~10⁶ cells (~1½ h/solve) via the
 popup; 1 m unreachable (buffer alone ≈ 24 M cells). 4 new tests (model roundtrip + cfg overrides).
 `pytest -q` → **114 passed**, ruff clean.
+
+---
+
+## Entry 89 — Fluid drag, cancelable manual zones, and a Pass-2-everywhere preview  (2026-07-06)
+
+Three UX follow-ups on the candidates tab (ADR-0037 amendment):
+
+**1 — Fluid rectangle drag.** Every mouse move redrew the WHOLE map (basemap + hazard + hillshade +
+patches + colorbar) → lag. Now the figure is captured once as a bitmap at drag start and each motion
+only blits the rubber band (matplotlib blitting; `draw_idle` fallback). Selection clicks restyle the
+existing zone patches in place (`_apply_candidate_styles`) instead of rebuilding the map.
+
+**2 — Manual-zone popup: "Annuler la zone" replaces "Garder tel quel".** The mesh↔topo dilemma now
+forces a choice: match the mesh, adapt the topo, or cancel — which removes the drawn rectangle from
+the map, the list and the partition (`_remove_candidate_zone`; Esc = cancel). No silent-mismatch path.
+
+**3 — "Pass-2 partout" previews before paying.** `on_validate` in paving mode runs
+`screen_candidates` (DEM + tiling only, no solves) and shows every paved sector in the candidates
+tab, pre-selected, with sizes and the **effective mesh resolution** (or the cells the chosen topo
+needs) in the plan text. Launch applies the same final popup: force the matching mesh count / adapt
+the topo **and re-pave** (sector sizes follow) / cancel. The run uses `domain_mode="manual"` with the
+selected sectors — what was previewed is what is solved; unticking opts a sector out.
+
+3 new/extended tests. `pytest -q` → **116 passed**, ruff clean.
