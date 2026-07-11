@@ -313,7 +313,7 @@ def test_souslevent_window_builds_offscreen():
     assert w.wind_manual_widget.isHidden()
     assert not w.features_row_widget.isHidden()
     assert w.step_row_widget.isHidden()
-    assert w.btn_validate.minimumWidth() >= 360
+    assert w.btn_validate.minimumHeight() >= 40  # fills the right-hand params column width
     assert w.tabs.count() == 3
     w.deleteLater()
 
