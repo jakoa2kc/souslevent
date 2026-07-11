@@ -203,6 +203,38 @@ def test_feature_domains_coerces_candidate_indices(monkeypatch):
     assert all(isinstance(v, int) for v in zones[0].pixel_window)
 
 
+def test_prepare_feature_plan_does_not_shrink_physical_domains_to_mesh_cap(monkeypatch, tmp_path):
+    from sillage.auto import pipeline
+    from sillage.auto.pipeline import AutoConfig, WIND_MODE_MANUAL_GRID
+    from sillage.screening import pass1
+
+    dem = _dem(np.zeros((40, 40)), res_m=50.0)
+    monkeypatch.setattr(pipeline, "prepare_dem", lambda *_a, **_k: (tmp_path / "dem.tif", "fake"))
+    monkeypatch.setattr(pipeline, "load_dem", lambda *_a, **_k: dem)
+    monkeypatch.setattr(
+        pass1, "hourly_indicator",
+        lambda **_k: (np.ones(dem.shape, dtype="float64"), np.ones(dem.shape)),
+    )
+    seen = {}
+
+    def fake_feature_domains(*_args, **kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(pipeline, "feature_domains", fake_feature_domains)
+    cfg = AutoConfig(
+        bbox_latlon=(44.0, 6.0, 44.1, 6.1), hours=(0,), target_res_m=10.0,
+        mesh_count=50_000, wind_mode=WIND_MODE_MANUAL_GRID,
+        manual_wind_speeds_kmh=(10,), manual_wind_dirs_deg=(270,),
+    )
+
+    pipeline._prepare_domain_plan(
+        cfg, cli="WindNinja_cli", cache_dir=tmp_path, cleanup=False,
+    )
+
+    assert "min_half_m" not in seen and "max_half_m" not in seen
+
+
 def test_resample_polyline_spaces_and_keeps_endpoints():
     from sillage.auto.partition import _resample_polyline
 
@@ -275,12 +307,19 @@ def test_corridor_grid_tiles_covers_crossing_route_without_stacking():
         covered |= (xs >= x0) & (xs <= x1) & (ys >= y0) & (ys <= y1)
     assert covered.all()
 
-    # no stacking: a regular grid keeps every pair of centres at least one step apart — unlike the
-    # per-segment tiling, which stacks offset tiles where the two corridors cross
+    # The outer tile boxes stay inside the mask bounding extent. This preserves the complete
+    # OpenFOAM edge buffer already fetched around the route bbox.
+    mask_x0, mask_x1 = left + cols.min() * res, left + (cols.max() + 1) * res
+    mask_y0, mask_y1 = top - (rows.max() + 1) * res, top - rows.min() * res
+    assert all(t.bbox[0] >= mask_x0 - 1e-6 and t.bbox[2] <= mask_x1 + 1e-6 for t in tiles)
+    assert all(t.bbox[1] >= mask_y0 - 1e-6 and t.bbox[3] <= mask_y1 + 1e-6 for t in tiles)
+
+    # no stacking: the global grid contains no coincident centres, unlike independent per-segment
+    # tilings which place near-duplicates where the two corridors cross
     pts = np.array([t.center for t in tiles])
     d = np.hypot(pts[:, None, 0] - pts[None, :, 0], pts[:, None, 1] - pts[None, :, 1])
     d[np.arange(len(pts)), np.arange(len(pts))] = np.inf
-    assert d.min() >= 1200.0 - 1.0
+    assert d.min() > 1.0
 
     naive = (corridor_tiles(dem, seg_we, step_m=1200.0, half_m=800.0, target_res_m=10.0,
                             corridor_half_m=1500.0)
@@ -577,6 +616,64 @@ def test_run_auto_parallelizes_manual_wind_scenarios(monkeypatch):
 
     assert len(result.cases) == 4
     assert max_active > 1
+
+
+def test_run_auto_low_disk_and_one_failure_do_not_truncate_batch(monkeypatch, tmp_path):
+    """Regression: the old 3 GB guard returned a partial result such as 18 cases + 1 global
+    failure and cancelled every remaining future. Low disk is now informational and one bad zone
+    must not prevent all other zones from completing."""
+    from types import SimpleNamespace
+
+    from sillage.auto import pipeline
+    from sillage.auto.partition import SubZone
+    from sillage.auto.pipeline import AutoConfig
+    from sillage.timing import RunTimings
+
+    zones = [
+        SubZone(
+            bbox=(i * 1000.0, 0.0, (i + 1) * 1000.0, 1000.0),
+            center=(i * 1000.0 + 500.0, 500.0), crest_alt_m=1800.0, relief_m=300.0,
+            est_cells=10_000, pixel_window=(0, 10, 0, 10),
+        )
+        for i in range(5)
+    ]
+    dem = SimpleNamespace(crs=CRS.from_epsg(32631))
+    cfg = AutoConfig(
+        bbox_latlon=(44.0, 6.0, 44.1, 6.1), hours=(9,), domain_mode="manual",
+        manual_zones=tuple(zones), momentum_workers=2,
+    )
+    def make(_h):
+        return lambda _x, _y: (8.0, 270.0)
+    monkeypatch.setattr(
+        pipeline,
+        "_prepare_domain_plan",
+        lambda *_a, **_k: pipeline._DomainPlan(
+            dem_path="dem.tif", dem=dem, wind_provider=make, zones=zones,
+            timings=RunTimings(), hazard=None,
+        ),
+    )
+    monkeypatch.setattr(pipeline, "crop_dem", lambda *_a, **_k: dem)
+    monkeypatch.setattr(pipeline, "write_dem", lambda *_a, **_k: None)
+    monkeypatch.setattr(pipeline, "_free_gb", lambda _path: 0.5)  # warning, never global abort
+    attempts = []
+
+    def fake_run_momentum(**kwargs):
+        attempts.append(Path(kwargs["dem_path"]).name)
+        if Path(kwargs["dem_path"]).name.startswith("z02_"):
+            raise RuntimeError("solveur cassé sur cette zone")
+        return SimpleNamespace(returncode=0, openfoam_case_dir="case")
+
+    monkeypatch.setattr(pipeline, "run_momentum", fake_run_momentum)
+    progress = []
+    result = pipeline.run_auto(
+        cfg, cli="WindNinja_cli", cache_dir=tmp_path,
+        on_progress=lambda pct, msg: progress.append((pct, msg)),
+    )
+
+    assert {(c.zone_index, c.hour) for c in result.cases} == {(0, 9), (1, 9), (3, 9), (4, 9)}
+    assert [(zi, h) for zi, h, _msg in result.failures] == [(2, 9)]
+    assert sum(name.startswith("z02_") for name in attempts) == 2  # parallel + sequential retry
+    assert any("Avertissement disque" in msg and "continue" in msg for _pct, msg in progress)
 
 
 def test_screen_candidates_builds_timing_summary(monkeypatch):

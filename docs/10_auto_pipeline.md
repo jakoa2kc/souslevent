@@ -20,8 +20,8 @@ layer; only the orchestration + UI differ. See **ADR-0022**.
   │
   ├─ terrain.acquire.prepare_dem  ──────────────►  corridor DEM (IGN de-striped, target res 1/5/10/25 m)
   │
-  ├─ domains, per the chosen mode (all zone sizes are CAPPED so the momentum mesh matches the
-  │   topo resolution — res ≈ 1.45·(side+2·buffer)/√mesh_count, calibrated; ADR-0037):
+  ├─ domains, per the chosen mode (paving tiles are mesh-capped; feature candidates keep their
+  │   physical lee extent — res ≈ 1.45·(side+2·buffer)/√mesh_count, calibrated; ADR-0037):
   │   • "features" (default, ADR-0023): Pass-1 mass over the corridor → hazard → find_candidates →
   │       auto.partition.feature_domains: ONE domain per relief, half ~ lee_factor×relief/2, no seams
   │   • "corridor" (blind paving, ADR-0029): NO Pass-1 — union corridor MASK over all segments,
@@ -117,14 +117,16 @@ keeps the old two-tab flow.
   Entry 38), so `momentum_workers` defaults to **all detected cores** as a max request; the
   effective workers are capped by the real `domains × hours` task count. The honest speed lever
   remains `mesh_count` + a lean per-domain solve. **Mesh ↔ topo (ADR-0037):** the effective mesh
-  resolution is `≈ 1.45·(side+2·buffer)/√mesh_count` (calibrated on real cases), so zone sizes are
-  capped to match the chosen topo, and the UI shows the effective resolution before launching.
+  resolution is `≈ 1.45·(side+2·buffer)/√mesh_count` (calibrated on real cases). Paving tiles are
+  capped to match the chosen topo; relief candidates keep the physical wake extent and the UI asks
+  to adapt mesh or topo before launching.
 - **Cost.** A run is `len(zones) × len(hours)` momentum solves — minutes to a long while; the ETA
   sets expectations. Caching (`*_vel.asc` reuse, the DEM cache) keeps re-launches cheaper.
 - **Disk.** OpenFOAM cases are kept while the window is open, then deleted on close (and before the
-  next run) by `cleanup_auto_artifacts`; reusable DEMs + Pass-1 screening cache stay. A `MIN_FREE_GB`
-  guard stops a runaway run; optional `compact_cases_during_run` extracts the lee meshes and deletes
-  cases mid-run (ADR-0025). `locate_openfoam_case(dem_stem=…)` keeps parallel solves from colliding.
+  next run) by `cleanup_auto_artifacts`; reusable DEMs + Pass-1 screening cache stay. Less than 3 Go
+  free emits a warning but never truncates a batch. Optional `compact_cases_during_run` extracts the
+  lee meshes and deletes cases mid-run (ADR-0025). `locate_openfoam_case(dem_stem=…)` keeps parallel
+  solves from colliding.
 - **3D georeferencing + rendering.** Basemaps reprojected WebMercator→DEM CRS (zoom-boosted),
   terrain on pixel centres, scale bar (ADR-0027). Metric colour scales are scalar and slider-driven;
   uniform adjustable opacity, overlaps drawn by nearest sector (no alpha-stacking). Wind on a

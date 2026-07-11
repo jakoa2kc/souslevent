@@ -556,7 +556,6 @@ class SousLeVentWindow(AutoWindow):
 
                 step_km = self.step_spin.value()
                 rlen = self._route_length_km()
-                along = max(1, int(rlen / max(0.1, step_km)) + 1) if rlen > 0 else 1
                 # rows across the corridor width: tiles are mesh-capped (ADR-0037), so the paving
                 # adds perpendicular rows until the whole ±margin band is covered
                 margin_m = self.margin_spin.value() * 1000.0
@@ -565,10 +564,18 @@ class SousLeVentWindow(AutoWindow):
                     AUTO_EDGE_BUFFER_M) / 2.0)
                 half = min(max(margin_m, 900.0), cap_half)
                 step_m = max(300.0, min(step_km * 1000.0, 2.0 * half))
-                rows = 1 + 2 * math.ceil(max(0.0, margin_m - half) / step_m)
+                def axis_count(span_m: float) -> int:
+                    if span_m <= 2.0 * half:
+                        return 1
+                    return max(2, math.ceil((span_m - 2.0 * half) / step_m) + 1)
+
+                # Same geometry as corridor_grid_tiles: include the round endpoint margins and use
+                # the mesh-capped ACTUAL step, not the larger value requested in the UI.
+                along = axis_count(rlen * 1000.0 + 2.0 * margin_m)
+                rows = axis_count(2.0 * margin_m)
                 domains = along * rows
                 tasks = (f"pavage parcours : ~{domains} secteurs "
-                         f"({rlen:.1f} km / pas {step_km:.1f} km × {rows} rangée(s) "
+                         f"({rlen:.1f} km, grille ~{step_m / 1000.0:.1f} km × {rows} rangée(s) "
                          f"sur ±{margin_m / 1000:.1f} km) × {cases} {wind_unit}")
             else:
                 width, height = self._bbox_size_km(bbox)
@@ -718,6 +725,9 @@ class SousLeVentWindow(AutoWindow):
         self.candidate_hour_row.setVisible(has_stack)
         self.candidate_hour_label.setText(self._candidate_hour_text(0) if has_stack else "")
         paving = self._preview_preselect_all
+        tab_idx = self.tabs.indexOf(self._candidates_tab)
+        if tab_idx >= 0:
+            self.tabs.setTabText(tab_idx, "Secteurs de pavage" if paving else "Candidats Pass-1")
         self.candidate_summary.setText(
             (f"Pavage Pass-2 : {len(result.partition)} secteur(s) proposé(s), tous cochés. "
              "Vérifie tailles/maillage puis « Lancer Pass-2 sur la sélection ».") if paving else
@@ -755,13 +765,18 @@ class SousLeVentWindow(AutoWindow):
 
     def _candidate_label(self, idx: int) -> str:
         if idx < self._candidate_auto_count:
-            return f"{idx + 1:02d}"
+            prefix = "S" if self._is_paving_candidates() else ""
+            return f"{prefix}{idx + 1:02d}"
         return f"M{idx - self._candidate_auto_count + 1:02d}"
+
+    def _is_paving_candidates(self) -> bool:
+        return getattr(self._screening_cfg, "domain_mode", "") == "corridor"
 
     def _add_candidate_item(self, idx: int, z: SubZone) -> QtWidgets.QListWidgetItem:
         width = (z.bbox[2] - z.bbox[0]) / 1000.0
         height = (z.bbox[3] - z.bbox[1]) / 1000.0
-        kind = "candidat Pass-1" if idx < self._candidate_auto_count else "rectangle manuel"
+        kind = ("secteur de pavage" if self._is_paving_candidates() else "candidat Pass-1") \
+            if idx < self._candidate_auto_count else "rectangle manuel"
         txt = (f"{self._candidate_label(idx)} · {kind} · centre "
                f"({z.center[0]:.0f}, {z.center[1]:.0f}) · {width:.1f} × {height:.1f} km · "
                f"relief {z.relief_m:.0f} m · ~{z.est_cells:,} cellules topo")
@@ -777,8 +792,13 @@ class SousLeVentWindow(AutoWindow):
                                          and self._job is None)
         if self._screening_result is not None:
             total_manual = len(self._screening_result.partition) - self._candidate_auto_count
+            base_kind = (
+                "secteur(s) de pavage"
+                if self._is_paving_candidates()
+                else "candidat(s) Pass-1"
+            )
             base = (
-                f"{self._candidate_auto_count} candidat(s) Pass-1"
+                f"{self._candidate_auto_count} {base_kind}"
                 + (f" + {total_manual} rectangle(s) manuel(s)." if total_manual else ".")
             )
             if rows:
@@ -839,19 +859,37 @@ class SousLeVentWindow(AutoWindow):
             return True
         if clicked is b_topo:
             if getattr(self._screening_cfg, "domain_mode", "") == "corridor":
-                # paving: sector sizes depend on the topo → re-pave the preview at the new topo
-                self.topo_combo.setCurrentIndex(
-                    min(range(len(TOPO_PRESETS)),
-                        key=lambda i: abs(TOPO_PRESETS[i] - t["topo_adapted"])))
-                self._log(f"Topo adaptée à {t['topo_adapted']:.0f} m — re-pavage des secteurs…")
-                self.on_validate()
-                return False  # the new preview replaces this launch
+                return self._apply_paving_topo_adaptation(t["topo_adapted"])
             self._manual_topo_override = float(t["topo_adapted"])
             self._manual_mesh_override = None
             self._log(f"Pass-2 : résolution terrain adaptée à {t['topo_adapted']:.0f} m.")
             self._on_candidate_selection()
             return True
         return False  # cancelled — keep the tab/selection as-is
+
+    def _apply_paving_topo_adaptation(self, target_m: float) -> bool:
+        """Apply the paving branch of the final topo choice.
+
+        Returns True when the existing preview can launch immediately, False when a re-paving job
+        was started. Values coarser than the combo's last preset are carried as an exact override;
+        mapping them back to 25 m used to re-open the same dilemma forever with the 20k mesh.
+        """
+        target = float(target_m)
+        if target > max(TOPO_PRESETS):
+            self._manual_topo_override = target
+            self._manual_mesh_override = None
+            self._log(
+                f"Pass-2 : topo adaptée à {target:.0f} m "
+                "(hors presets, secteurs conservés)."
+            )
+            self._on_candidate_selection()
+            return True
+        self.topo_combo.setCurrentIndex(
+            min(range(len(TOPO_PRESETS)), key=lambda i: abs(TOPO_PRESETS[i] - target))
+        )
+        self._log(f"Topo adaptée à {target:.0f} m — re-pavage des secteurs…")
+        self.on_validate()
+        return False
 
     def _manual_pass2_cfg(self, zones) -> AutoConfig:
         """The Pass-2 config for manually selected zones: current mesh preset + the popup overrides
@@ -994,7 +1032,11 @@ class SousLeVentWindow(AutoWindow):
         self._apply_candidate_styles()
 
         ax.set_aspect("equal", adjustable="box")
-        ax.set_title("Candidats Pass-1 — zones de calcul Pass-2 sélectionnables")
+        ax.set_title(
+            "Secteurs du pavage Pass-2 — sélectionnables"
+            if self._is_paving_candidates()
+            else "Candidats Pass-1 — zones de calcul Pass-2 sélectionnables"
+        )
         self._candidate_drag_bg = None  # figure changed → the drag blit background is stale
         self.candidate_canvas.draw_idle()
 
@@ -1172,8 +1214,13 @@ class SousLeVentWindow(AutoWindow):
             self._candidate_syncing = False
         self.candidate_list.scrollToItem(item)
         total_manual = len(result.partition) - self._candidate_auto_count
+        base_kind = (
+            "secteur(s) de pavage"
+            if self._is_paving_candidates()
+            else "candidat(s) Pass-1"
+        )
         self.candidate_summary.setText(
-            f"{self._candidate_auto_count} candidat(s) Pass-1 + {total_manual} rectangle(s) manuel(s). "
+            f"{self._candidate_auto_count} {base_kind} + {total_manual} rectangle(s) manuel(s). "
             "Clique ou trace d'autres zones, puis lance Pass-2.")
         self._draw_candidate_map()
         if self.isVisible():  # modal dialog — skipped in offscreen tests (window never shown)

@@ -1053,9 +1053,11 @@ DEM cannot show. Empirical law: `res_h ≈ C × (side + 2·buffer) / √mesh_cou
 
 **Decision.** `auto/partition.py` gains the calibrated helpers (`NINJAFOAM_RES_COEF = 1.45`,
 `ninjafoam_resolution_m`, `mesh_count_for_resolution`, `zone_side_for_resolution`,
-`ZONE_HALF_FLOOR_M = 400 m`). `_prepare_domain_plan` **caps zone sizes so the mesh matches
-`target_res_m`**: feature domains get `min/max_half_m ≤ cap`, corridor tiles get `half_m ≤ cap`
-(step follows), the rectangle quadtree gets its `max_cells` derived from the cap. When the floor
+`ZONE_HALF_FLOOR_M = 400 m`). `_prepare_domain_plan` **caps paving tiles so the mesh matches
+`target_res_m`**: corridor tiles get `half_m ≤ cap` (step follows), and the rectangle quadtree gets
+its `max_cells` derived from the cap. Feature candidates keep their relief-derived physical extent;
+shrinking them to the mesh cap clipped the wake, so their mesh/topo mismatch is resolved explicitly
+in the pre-launch preview instead. When the paving floor
 wins (e.g. topo 1–5 m: the buffer alone busts the budget), the log states the **effective** mesh
 resolution and that the topo is not reachable with this preset. Manual zones are NOT auto-resized:
 a **popup** at rectangle-draw time shows the cell count needed to match the terrain
@@ -1078,6 +1080,15 @@ manual zones — with three outcomes: force the matching mesh count, **adapt the
 `domain_mode="manual"` with the selected sectors, so what was previewed is exactly what is solved
 (and unticking sectors opts them out). The manual-zone popup's third button is "Annuler la zone"
 (removes the drawn rectangle); "keep the mismatch silently" no longer exists in either flow.
+
+**Amendment (2026-07-11) — complete batches and preserved edge buffers.** The global corridor grid
+now distributes its centres between the first and last valid tile positions instead of overshooting
+the mask extent; edge sectors retain the complete 1.2 km OpenFOAM buffer fetched around the corridor.
+The first-tab estimate uses that same mesh-capped grid step. A topo adaptation coarser than the last
+25 m combo preset is carried as an exact override, avoiding an endless 25 m re-pave loop with the
+20 k mesh. Finally, the former `MIN_FREE_GB = 3` global abort is removed: low disk is informational,
+never a reason to cancel unrelated futures. Every failed solve is retried sequentially and every
+requested `(zone, hour)` must finish as either a case or an explicit per-task failure.
 
 ---
 

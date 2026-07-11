@@ -576,6 +576,8 @@ def test_souslevent_paving_preview_preselects_all_sectors(monkeypatch):
     assert len(w._selected_candidate_indices()) == 3        # all sectors pre-checked
     assert w.btn_run_selected.isEnabled()
     assert "Résolution maillage" in w.candidate_summary.text()
+    assert "secteur de pavage" in w.candidate_list.item(0).text()
+    assert w.tabs.tabText(w.tabs.indexOf(w._candidates_tab)) == "Secteurs de pavage"
 
     # Manual deselection/reselection by clicking a paved sector on the map (duplicate pruning aid):
     from types import SimpleNamespace
@@ -590,6 +592,50 @@ def test_souslevent_paving_preview_preselects_all_sectors(monkeypatch):
     assert 1 not in w._selected_candidate_indices()
     click(2250.0, 750.0)                                    # click again → re-tick
     assert len(w._selected_candidate_indices()) == 3
+    w.deleteLater()
+
+
+def test_souslevent_paving_cpu_estimate_uses_mesh_capped_grid_step():
+    pytest.importorskip("PySide6")
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    from sillage.souslevent.window import SousLeVentWindow
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    w = SousLeVentWindow()
+    w._route = [[(44.50, 6.20), (44.68, 6.20)]]  # roughly 20 km
+    w.calc_combo.setCurrentIndex(1)               # pavage auto
+    w.topo_combo.setCurrentIndex(2)               # 10 m + 50k mesh => 400 m half-tile
+    w.step_spin.setValue(1.5)                     # requested, but actual grid is capped to 0.8 km
+    w._refresh_cpu_plan()
+
+    assert "grille ~0.8 km" in w.cpu_plan_label.text()
+    w.deleteLater()
+
+
+def test_souslevent_coarse_custom_topo_does_not_repave_forever(monkeypatch):
+    pytest.importorskip("PySide6")
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    from sillage.souslevent.window import SousLeVentWindow
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    w = SousLeVentWindow()
+    repaves = []
+    monkeypatch.setattr(w, "on_validate", lambda: repaves.append(True))
+    monkeypatch.setattr(w, "_on_candidate_selection", lambda: None)
+
+    proceed = w._apply_paving_topo_adaptation(32.8)  # coarser than the last 25 m combo preset
+
+    assert proceed is True
+    assert w._manual_topo_override == pytest.approx(32.8)
+    assert not repaves
     w.deleteLater()
 
 

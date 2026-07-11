@@ -2233,3 +2233,34 @@ reduced to 3 date labels, labels word-wrap.
 it look broken: unticking the top tile revealed its twin underneath).
 
 **Result.** `pytest -q` → **119 passed**, ruff clean.
+
+---
+
+## Entry 91 — Corridor edge buffers + complete large batches  (2026-07-11)
+
+**Trigger.** Review of the new global paving, then a real 67-sector run that returned only 18 cases
+and one failure. Root cause of the truncation: the historical `MIN_FREE_GB = 3` guard set a global
+`disk_abort`, cancelled every remaining future and returned one aggregate failure as soon as free
+space crossed 3 Go.
+
+**Batch policy fixed.** The 3 Go threshold is now warning-only. One failed parallel solve is retried
+alone after the pool drains; a permanent failure is attached to its `(zone, hour)` and never prevents
+the other tasks from completing. A final accounting invariant records any requested task that somehow
+produced neither a case nor an error. The completion message reports `successful/expected` explicitly.
+
+**Geometry fixed.** `corridor_grid_tiles` distributes centres between the valid first/last positions,
+so the final row no longer overshoots the corridor bounding extent and loses part of the 1.2 km
+OpenFOAM buffer. Feature candidates no longer shrink to the mesh-derived 400 m half-size: their
+relief/lee physical extent wins, with mesh/topo arbitration deferred to the preview. The tab-1 CPU
+estimate uses the actual mesh-capped grid step and includes corridor endpoint margins.
+
+**UI edge cases.** Paving rows/list/map are labelled as sectors, not Pass-1 candidates. A Grossier
+mesh whose honest adapted topo is coarser than the 25 m combo maximum carries that exact custom topo
+into the selected-sector run instead of re-paving forever at 25 m.
+
+**Regression coverage.** Added tests for bounded corridor tiles, physical feature-domain arguments,
+low-disk + one permanent failure without batch truncation, mesh-capped CPU estimate, paving labels,
+and custom coarse topo without a re-pave loop.
+
+**Result.** `ruff check .` clean; `pytest -q` → **123 passed**, one known non-blocking matplotlib
+`tight_layout` warning.

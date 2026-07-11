@@ -48,7 +48,7 @@ AUTO_EDGE_BUFFER_M = 1200.0  # grow each momentum crop so the outlet/lateral BCs
 # feature's lee — the recirculation must die out before the boundary, else it "climbs" the edge
 # (the inlet/outlet BC clamps reverse flow at the boundary; that artifact lives in this buffer ring
 # and is clipped out of the displayed rotor — see auto.scene + viz._clip_domain_boundary, ADR-0021).
-MIN_FREE_GB = 3.0  # last-resort abort if the disk is already dangerously low
+LOW_DISK_WARNING_GB = 3.0  # informational only: a fixed threshold must not truncate a batch
 DEFAULT_MAX_FEATURES = 12
 WIND_MODE_FORECAST = "forecast"
 WIND_MODE_MANUAL_GRID = "manual_grid"
@@ -583,12 +583,11 @@ def _prepare_domain_plan(
             sep = cfg.feature_separation_m
             if cfg.route_latlon:
                 sep = max(800.0, min(sep, cfg.corridor_margin_km * 1000.0))
+            # Preserve the physical lee-domain size. Resolution is arbitrated in the preview before
+            # Pass-2; shrinking a candidate to fit the selected mesh silently clips the wake.
             zones = feature_domains(
                 dem, hazard, max_features=cfg.max_features,
-                min_separation_m=sep, target_res_m=cfg.target_res_m,
-                # cap the per-feature domain so the momentum mesh matches the topo (ADR-0037);
-                # the lee-physics floor still wins when the topo is too fine for the mesh preset
-                min_half_m=min(900.0, cap_half), max_half_m=min(2500.0, cap_half))
+                min_separation_m=sep, target_res_m=cfg.target_res_m)
             hazard_map = hazard
             if on_progress is not None:
                 widest = max((z.bbox[2] - z.bbox[0]) for z in zones) if zones else 2 * cap_half
@@ -658,29 +657,30 @@ def run_auto(
     per_run_threads = plan.threads_per_worker
     tracker = ProgressTracker(total=len(tasks), workers=workers)  # parallelism-aware ETA
     cases: list[CaseResult] = []
+    domain_label = "secteurs" if cfg.domain_mode in ("corridor", "manual") else "reliefs"
     if on_progress is not None:
-        on_progress(0, f"{nz} features × {nh} {time_unit} = {len(tasks)} calculs Pass-2 "
+        on_progress(0, f"{nz} {domain_label} × {nh} {time_unit} = {len(tasks)} calculs Pass-2 "
                        f"(×{workers} en parallèle, {per_run_threads} thr/solve, "
                        f"{plan.used_cores}/{plan.cores} cœurs utilisés, "
                        f"maillage ~{cfg.mesh_count:,})")
 
-    disk_abort = {"hit": False, "msg": ""}
+    free = _free_gb(work_root)
+    if free < LOW_DISK_WARNING_GB and on_progress is not None:
+        on_progress(
+            0,
+            f"Avertissement disque : {free:.1f} Go libres. Le lot continue ; "
+            "les cas transitoires seront nettoyés à la fermeture.",
+        )
 
     def _solve(zi: int, h: int) -> CaseResult:
         def should_cancel() -> bool:
-            return disk_abort["hit"] or (cancel is not None and cancel())
+            return cancel is not None and cancel()
 
         if should_cancel():
             raise RuntimeError("cancelled")
-        free = _free_gb(work_root)
-        if free < MIN_FREE_GB:  # last-resort protection, not the primary cleanup strategy
-            disk_abort["hit"] = True
-            disk_abort["msg"] = (f"Disque presque plein ({free:.1f} Go libres < "
-                                 f"{MIN_FREE_GB:.0f} Go) — calcul stoppé pour protéger le disque.")
-            raise RuntimeError(disk_abort["msg"])
         zone = zones[zi]
         cx, cy = zone.center
-        zlabel = f"feature {zi + 1}/{nz} · {wind_label_for_case(cfg, h)}"
+        zlabel = f"zone {zi + 1}/{nz} · {wind_label_for_case(cfg, h)}"
         if on_progress is not None:
             on_progress(tracker.display_percent, f"{zlabel} · récupération du vent amont…")
         spd, drc = make(h)(cx, cy)
@@ -731,10 +731,6 @@ def run_auto(
                 try:
                     _after(fut.result())
                 except Exception:
-                    if disk_abort["hit"]:  # disk too low: stop launching, keep what we have
-                        for f in futs:
-                            f.cancel()
-                        break
                     if cancel is not None and cancel():
                         for f in futs:
                             f.cancel()
@@ -742,20 +738,24 @@ def run_auto(
                     failed.append(futs[fut])  # retry alone once the pool drains
 
         result = AutoResult(dem_path=str(dem_path), crs=dem.crs, partition=zones)
-        if disk_abort["hit"]:
-            result.failures.append((-1, -1, disk_abort["msg"]))
-            if on_progress is not None:
-                on_progress(tracker.display_percent, disk_abort["msg"])
-        else:
-            for k in sorted(failed):  # sequential fallback (rules out cross-process contention)
-                if cancel is not None and cancel():
-                    raise RuntimeError("cancelled")
-                zi, h = tasks[k]
-                try:
-                    _after(_solve(zi, h))
-                except Exception as exc:  # a task that fails even alone -> record, keep the rest
-                    result.failures.append((zi, h, str(exc)[:300]))
-                    tracker.record(0.0)
+        for k in sorted(failed):  # sequential fallback (rules out cross-process contention)
+            if cancel is not None and cancel():
+                raise RuntimeError("cancelled")
+            zi, h = tasks[k]
+            try:
+                _after(_solve(zi, h))
+            except Exception as exc:  # a task that fails even alone -> record, keep the rest
+                result.failures.append((zi, h, str(exc)[:300]))
+                tracker.record(0.0)
+
+        # Defensive accounting: a completed batch must never silently omit tasks. This would have
+        # made the former "18 cases + 1 global disk failure" truncation immediately visible.
+        completed = {(c.zone_index, c.hour) for c in cases}
+        recorded_failures = {(zi, h) for zi, h, _msg in result.failures}
+        for zi, h in tasks:
+            if (zi, h) not in completed and (zi, h) not in recorded_failures:
+                result.failures.append((zi, h, "calcul terminé sans résultat ni erreur enregistrée"))
+                tracker.record(0.0)
 
     result.cases = sorted(cases, key=lambda c: (c.hour, c.zone_index))
     result.timings_summary = timings.summary()

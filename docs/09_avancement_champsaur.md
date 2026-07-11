@@ -867,3 +867,26 @@ Verification:
   `test_souslevent_manual_wind_result_uses_two_render_sliders`,
   `test_souslevent_forecast_hour_slider_waits_for_apply` -> `3 passed`.
 - Avertissement pytest connu et non bloquant: `.pytest_cache` / `WinError 183`.
+
+### 2026-07-11 — Gros runs complets et bord de corridor protege (Codex)
+
+Contexte:
+- Revue du nouveau pavage global puis retour reel: 67 secteurs demandes, seulement 18 cas affiches
+  et un echec.
+- Cause confirmee: le seuil historique de 3 Go annulait globalement toutes les taches restantes.
+
+Realise:
+- Le seuil de 3 Go devient un avertissement non bloquant; il ne tronque plus les lots.
+- Chaque echec parallele est retente seul, puis rattache a sa zone/heure s'il persiste.
+- Verification finale que chaque tache demandee produit soit un cas, soit un echec explicite.
+- Message final sous la forme `cas reussis / cas attendus`.
+- Derniere ligne/colonne du pavage recalee dans l'emprise: tampon OpenFOAM de 1,2 km conserve.
+- Les candidats Pass-1 gardent leur taille physique liee au relief; plus de reduction a 400 m.
+- Estimation CPU basee sur le vrai pas de grille apres plafonnement maillage.
+- Adaptation topo Grossier > 25 m sans boucle de re-pavage.
+- Libelles de l'apercu corriges: `secteurs de pavage`, pas `candidats Pass-1`.
+
+Verification:
+- 6 tests de regression cibles passes.
+- `ruff check .` OK.
+- Suite complete: **123 tests passes**, un warning matplotlib `tight_layout` connu et non bloquant.

@@ -186,12 +186,18 @@ def corridor_grid_tiles(
     step = max(200.0, min(float(step_m), 2.0 * float(half_m)))
 
     def centers(lo: float, hi: float):
-        c = lo + half_m
-        out = [c]
-        while c + half_m < hi:            # extend until the last tile reaches the far edge
-            c += step
-            out.append(c)
-        return out
+        """Cover one mask axis without pushing the last tile beyond its extent.
+
+        Keeping the tile boxes inside the corridor bounding box preserves the full
+        ``AUTO_EDGE_BUFFER_M`` already fetched around that box.  A fixed-step grid used to let the
+        last tile overshoot by almost one step, so its OpenFOAM crop was clipped at the DEM edge.
+        """
+        span = max(0.0, float(hi) - float(lo))
+        width = 2.0 * float(half_m)
+        if span <= width:
+            return [(float(lo) + float(hi)) / 2.0]
+        count = max(2, int(np.ceil((span - width) / step)) + 1)
+        return np.linspace(float(lo) + half_m, float(hi) - half_m, count).tolist()
 
     zones: list[SubZone] = []
     m = np.asarray(mask, dtype=bool)

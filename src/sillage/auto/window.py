@@ -795,9 +795,12 @@ class AutoWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "MNT", f"MNT illisible : {exc}")
             return
         hours = result.hours
+        configured_hours = tuple(getattr(self._last_cfg, "hours", ()))
+        expected = len(result.partition) * len(configured_hours)
         nfail = len(result.failures)
-        done = (f"Terminé : {len(result.partition)} features × {len(hours)} h "
-                f"({len(result.cases)} cas{f', {nfail} échec(s)' if nfail else ''}) — "
+        done = (f"Terminé : {len(result.cases)}/{expected} cas réussis sur "
+                f"{len(result.partition)} domaine(s) × {len(configured_hours)} "
+                f"heure(s)/scénario(s){f', {nfail} échec(s)' if nfail else ''} — "
                 f"{result.timings_summary}")
         self.statusBar().showMessage(done)
         self._log(done)
