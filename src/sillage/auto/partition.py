@@ -155,6 +155,65 @@ def _resample_polyline(route_xy, step_m: float):
     return pts
 
 
+def corridor_grid_tiles(
+    dem: Dem,
+    mask: np.ndarray,
+    *,
+    step_m: float = 1500.0,
+    half_m: float = 1000.0,
+    target_res_m: float = 5.0,
+) -> list[SubZone]:
+    """Pave the area under ``mask`` (the union corridor band) with ONE regular grid of tiles.
+
+    Thinking in terms of the **global surface to cover** — not per-segment strips — so a route that
+    doubles back or crosses itself is tiled once, homogeneously, with no stacked tilings from
+    different segments. Tiles are laid on an axis-aligned grid (spacing ``step_m`` ≤ ``2·half_m`` ⇒
+    the grid covers the plane) and kept iff they intersect the mask, which guarantees every masked
+    pixel is covered by at least one kept tile."""
+    elev = np.asarray(dem.elevation, dtype="float64")
+    h_px, w_px = elev.shape
+    res = float(dem.resolution_m)
+    left, _bottom, _right, top = dem.bounds
+
+    rows, cols = np.nonzero(np.asarray(mask, dtype=bool))
+    if not len(rows):
+        return []
+    # masked-region extent in CRS coords (pixel centres → outer edges)
+    x0 = left + (cols.min()) * res
+    x1 = left + (cols.max() + 1) * res
+    y1 = top - (rows.min()) * res
+    y0 = top - (rows.max() + 1) * res
+    step = max(200.0, min(float(step_m), 2.0 * float(half_m)))
+
+    def centers(lo: float, hi: float):
+        c = lo + half_m
+        out = [c]
+        while c + half_m < hi:            # extend until the last tile reaches the far edge
+            c += step
+            out.append(c)
+        return out
+
+    zones: list[SubZone] = []
+    m = np.asarray(mask, dtype=bool)
+    for cy in centers(y0, y1):
+        pr0 = min(max(0, int((top - (cy + half_m)) / res)), h_px)
+        pr1 = min(max(0, int(np.ceil((top - (cy - half_m)) / res))), h_px)
+        for cx in centers(x0, x1):
+            pc0 = min(max(0, int((cx - half_m - left) / res)), w_px)
+            pc1 = min(max(0, int(np.ceil((cx + half_m - left) / res))), w_px)
+            if pr1 <= pr0 or pc1 <= pc0 or not m[pr0:pr1, pc0:pc1].any():
+                continue  # tile entirely outside the corridor band
+            dsub = elev[pr0:pr1, pc0:pc1]
+            dfin = dsub[np.isfinite(dsub)]
+            zones.append(SubZone(
+                bbox=(cx - half_m, cy - half_m, cx + half_m, cy + half_m), center=(cx, cy),
+                crest_alt_m=float(np.nanpercentile(dsub, 80)) if dfin.size else 0.0,
+                relief_m=(float(dfin.max()) - float(dfin.min())) if dfin.size else 0.0,
+                est_cells=estimate_cells(2 * half_m, 2 * half_m, target_res_m),
+                pixel_window=(pr0, pr1, pc0, pc1)))
+    return zones
+
+
 def dedup_zones(zones: list[SubZone], snap_m: float) -> list[SubZone]:
     """Drop near-duplicate tiles (centres within the same ``snap_m`` grid cell), keeping the first.
     Needed ACROSS segments/switchbacks: each ``corridor_tiles`` call dedups internally, but a

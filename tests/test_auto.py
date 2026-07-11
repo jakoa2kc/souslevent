@@ -248,6 +248,50 @@ def test_corridor_tiles_pave_the_full_corridor_width():
     assert len({round(t.center[1]) for t in single}) == 1
 
 
+def test_corridor_grid_tiles_covers_crossing_route_without_stacking():
+    # A route that doubles back / crosses itself must be tiled as ONE surface: full mask coverage,
+    # a single regular grid (unique centres), no stacked per-segment tilings.
+    from sillage.auto.partition import corridor_grid_tiles, corridor_mask, corridor_tiles
+
+    dem = _dem(np.zeros((200, 200)), res_m=50.0)  # 10 x 10 km
+    left, _b, _r, top = dem.bounds
+    seg_we = [(left + 2000.0, top - 5000.0), (left + 8000.0, top - 5000.0)]   # W → E
+    seg_ns = [(left + 5000.0, top - 2000.0), (left + 5000.0, top - 8000.0)]   # N → S (crosses it)
+    band = corridor_mask(dem, seg_we, 1500.0) | corridor_mask(dem, seg_ns, 1500.0)
+
+    tiles = corridor_grid_tiles(dem, band, step_m=1200.0, half_m=800.0, target_res_m=10.0)
+    assert tiles
+    centres = {(round(t.center[0]), round(t.center[1])) for t in tiles}
+    assert len(centres) == len(tiles)                       # one grid → no duplicates at all
+
+    # EVERY masked pixel is inside at least one tile (global coverage)
+    res = float(dem.resolution_m)
+    rows, cols = np.nonzero(band)
+    xs = left + (cols + 0.5) * res
+    ys = top - (rows + 0.5) * res
+    covered = np.zeros(len(xs), dtype=bool)
+    for t in tiles:
+        x0, y0, x1, y1 = t.bbox
+        covered |= (xs >= x0) & (xs <= x1) & (ys >= y0) & (ys <= y1)
+    assert covered.all()
+
+    # no stacking: a regular grid keeps every pair of centres at least one step apart — unlike the
+    # per-segment tiling, which stacks offset tiles where the two corridors cross
+    pts = np.array([t.center for t in tiles])
+    d = np.hypot(pts[:, None, 0] - pts[None, :, 0], pts[:, None, 1] - pts[None, :, 1])
+    d[np.arange(len(pts)), np.arange(len(pts))] = np.inf
+    assert d.min() >= 1200.0 - 1.0
+
+    naive = (corridor_tiles(dem, seg_we, step_m=1200.0, half_m=800.0, target_res_m=10.0,
+                            corridor_half_m=1500.0)
+             + corridor_tiles(dem, seg_ns, step_m=1200.0, half_m=800.0, target_res_m=10.0,
+                              corridor_half_m=1500.0))
+    npts = np.array([t.center for t in naive])
+    nd = np.hypot(npts[:, None, 0] - npts[None, :, 0], npts[:, None, 1] - npts[None, :, 1])
+    nd[np.arange(len(npts)), np.arange(len(npts))] = np.inf
+    assert nd.min() < 1200.0 - 1.0                          # the old way DID stack near the crossing
+
+
 def test_dedup_zones_drops_cross_segment_duplicates():
     # Two segments covering the same stretch (out-and-back / shared junction) must not double-tile.
     from sillage.auto.partition import corridor_tiles, dedup_zones
