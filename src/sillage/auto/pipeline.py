@@ -36,6 +36,7 @@ from .partition import (
     SubZone,
     corridor_mask,
     corridor_tiles,
+    dedup_zones,
     feature_domains,
     ninjafoam_resolution_m,
     partition_zone,
@@ -503,6 +504,7 @@ def _prepare_domain_plan(
                         zones += corridor_tiles(dem, _seg_xy(seg), step_m=step_m, half_m=half_m,
                                                 target_res_m=cfg.target_res_m,
                                                 corridor_half_m=margin_m)  # pave the FULL width
+                zones = dedup_zones(zones, step_m / 2.0)  # segments/switchbacks tile the same area
                 if on_progress is not None:
                     on_progress(0, f"Pavage : {len(zones)} secteurs sur {len(segments_ll)} "
                                    f"segment(s) (pas {step_m:.0f} m, "

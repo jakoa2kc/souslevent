@@ -576,6 +576,20 @@ def test_souslevent_paving_preview_preselects_all_sectors(monkeypatch):
     assert len(w._selected_candidate_indices()) == 3        # all sectors pre-checked
     assert w.btn_run_selected.isEnabled()
     assert "Résolution maillage" in w.candidate_summary.text()
+
+    # Manual deselection/reselection by clicking a paved sector on the map (duplicate pruning aid):
+    from types import SimpleNamespace
+
+    def click(x, y):
+        ev = SimpleNamespace(inaxes=w._candidate_ax, xdata=x, ydata=y, x=50.0, y=50.0, button=1)
+        w._on_candidate_map_press(ev)
+        w._on_candidate_map_release(ev)
+
+    click(2250.0, 750.0)                                    # centre of sector #2 → untick it
+    assert len(w._selected_candidate_indices()) == 2
+    assert 1 not in w._selected_candidate_indices()
+    click(2250.0, 750.0)                                    # click again → re-tick
+    assert len(w._selected_candidate_indices()) == 3
     w.deleteLater()
 
 

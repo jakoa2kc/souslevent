@@ -248,6 +248,23 @@ def test_corridor_tiles_pave_the_full_corridor_width():
     assert len({round(t.center[1]) for t in single}) == 1
 
 
+def test_dedup_zones_drops_cross_segment_duplicates():
+    # Two segments covering the same stretch (out-and-back / shared junction) must not double-tile.
+    from sillage.auto.partition import corridor_tiles, dedup_zones
+
+    dem = _dem(np.zeros((200, 200)), res_m=50.0)
+    left, _b, _r, top = dem.bounds
+    ymid = top - 5000.0
+    seg = [(left + 2000.0, ymid), (left + 8000.0, ymid)]
+    tiles = (corridor_tiles(dem, seg, step_m=1500.0, half_m=1000.0, target_res_m=10.0)
+             + corridor_tiles(dem, list(reversed(seg)), step_m=1500.0, half_m=1000.0,
+                              target_res_m=10.0))           # same stretch, opposite direction
+    uniq = dedup_zones(tiles, 750.0)
+    assert len(uniq) < len(tiles)                            # duplicates dropped
+    keys = {(round(z.center[0] / 750.0), round(z.center[1] / 750.0)) for z in uniq}
+    assert len(keys) == len(uniq)                            # no two tiles share a snap cell
+
+
 def test_corridor_mask_keeps_band_around_route():
     from sillage.auto.partition import corridor_mask
 

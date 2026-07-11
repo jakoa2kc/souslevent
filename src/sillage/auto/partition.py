@@ -155,6 +155,22 @@ def _resample_polyline(route_xy, step_m: float):
     return pts
 
 
+def dedup_zones(zones: list[SubZone], snap_m: float) -> list[SubZone]:
+    """Drop near-duplicate tiles (centres within the same ``snap_m`` grid cell), keeping the first.
+    Needed ACROSS segments/switchbacks: each ``corridor_tiles`` call dedups internally, but a
+    multi-segment route (or a route folding back on itself) tiles the same area twice."""
+    seen: set[tuple[int, int]] = set()
+    out: list[SubZone] = []
+    snap = max(1.0, float(snap_m))
+    for z in zones:
+        key = (int(round(z.center[0] / snap)), int(round(z.center[1] / snap)))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(z)
+    return out
+
+
 def corridor_tiles(
     dem: Dem,
     route_xy,
