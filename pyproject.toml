@@ -38,6 +38,7 @@ dependencies = [
   "py7zr>=1.1",      # read/extract IGN RGE ALTI .7z archives
   "tzdata>=2024.1",  # IANA tz database for zoneinfo (Europe/Paris hourly labels on Windows)
   "psutil>=5.9",     # detect physical CPU cores for the auto-mode concurrency slider
+  "trame>=3.6", "trame-vtk>=2.8", "nest-asyncio2>=1.0",  # « Export 3D web » (standalone vtk.js HTML)
 ]
 
 [project.optional-dependencies]

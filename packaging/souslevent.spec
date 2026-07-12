@@ -27,6 +27,7 @@ for pkg in (
     "rasterio", "pyproj",                    # DEM IO + reprojection (GDAL / PROJ data)
     "contextily", "xyzservices", "mercantile",  # basemap tiles
     "matplotlib", "superqt", "py7zr", "scipy",
+    "trame", "trame_vtk", "trame_client", "trame_server", "nest_asyncio2",  # « Export 3D web »
 ):
     try:
         d, b, h = collect_all(pkg)

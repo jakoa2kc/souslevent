@@ -328,6 +328,13 @@ class AutoWindow(QtWidgets.QMainWindow):
         self.btn_save.setEnabled(False)
         self.btn_save.clicked.connect(self._on_save)
         srow.addWidget(self.btn_save)
+        self.btn_web3d = QtWidgets.QPushButton("🌐 Export 3D web")
+        self.btn_web3d.setToolTip(
+            "Exporter la vue affichée (heure/scénario, représentation et seuils courants) en page "
+            "HTML 3D interactive autonome — ouvrable dans un navigateur, partageable sur un site.")
+        self.btn_web3d.setEnabled(False)
+        self.btn_web3d.clicked.connect(self._on_export_web3d)
+        srow.addWidget(self.btn_web3d)
         srow.addStretch(1)
         lay.addLayout(srow)
         outer.addLayout(lay, stretch=1)
@@ -816,6 +823,8 @@ class AutoWindow(QtWidgets.QMainWindow):
         self._result = None
         self._rotor_cache = {}
         self.btn_save.setEnabled(False)
+        if hasattr(self, "btn_web3d"):
+            self.btn_web3d.setEnabled(False)
         self.hour_slider.setEnabled(False)
         if hasattr(self, "hour_label"):
             self.hour_label.setText("")
@@ -849,9 +858,49 @@ class AutoWindow(QtWidgets.QMainWindow):
             self.hour_start_label.setText(self._label_for_hour(hours[0]))
             self.hour_end_label.setText(self._label_for_hour(hours[-1]))
         self.btn_save.setEnabled(True)
+        if hasattr(self, "btn_web3d"):
+            self.btn_web3d.setEnabled(True)
         self.tabs.setCurrentWidget(self._render_tab)
         self._refresh_render_case_label()
         self._render_hour(self._current_render_index())
+
+    def _on_export_web3d(self) -> None:
+        """Export the DISPLAYED hour/representation as a standalone interactive HTML (vtk.js)."""
+        if self._result is None or self._dem is None:
+            return
+        hours = self._result.hours
+        idx = self._current_render_index()
+        if not (0 <= idx < len(hours)):
+            return
+        hour = hours[idx]
+        label = self._label_for_hour(hour)
+        safe = "".join(ch if ch.isalnum() else "_" for ch in f"{self._metric}_{label}").strip("_")
+        suggested = str(self.cfg.output_dir / f"souslevent_3d_{safe}.html")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Exporter la vue 3D en HTML interactif", suggested, "Page web (*.html)")
+        if not path:
+            return
+        from pathlib import Path
+
+        from .scene import export_web_html
+
+        self.statusBar().showMessage("Export 3D web en cours…")
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            out = export_web_html(
+                self._dem, self._result.cases_for_hour(hour), path,
+                metric=self._metric, metric_range=self._native_metric_range(),
+                route_winds=self._route_winds_utm(hour), rotor_opacity=self._opacity,
+                wind_size_factor=self._wind_size_factor, wind_altitude_m=self._wind_altitude_m,
+                title=f"SousLeVent — {label}")
+        except Exception as exc:  # pragma: no cover - surfaced to the UI
+            QtWidgets.QMessageBox.critical(self, "Export 3D web", str(exc))
+            return
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        size_mb = Path(out).stat().st_size / (1024 * 1024)
+        self.statusBar().showMessage(f"Export 3D web : {out} ({size_mb:.1f} Mo)")
+        self._log(f"Vue 3D exportée en HTML interactif ({size_mb:.1f} Mo) → {out}")
 
     # --- save / open results -------------------------------------------------
     def _on_save(self) -> None:

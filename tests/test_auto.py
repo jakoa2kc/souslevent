@@ -331,6 +331,33 @@ def test_corridor_grid_tiles_covers_crossing_route_without_stacking():
     assert nd.min() < 1200.0 - 1.0                          # the old way DID stack near the crossing
 
 
+def test_downsample_dem_for_web_keeps_bounds():
+    from sillage.auto.scene import downsample_dem_for_web
+
+    dem = _dem(np.zeros((300, 200)), res_m=50.0)
+    small = downsample_dem_for_web(dem, max_px=100)
+    assert max(small.shape) <= 100
+    for a, b in zip(small.bounds, dem.bounds):
+        assert abs(a - b) <= 3 * dem.resolution_m * 3  # same footprint (± one coarse pixel)
+    assert small.resolution_m == dem.resolution_m * 3
+
+
+def test_export_web_html_writes_standalone_page(tmp_path):
+    # « Export 3D web » (option A): a small terrain-only scene must produce a self-contained
+    # interactive HTML (vtk.js) of a sane size — the plumbing behind the app button.
+    pytest.importorskip("pyvista")
+    pytest.importorskip("trame")
+    from sillage.auto.scene import export_web_html
+
+    dem = _dem(np.linspace(800, 1600, 40 * 40).reshape(40, 40), res_m=50.0)
+    out = export_web_html(dem, [], tmp_path / "scene.html", metric="rotor",
+                          title="test export")
+    p = Path(out)
+    assert p.exists() and p.stat().st_size > 200_000       # vtk.js runtime + scene embedded
+    head = p.read_text(encoding="utf-8", errors="ignore")[:2000].lower()
+    assert "<html" in head
+
+
 def test_dedup_zones_drops_cross_segment_duplicates():
     # Two segments covering the same stretch (out-and-back / shared junction) must not double-tile.
     from sillage.auto.partition import corridor_tiles, dedup_zones

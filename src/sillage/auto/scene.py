@@ -56,6 +56,53 @@ def extract_case_source(case_dir: str, wind_from_deg: float, aoi_bounds, *, ref_
                                  ref_speed_ms=ref_speed_ms, aoi_bounds=aoi_bounds)
 
 
+def downsample_dem_for_web(dem, max_px: int = 700):
+    """A strided copy of ``dem`` capped at ``max_px`` on its longest side — the full corridor DEM
+    (millions of points at 5-10 m) would dominate a web export; ~0.5 Mpt is plenty for a browser."""
+    import numpy as np
+
+    from ..terrain.dem import Dem
+
+    h, w = dem.shape
+    stride = max(1, int(np.ceil(max(h, w) / max_px)))
+    if stride == 1:
+        return dem
+    from rasterio.transform import Affine
+
+    t = dem.transform
+    return Dem(elevation=np.ascontiguousarray(dem.elevation[::stride, ::stride]),
+               transform=Affine(t.a * stride, t.b, t.c, t.d, t.e * stride, t.f),
+               crs=dem.crs, resolution_m=float(dem.resolution_m) * stride)
+
+
+def export_web_html(dem, cases, out_path, *, metric: str = "rotor", vol_floor: float = 0.20,
+                    metric_range=None, route_winds=None, rotor_opacity: float = 0.5,
+                    intensity_max=None, wind_size_factor: float = 1.0,
+                    wind_altitude_m: float = 20.0, max_terrain_px: int = 700,
+                    title: str = "") -> str:
+    """Export ONE hour/scenario of an auto result as a **standalone interactive HTML** (vtk.js via
+    ``pyvista.Plotter.export_html``) — openable in any browser, nothing to install, shareable on a
+    website. The scene is the same as the app's 3D tab (same blend/colours/arrows), except the
+    terrain uses the elevation colormap (basemap textures don't survive the vtk.js export) and is
+    downsampled to keep the file size web-friendly. Frozen scene: one hour, one representation."""
+    import pyvista as pv
+
+    pl = pv.Plotter(off_screen=True)
+    dem_web = downsample_dem_for_web(dem, max_terrain_px)
+    populate_auto_scene(pl, dem_web, cases, crs=None,  # crs=None → elevation colormap (no tiles)
+                        route_winds=route_winds, rotor_cache=None, rotor_opacity=rotor_opacity,
+                        intensity_max=intensity_max, metric=metric, vol_floor=vol_floor,
+                        metric_range=metric_range, wind_size_factor=wind_size_factor,
+                        wind_altitude_m=wind_altitude_m)
+    if title:
+        pl.add_text(title, position="upper_right", font_size=9)
+    pl.view_isometric()
+    out = str(out_path)
+    pl.export_html(out)
+    pl.close()
+    return out
+
+
 def _add_domain_box(plotter, terrain, aoi_bounds, color: str = "#10c0ff") -> None:
     """Draw the analysed feature domain (the un-buffered zone the rotor is clipped to) as a thin
     rectangle floating just above the local terrain — so the per-feature sub-domains are visible

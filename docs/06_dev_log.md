@@ -2264,3 +2264,31 @@ and custom coarse topo without a re-pave loop.
 
 **Result.** `ruff check .` clean; `pytest -q` → **123 passed**, one known non-blocking matplotlib
 `tight_layout` warning.
+
+---
+
+## Entry 92 — « Export 3D web » : la vue 3D en HTML interactif autonome  (2026-07-12)
+
+**Ask.** Un viewer 3D des résultats sur le site. Option retenue (A) : exporter depuis l'app une page
+HTML autonome (vtk.js via `pyvista.Plotter.export_html`), plutôt qu'un viewer `.sillage` complet dans
+le navigateur (option B, un mini-projet — différé).
+
+**Engine.** `auto.scene.export_web_html(dem, cases, out, metric=, metric_range=, route_winds=, …)` :
+même scène que l'onglet 3D (blend, couleurs, flèches — via `populate_auto_scene`), MAIS terrain en
+colormap d'altitude (les textures drapées ne survivent pas à l'export vtk.js) et **MNT
+sous-échantillonné** (`downsample_dem_for_web`, ≤ 700 px de côté) : la démo réelle passe de 43,7 →
+**11,6 Mo**. Scène figée : une heure/scénario, une représentation. Deps : `trame`, `trame-vtk`,
+`nest-asyncio2` (base install + collectées dans le spec PyInstaller).
+
+**UI.** Bouton « 🌐 Export 3D web » à côté d'Ouvrir/Sauvegarder (activé avec un résultat) : exporte la
+vue AFFICHÉE (heure, représentation, seuils, opacité, réglages flèches) vers un HTML, nom suggéré dans
+`outputs/`. Curseur d'attente + taille loggée.
+
+**Site.** Bouton « 🌀 Ouvrir la démo 3D interactive » sous le mode d'emploi (lien relatif
+`demo_sillage_3d.html` — héberger le fichier à côté d'`index.html`).
+
+**Bug trouvé au passage (corrigé avant, commit 85caa67).** `load_result` plantait sur les séries AROME
+contenant les placeholders `(t, None, None)` — les `.sillage` sauvés avec une heure de vent nulle
+étaient inrouvrables.
+
+**Result.** 2 tests (downsample + export réel). `pytest -q` → **125 passed**, ruff clean.
