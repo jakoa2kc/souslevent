@@ -83,8 +83,10 @@
   section{padding:clamp(56px,9vw,104px) 0}
   .kicker{display:flex;align-items:baseline;gap:.8rem;margin-bottom:1.6rem}
   .kicker h2{font-size:clamp(1.7rem,3.6vw,2.5rem);font-weight:780;letter-spacing:-.02em}
-  .intro{font-size:clamp(1.05rem,2vw,1.22rem);color:var(--muted);max-width:60ch}
+  .intro{font-size:clamp(1.05rem,2vw,1.22rem);color:var(--muted)}
   #principe .intro{text-align:justify}
+  /* same breathing room above these section titles as the "limites" section provides visually */
+  #principe .kicker,#mode-demploi .kicker,#ressources .kicker{margin-top:clamp(20px,4vw,48px)}
   .intro b{color:var(--ink);font-weight:640}
 
   .passes{display:grid;grid-template-columns:1fr 1fr;gap:1.1rem;margin-top:2.4rem}
