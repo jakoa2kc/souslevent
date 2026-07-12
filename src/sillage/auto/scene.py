@@ -115,25 +115,20 @@ def export_web_html(dem, cases, out_path, *, metric: str = "rotor", vol_floor: f
 
 # Injected into the exported HTML: map-coherent navigation, same feel as the app's 3D tab.
 # The trame-vtk bundle exposes the render window as ``global.renderWindow`` (set inside its load
-# function), which gives us the camera + interactor style after the scene is synchronised:
-#   - right-drag = PAN (the style's built-in dolly is remapped; zoom stays on the wheel);
-#   - rotation locked to azimuth/elevation: view-up reset to +Z (no roll) and elevation clamped
-#     (5°–85°) so the map can never flip over or roll sideways.
+# function). Everything hooks the INTERACTOR events, not the interactor style: the stock
+# vtkInteractorStyleTrackballCamera has no right-button handler to remap, the synchroniser may
+# swap styles after load, and vtk.js freezes its publicAPI objects (property writes silently
+# no-op) — the interactor itself persists and its ``onXxx`` subscriptions do work:
+#   - right-drag = PAN, self-implemented as a camera-plane translation of the poked renderer's
+#     camera (zoom stays on the wheel; the context menu is suppressed);
+#   - rotation locked to azimuth/elevation: on every non-pan mouse move the view-up is reset to
+#     +Z (no roll) and the elevation clamped (5°–85°) so the map can never flip over or roll.
+# ``window.__slvNavDebug`` exposes counters/last-error for field debugging from the console.
 _WEB_NAV_JS = """
-(function nav(){
-  var g = (window.global && window.global.renderWindow) || window.renderWindow;
-  if (!g || !g.getRenderers || !g.getRenderers().length) { return setTimeout(nav, 250); }
-  var ia = g.getInteractor && g.getInteractor();
-  var st = ia && ia.getInteractorStyle && ia.getInteractorStyle();
-  var ren = g.getRenderers()[0];
-  var cam = ren && ren.getActiveCamera && ren.getActiveCamera();
-  if (!st || !cam) { return setTimeout(nav, 250); }
-  if (st.startPan && st.endPan) {           /* right-drag -> pan (wheel keeps the zoom) */
-    st.handleRightButtonPress = function () { st.startPan(); };
-    st.handleRightButtonRelease = function () { st.endPan(); };
-  }
+(function(){
   var LO = 5 * Math.PI / 180, HI = 85 * Math.PI / 180;
-  function clamp() {                         /* azimuth free; elevation clamped; no roll */
+  function rw() { return (window.global && window.global.renderWindow) || window.renderWindow; }
+  function clampCam(cam) {                    /* azimuth free; elevation clamped; no roll */
     var fp = cam.getFocalPoint(), p = cam.getPosition();
     var dx = p[0]-fp[0], dy = p[1]-fp[1], dz = p[2]-fp[2];
     var r = Math.sqrt(dx*dx + dy*dy + dz*dz) || 1;
@@ -145,8 +140,75 @@ _WEB_NAV_JS = """
     }
     cam.setViewUp(0, 0, 1);
   }
-  if (st.onInteractionEvent) { st.onInteractionEvent(clamp); }
-  clamp();
+  function clampAll() {
+    var g = rw(); if (!g || !g.getRenderers) { return; }
+    var rens = g.getRenderers();
+    for (var i = 0; i < rens.length; i++) { clampCam(rens[i].getActiveCamera()); }
+  }
+  /* Self-contained right-drag PAN at the INTERACTOR level (the stock TrackballCamera style has no
+     right-button handler at all, and the scene synchroniser may swap styles after load — the
+     interactor persists). Camera-plane translation of the poked renderer's camera. */
+  function norm(v) { var n = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0]/n, v[1]/n, v[2]/n]; }
+  function cross(a, b) {
+    return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+  }
+  var panRen = null, lastXY = null;
+  function panMove(cd) {
+    if (!panRen || !lastXY || !cd || !cd.position) { return; }
+    var cam = panRen.getActiveCamera();
+    var dx = cd.position.x - lastXY[0], dy = cd.position.y - lastXY[1];
+    lastXY = [cd.position.x, cd.position.y];
+    var fp = cam.getFocalPoint(), p = cam.getPosition();
+    var dir = [fp[0]-p[0], fp[1]-p[1], fp[2]-p[2]];
+    var dist = Math.hypot(dir[0], dir[1], dir[2]) || 1;
+    var g = rw();
+    var size = (g.getViews && g.getViews()[0] && g.getViews()[0].getSize)
+               ? g.getViews()[0].getSize() : [1000, 800];
+    var scale = 2 * dist * Math.tan((cam.getViewAngle() * Math.PI / 180) / 2) / (size[1] || 800);
+    var right = norm(cross(dir, cam.getViewUp()));
+    var upv = norm(cross(right, dir));
+    var mx = -dx * scale, my = -dy * scale;   /* drag right/up -> map follows the cursor */
+    var move = [right[0]*mx + upv[0]*my, right[1]*mx + upv[1]*my, right[2]*mx + upv[2]*my];
+    dbg.panmove++;
+    cam.setFocalPoint(fp[0]+move[0], fp[1]+move[1], fp[2]+move[2]);
+    cam.setPosition(p[0]+move[0], p[1]+move[1], p[2]+move[2]);
+    g.render();
+  }
+  var patchedIa = null;   /* vtk.js freezes its publicAPI objects: track state HERE, not on them */
+  var dbg = { patched: 0, rbp: 0, panmove: 0, clamp: 0, lastErr: null };
+  window.__slvNavDebug = dbg;   /* field-debuggable from the browser console */
+  function patch() {
+    try {
+      var g = rw(); if (!g) { return; }
+      var ia = g.getInteractor && g.getInteractor(); if (!ia || ia === patchedIa) { return; }
+      if (!ia.onMouseMove || !ia.onRightButtonPress) { return; }
+      patchedIa = ia;
+      dbg.patched++;
+      ia.onRightButtonPress(function (cd) {
+        try {
+          var pos = cd && cd.position;
+          if (!pos) { return; }
+          dbg.rbp++;
+          lastXY = [pos.x, pos.y];
+          panRen = (cd.pokedRenderer)
+                   || (ia.findPokedRenderer && ia.findPokedRenderer(pos.x, pos.y))
+                   || g.getRenderers()[g.getRenderers().length - 1];
+        } catch (e) { dbg.lastErr = "rbp: " + e; }
+      });
+      ia.onRightButtonRelease(function () { panRen = null; lastXY = null; });
+      ia.onMouseMove(function (cd) {
+        try {
+          if (panRen) { panMove(cd); } else { dbg.clamp++; clampAll(); }
+        } catch (e) { dbg.lastErr = "move: " + e; }
+      });
+      if (ia.onEndMouseWheel) { ia.onEndMouseWheel(clampAll); }
+      var cont = ia.getContainer && ia.getContainer();
+      if (cont) { cont.addEventListener('contextmenu', function (e) { e.preventDefault(); }); }
+      clampAll();
+    } catch (e) { dbg.lastErr = "patch: " + e; }
+  }
+  setInterval(patch, 500);
+  patch();
 })();
 """
 
