@@ -248,8 +248,13 @@ def load_result(zip_path, dest_dir) -> LoadedResult:
     hour_labels = {int(h): lbl for h, lbl in manifest.get("hour_labels", {}).items()}
     segments = [[(float(p[0]), float(p[1])) for p in seg]
                 for seg in manifest.get("config", {}).get("route_segments", [])]
+    def _num(v):
+        # AROME series keep (time, None, None) placeholders for all-null hours (hour alignment);
+        # they round-trip as JSON null and must NOT be coerced — float(None) broke reopening.
+        return None if v is None else float(v)
+
     route_cells = [(float(c[0]), float(c[1]),
-                    [(s[0], float(s[1]), float(s[2])) for s in c[2]])
+                    [(s[0], _num(s[1]), _num(s[2])) for s in c[2]])
                    for c in manifest.get("route_cells", [])]
     return LoadedResult(result=result, hours=result.hours, hour_labels=hour_labels,
                         route_segments=segments, route_cells=route_cells,

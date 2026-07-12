@@ -728,11 +728,14 @@ def test_store_save_load_roundtrip(tmp_path):
 
     save_tmp = tmp_path / "save_tmp"
     out = save_result(tmp_path / "res", result, cfg=cfg,
-                      hour_labels={9: "ven 9h", 10: "ven 10h"}, temp_dir=save_tmp)
+                      hour_labels={9: "ven 9h", 10: "ven 10h"}, temp_dir=save_tmp,
+                      # AROME null-hour placeholders (time, None, None) must survive the round-trip
+                      route_cells=[(44.0, 6.0, [("t0", 5.0, 270.0), ("t1", None, None)])])
     assert out.endswith(".sillage")
     assert save_tmp.exists() and not any(save_tmp.iterdir())
 
     loaded = load_result(out, tmp_path / "open")
+    assert loaded.route_cells[0][2][1] == ("t1", None, None)  # placeholder preserved, no crash
     assert [c.hour for c in loaded.result.cases] == [9, 10]
     assert loaded.hours == [9, 10]
     assert loaded.hour_labels[9] == "ven 9h"
