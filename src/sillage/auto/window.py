@@ -887,11 +887,14 @@ class AutoWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Export 3D web en cours…")
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
+            basemap = (self.render_basemap_combo.currentText()
+                       if hasattr(self, "render_basemap_combo") else "IGN plan")
             out = export_web_html(
                 self._dem, self._result.cases_for_hour(hour), path,
                 metric=self._metric, metric_range=self._native_metric_range(),
                 route_winds=self._route_winds_utm(hour), rotor_opacity=self._opacity,
                 wind_size_factor=self._wind_size_factor, wind_altitude_m=self._wind_altitude_m,
+                crs=self._dem.crs, basemap_source=basemap,  # baked into vertex colours for the web
                 title=f"SousLeVent — {label}")
         except Exception as exc:  # pragma: no cover - surfaced to the UI
             QtWidgets.QMessageBox.critical(self, "Export 3D web", str(exc))

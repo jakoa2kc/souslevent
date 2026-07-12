@@ -342,6 +342,31 @@ def test_downsample_dem_for_web_keeps_bounds():
     assert small.resolution_m == dem.resolution_m * 3
 
 
+def test_bake_basemap_rgb_samples_the_warped_image(monkeypatch):
+    # Web export: the basemap is baked into per-point colours (textures don't survive vtk.js).
+    pytest.importorskip("pyvista")
+    from sillage.viz import volume3d as v3
+
+    dem = _dem(np.zeros((10, 10)), res_m=100.0)
+    terrain = v3._terrain_mesh(dem)
+    img = np.zeros((4, 4, 3), dtype=np.uint8)
+    img[:, :2] = (255, 0, 0)     # west half red
+    img[:, 2:] = (0, 0, 255)     # east half blue
+    monkeypatch.setattr(v3, "_fetch_warped_basemap", lambda *a, **k: img)
+
+    assert v3.bake_basemap_rgb(terrain, dem.crs, "IGN plan")
+    rgb = np.asarray(terrain.point_data["web_rgb"])
+    pts = np.asarray(terrain.points)
+    x0, x1 = terrain.bounds[0], terrain.bounds[1]
+    west = pts[:, 0] < x0 + 0.25 * (x1 - x0)      # outer quarters: unambiguous integer sampling
+    east = pts[:, 0] > x0 + 0.75 * (x1 - x0)
+    assert (rgb[west][:, 0] == 255).all() and (rgb[west][:, 2] == 0).all()   # west points red
+    assert (rgb[east][:, 2] == 255).all() and (rgb[east][:, 0] == 0).all()   # east points blue
+
+    monkeypatch.setattr(v3, "_fetch_warped_basemap", lambda *a, **k: None)   # offline → False
+    assert not v3.bake_basemap_rgb(terrain, dem.crs, "IGN plan")
+
+
 def test_export_web_html_writes_standalone_page(tmp_path):
     # « Export 3D web » (option A): a small terrain-only scene must produce a self-contained
     # interactive HTML (vtk.js) of a sane size — the plumbing behind the app button.

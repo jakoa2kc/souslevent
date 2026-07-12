@@ -78,24 +78,33 @@ def downsample_dem_for_web(dem, max_px: int = 700):
 def export_web_html(dem, cases, out_path, *, metric: str = "rotor", vol_floor: float = 0.20,
                     metric_range=None, route_winds=None, rotor_opacity: float = 0.5,
                     intensity_max=None, wind_size_factor: float = 1.0,
-                    wind_altitude_m: float = 20.0, max_terrain_px: int = 700,
-                    title: str = "") -> str:
+                    wind_altitude_m: float = 20.0, max_terrain_px: int = 900,
+                    crs=None, basemap_source: str = "IGN plan", title: str = "") -> str:
     """Export ONE hour/scenario of an auto result as a **standalone interactive HTML** (vtk.js via
     ``pyvista.Plotter.export_html``) — openable in any browser, nothing to install, shareable on a
-    website. The scene is the same as the app's 3D tab (same blend/colours/arrows), except the
-    terrain uses the elevation colormap (basemap textures don't survive the vtk.js export) and is
-    downsampled to keep the file size web-friendly. Frozen scene: one hour, one representation."""
+    website. Same scene as the app's 3D tab (blend/colours/arrows); the basemap is **baked into the
+    terrain vertex colours** when ``crs`` is given (vtk.js exports don't carry textures; falls back
+    to the elevation colormap offline), and the terrain is downsampled to stay web-friendly.
+    Frozen scene: one hour, one representation. Navigation: left-drag = rotate, Shift+left or
+    middle-drag = pan, wheel/right-drag = zoom (vtk.js standard bindings)."""
     import pyvista as pv
+
+    from ..viz import volume3d as v3
 
     pl = pv.Plotter(off_screen=True)
     dem_web = downsample_dem_for_web(dem, max_terrain_px)
-    populate_auto_scene(pl, dem_web, cases, crs=None,  # crs=None → elevation colormap (no tiles)
+    terrain = v3._terrain_mesh(dem_web)
+    if crs is not None:  # bake the basemap into per-point colours (offline → elevation colormap)
+        v3.bake_basemap_rgb(terrain, crs, basemap_source, zoom_boost=1)
+    populate_auto_scene(pl, dem_web, cases, crs=None,  # no texture drape: web_rgb or elevation
                         route_winds=route_winds, rotor_cache=None, rotor_opacity=rotor_opacity,
                         intensity_max=intensity_max, metric=metric, vol_floor=vol_floor,
                         metric_range=metric_range, wind_size_factor=wind_size_factor,
-                        wind_altitude_m=wind_altitude_m)
+                        wind_altitude_m=wind_altitude_m, terrain_cache={id(dem_web): terrain})
     if title:
         pl.add_text(title, position="upper_right", font_size=9)
+    pl.add_text("glisser = rotation (azimut/élévation) · clic droit ou molette-clic = translation · "
+                "molette = zoom", position="lower_right", font_size=7)
     pl.view_isometric()
     out = str(out_path)
     pl.export_html(out)
@@ -104,12 +113,50 @@ def export_web_html(dem, cases, out_path, *, metric: str = "rotor", vol_floor: f
     return out
 
 
+# Injected into the exported HTML: map-coherent navigation, same feel as the app's 3D tab.
+# The trame-vtk bundle exposes the render window as ``global.renderWindow`` (set inside its load
+# function), which gives us the camera + interactor style after the scene is synchronised:
+#   - right-drag = PAN (the style's built-in dolly is remapped; zoom stays on the wheel);
+#   - rotation locked to azimuth/elevation: view-up reset to +Z (no roll) and elevation clamped
+#     (5°–85°) so the map can never flip over or roll sideways.
+_WEB_NAV_JS = """
+(function nav(){
+  var g = (window.global && window.global.renderWindow) || window.renderWindow;
+  if (!g || !g.getRenderers || !g.getRenderers().length) { return setTimeout(nav, 250); }
+  var ia = g.getInteractor && g.getInteractor();
+  var st = ia && ia.getInteractorStyle && ia.getInteractorStyle();
+  var ren = g.getRenderers()[0];
+  var cam = ren && ren.getActiveCamera && ren.getActiveCamera();
+  if (!st || !cam) { return setTimeout(nav, 250); }
+  if (st.startPan && st.endPan) {           /* right-drag -> pan (wheel keeps the zoom) */
+    st.handleRightButtonPress = function () { st.startPan(); };
+    st.handleRightButtonRelease = function () { st.endPan(); };
+  }
+  var LO = 5 * Math.PI / 180, HI = 85 * Math.PI / 180;
+  function clamp() {                         /* azimuth free; elevation clamped; no roll */
+    var fp = cam.getFocalPoint(), p = cam.getPosition();
+    var dx = p[0]-fp[0], dy = p[1]-fp[1], dz = p[2]-fp[2];
+    var r = Math.sqrt(dx*dx + dy*dy + dz*dz) || 1;
+    var el = Math.asin(Math.max(-1, Math.min(1, dz / r)));
+    if (el < LO || el > HI) {
+      var el2 = Math.min(HI, Math.max(LO, el));
+      var az = Math.atan2(dy, dx), c = Math.cos(el2);
+      cam.setPosition(fp[0] + r*c*Math.cos(az), fp[1] + r*c*Math.sin(az), fp[2] + r*Math.sin(el2));
+    }
+    cam.setViewUp(0, 0, 1);
+  }
+  if (st.onInteractionEvent) { st.onInteractionEvent(clamp); }
+  clamp();
+})();
+"""
+
+
 def _fix_web_export_bootstrap(path) -> None:
-    """Work around a load race in trame-vtk's standalone-HTML template: the final classic <script>
-    calls ``OfflineLocalView.load(...)`` via ``setTimeout(…, 0)``, but ``OfflineLocalView`` is only
-    defined by the (deferred) ``<script type="module">`` vtk.js bundle — so the page stays stuck on
-    the vtk.js drop-file splash. Replace the one-shot call with a ready-wait loop. No-op if the
-    template changes (fixed upstream)."""
+    """Post-process trame-vtk's standalone HTML: (1) work around the template's load race — the
+    final classic <script> calls ``OfflineLocalView.load(...)`` before the deferred module that
+    defines it has run, leaving the page stuck on the vtk.js drop-file splash — by replacing the
+    one-shot call with a ready-wait loop; (2) inject map-coherent navigation (``_WEB_NAV_JS``:
+    right-drag pan + azimuth/elevation-locked rotation). No-op if the template changes upstream."""
     from pathlib import Path
 
     p = Path(path)
@@ -119,7 +166,8 @@ def _fix_web_export_bootstrap(path) -> None:
         return
     ready_wait = ("(function boot(){ if (window.OfflineLocalView) { "
                   "OfflineLocalView.load(container, { base64Str }); } "
-                  "else { setTimeout(boot, 100); } })();")
+                  "else { setTimeout(boot, 100); } })();"
+                  + _WEB_NAV_JS)
     p.write_text(html.replace(racy, ready_wait), encoding="utf-8")
 
 
@@ -166,9 +214,13 @@ def populate_auto_scene(plotter, dem, cases, crs=None, basemap_source: str = "IG
     if not (crs is not None
             and v3._drape_basemap(plotter, terrain, crs, basemap_source, basemap_zoom_boost,
                                   texture_cache=texture_cache)):
-        terrain["elevation_m"] = terrain.points[:, 2]
-        plotter.add_mesh(terrain, scalars="elevation_m", cmap="gist_earth",
-                         show_scalar_bar=False, reset_camera=False)
+        if "web_rgb" in terrain.point_data:  # web export: basemap baked into vertex colours
+            plotter.add_mesh(terrain, scalars="web_rgb", rgb=True,
+                             show_scalar_bar=False, reset_camera=False)
+        else:
+            terrain["elevation_m"] = terrain.points[:, 2]
+            plotter.add_mesh(terrain, scalars="elevation_m", cmap="gist_earth",
+                             show_scalar_bar=False, reset_camera=False)
 
     # Each space point is drawn by ONE sector (its nearest centre) so overlapping sectors don't
     # alpha-stack; but the coloured value is a **distance-weighted average across all overlapping

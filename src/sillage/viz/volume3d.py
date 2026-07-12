@@ -74,57 +74,14 @@ def _drape_basemap(plotter, terrain, crs, source: str, zoom_boost: int = 0,
     try:
         import pyvista as pv
 
-        from .map2d import BASEMAP_SOURCES
-
-        if source not in BASEMAP_SOURCES:
-            return False
         b = terrain.bounds
         xmin, xmax, ymin, ymax = b[0], b[1], b[2], b[3]
         key = (round(xmin), round(ymin), round(xmax), round(ymax), source, int(zoom_boost))
         tex = texture_cache.get(key) if texture_cache is not None else None
         if tex is None:
-            from rasterio.crs import CRS as RCRS
-            from rasterio.enums import Resampling
-            from rasterio.transform import from_bounds
-            from rasterio.warp import reproject
-            from rasterio.warp import transform as warp_xy
-
-            from .map2d import import_contextily
-
-            cx = import_contextily()
-            dst_crs = RCRS.from_user_input(crs)
-            lons, lats = warp_xy(dst_crs, RCRS.from_epsg(4326),
-                                 [xmin, xmin, xmax, xmax], [ymin, ymax, ymin, ymax])
-            w, e = min(lons), max(lons)
-            s, n = min(lats), max(lats)
-            family, layer = BASEMAP_SOURCES[source]
-            prov = getattr(cx.providers, family)
-            if layer is not None:
-                prov = prov[layer]
-            zoom = "auto"
-            if zoom_boost:  # sharper tiles for lee detail (capped to the provider max)
-                try:
-                    from contextily.tile import _calculate_zoom
-
-                    zmax = int(prov.get("max_zoom", 19)) if hasattr(prov, "get") else 19
-                    zoom = min(_calculate_zoom(w, s, e, n) + int(zoom_boost), zmax)
-                except Exception:
-                    zoom = "auto"
-            img, ext3857 = cx.bounds2img(w, s, e, n, zoom=zoom, source=prov, ll=True)
-            # Keep the tile mosaic north-up (row 0 = north): texture_map_to_plane maps array row 0
-            # to the north (point_v) edge, so NO vertical flip (flipping renders it upside down).
-            img = np.ascontiguousarray(img[:, :, :3])
-            h, ww = img.shape[:2]
-            src_transform = from_bounds(ext3857[0], ext3857[2], ext3857[1], ext3857[3], ww, h)
-            dst_transform = from_bounds(xmin, ymin, xmax, ymax, ww, h)
-            warped = np.zeros((h, ww, 3), dtype=np.uint8)
-            for band in range(3):
-                reproject(
-                    img[:, :, band], warped[:, :, band],
-                    src_transform=src_transform, src_crs=RCRS.from_epsg(3857),
-                    dst_transform=dst_transform, dst_crs=dst_crs,
-                    resampling=Resampling.bilinear,
-                )
+            warped = _fetch_warped_basemap(xmin, xmax, ymin, ymax, crs, source, zoom_boost)
+            if warped is None:
+                return False
             tex = pv.numpy_to_texture(np.ascontiguousarray(warped))
             if texture_cache is not None:
                 texture_cache[key] = tex
@@ -135,6 +92,79 @@ def _drape_basemap(plotter, terrain, crs, source: str, zoom_boost: int = 0,
         return True
     except Exception:
         return False
+
+
+def _fetch_warped_basemap(xmin, xmax, ymin, ymax, crs, source: str, zoom_boost: int = 0):
+    """The basemap tiles for a terrain extent, reprojected to the terrain CRS: a north-up
+    ``(h, w, 3)`` uint8 array covering exactly (xmin..xmax, ymin..ymax). ``None`` on failure
+    (offline, unknown source, …). Shared by the texture drape and the web-export vertex bake."""
+    try:
+        from rasterio.crs import CRS as RCRS
+        from rasterio.enums import Resampling
+        from rasterio.transform import from_bounds
+        from rasterio.warp import reproject
+        from rasterio.warp import transform as warp_xy
+
+        from .map2d import BASEMAP_SOURCES, import_contextily
+
+        if source not in BASEMAP_SOURCES:
+            return None
+        cx = import_contextily()
+        dst_crs = RCRS.from_user_input(crs)
+        lons, lats = warp_xy(dst_crs, RCRS.from_epsg(4326),
+                             [xmin, xmin, xmax, xmax], [ymin, ymax, ymin, ymax])
+        w, e = min(lons), max(lons)
+        s, n = min(lats), max(lats)
+        family, layer = BASEMAP_SOURCES[source]
+        prov = getattr(cx.providers, family)
+        if layer is not None:
+            prov = prov[layer]
+        zoom = "auto"
+        if zoom_boost:  # sharper tiles for lee detail (capped to the provider max)
+            try:
+                from contextily.tile import _calculate_zoom
+
+                zmax = int(prov.get("max_zoom", 19)) if hasattr(prov, "get") else 19
+                zoom = min(_calculate_zoom(w, s, e, n) + int(zoom_boost), zmax)
+            except Exception:
+                zoom = "auto"
+        img, ext3857 = cx.bounds2img(w, s, e, n, zoom=zoom, source=prov, ll=True)
+        # Keep the tile mosaic north-up (row 0 = north): texture_map_to_plane maps array row 0
+        # to the north (point_v) edge, so NO vertical flip (flipping renders it upside down).
+        img = np.ascontiguousarray(img[:, :, :3])
+        h, ww = img.shape[:2]
+        src_transform = from_bounds(ext3857[0], ext3857[2], ext3857[1], ext3857[3], ww, h)
+        dst_transform = from_bounds(xmin, ymin, xmax, ymax, ww, h)
+        warped = np.zeros((h, ww, 3), dtype=np.uint8)
+        for band in range(3):
+            reproject(
+                img[:, :, band], warped[:, :, band],
+                src_transform=src_transform, src_crs=RCRS.from_epsg(3857),
+                dst_transform=dst_transform, dst_crs=dst_crs,
+                resampling=Resampling.bilinear,
+            )
+        return warped
+    except Exception:
+        return None
+
+
+def bake_basemap_rgb(terrain, crs, source: str = "IGN plan", zoom_boost: int = 0) -> bool:
+    """Bake the basemap into per-POINT colours (``web_rgb``) on the terrain mesh.
+
+    vtk.js scene exports don't carry vtkTexture, so the web export can't texture-drape; direct
+    colour arrays DO survive, so we sample the warped basemap at every terrain point instead.
+    Resolution = the terrain grid (fine enough for the downsampled web terrain). Returns success."""
+    b = terrain.bounds
+    xmin, xmax, ymin, ymax = b[0], b[1], b[2], b[3]
+    warped = _fetch_warped_basemap(xmin, xmax, ymin, ymax, crs, source, zoom_boost)
+    if warped is None:
+        return False
+    h, w = warped.shape[:2]
+    pts = np.asarray(terrain.points)
+    cols = np.clip(((pts[:, 0] - xmin) / max(xmax - xmin, 1e-9) * (w - 1)), 0, w - 1).astype(int)
+    rows = np.clip(((ymax - pts[:, 1]) / max(ymax - ymin, 1e-9) * (h - 1)), 0, h - 1).astype(int)
+    terrain.point_data["web_rgb"] = warped[rows, cols]
+    return True
 
 
 def _terrain_mesh(dem, lift: float = 0.0):
