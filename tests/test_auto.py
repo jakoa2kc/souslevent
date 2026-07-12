@@ -354,8 +354,12 @@ def test_export_web_html_writes_standalone_page(tmp_path):
                           title="test export")
     p = Path(out)
     assert p.exists() and p.stat().st_size > 200_000       # vtk.js runtime + scene embedded
-    head = p.read_text(encoding="utf-8", errors="ignore")[:2000].lower()
-    assert "<html" in head
+    html = p.read_text(encoding="utf-8", errors="ignore")
+    assert "<html" in html[:2000].lower()
+    # trame-vtk template race (viewer stuck on the drop-file splash): the one-shot bootstrap must
+    # have been replaced by the ready-wait loop
+    assert "setTimeout(() => OfflineLocalView.load" not in html
+    assert "window.OfflineLocalView" in html
 
 
 def test_dedup_zones_drops_cross_segment_duplicates():

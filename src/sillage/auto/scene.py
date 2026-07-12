@@ -100,7 +100,27 @@ def export_web_html(dem, cases, out_path, *, metric: str = "rotor", vol_floor: f
     out = str(out_path)
     pl.export_html(out)
     pl.close()
+    _fix_web_export_bootstrap(out)
     return out
+
+
+def _fix_web_export_bootstrap(path) -> None:
+    """Work around a load race in trame-vtk's standalone-HTML template: the final classic <script>
+    calls ``OfflineLocalView.load(...)`` via ``setTimeout(…, 0)``, but ``OfflineLocalView`` is only
+    defined by the (deferred) ``<script type="module">`` vtk.js bundle — so the page stays stuck on
+    the vtk.js drop-file splash. Replace the one-shot call with a ready-wait loop. No-op if the
+    template changes (fixed upstream)."""
+    from pathlib import Path
+
+    p = Path(path)
+    html = p.read_text(encoding="utf-8")
+    racy = "setTimeout(() => OfflineLocalView.load(container, { base64Str }),0);"
+    if racy not in html:
+        return
+    ready_wait = ("(function boot(){ if (window.OfflineLocalView) { "
+                  "OfflineLocalView.load(container, { base64Str }); } "
+                  "else { setTimeout(boot, 100); } })();")
+    p.write_text(html.replace(racy, ready_wait), encoding="utf-8")
 
 
 def _add_domain_box(plotter, terrain, aoi_bounds, color: str = "#10c0ff") -> None:
